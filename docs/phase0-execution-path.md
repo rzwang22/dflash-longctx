@@ -38,12 +38,15 @@ At the pinned draft revision, the model `config.json` contains:
 "auto_map": {"AutoModel": "dflash.DFlashDraftModel"}
 ```
 
-Consequently, Transformers downloads the small custom-code files from the
-model repository, places them in its dynamic-module cache, and imports
-`DFlashDraftModel` from that cached `dflash.py`. It does **not** import this
-repository's `dflash/model.py`. The exact on-disk cache path depends on the
-host's Hugging Face cache settings; the smoke test records it with
-`inspect.getfile`.
+Consequently, when given the Hub ID, Transformers downloads the small
+custom-code files from the model repository, places them in its dynamic-module
+cache, and imports `DFlashDraftModel` from that cached `dflash.py`. When an
+explicit verified local model path is supplied, the smoke test instead uses
+`local_files_only=True`, checks the directory's Hugging Face download metadata,
+and lets Transformers load the custom code from that local source. Neither mode
+imports this repository's `dflash/model.py`. The exact executed module path
+depends on the host's Transformers dynamic-module handling; the smoke test
+records it with `inspect.getfile`.
 
 The target config declares native architecture `Qwen3ForCausalLM` and has no
 `auto_map`. Therefore `AutoModelForCausalLM` uses the Qwen3 implementation from

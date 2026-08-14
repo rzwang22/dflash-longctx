@@ -20,7 +20,7 @@
     "error"
   ],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "1.1"},
     "status": {"enum": ["started", "ok", "error"]},
     "timestamp_utc": {"type": "string", "format": "date-time"},
     "repository": {"$ref": "#/$defs/repository"},
@@ -114,8 +114,10 @@
       "required": [
         "target_model",
         "target_revision",
+        "target_model_path",
         "draft_model",
         "draft_revision",
+        "draft_model_path",
         "device",
         "dtype",
         "batch_size",
@@ -130,8 +132,10 @@
       "properties": {
         "target_model": {"type": "string"},
         "target_revision": {"type": "string"},
+        "target_model_path": {"type": ["string", "null"]},
         "draft_model": {"type": "string"},
         "draft_revision": {"type": "string"},
+        "draft_model_path": {"type": ["string", "null"]},
         "device": {"type": "string"},
         "dtype": {"enum": ["auto", "bfloat16", "float16", "float32"]},
         "batch_size": {"const": 1},
@@ -147,11 +151,41 @@
     "model": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "requested_revision", "resolved_revision", "class_name", "python_file"],
+      "required": [
+        "id",
+        "requested_revision",
+        "resolved_revision",
+        "load_source",
+        "source_kind",
+        "local_path",
+        "local_metadata_revisions",
+        "revision_verified",
+        "revision_verification_source",
+        "source_files_sha256",
+        "class_name",
+        "python_file"
+      ],
       "properties": {
         "id": {"type": "string"},
         "requested_revision": {"type": "string"},
         "resolved_revision": {"type": ["string", "null"]},
+        "load_source": {"type": "string"},
+        "source_kind": {"enum": ["hub", "local_path"]},
+        "local_path": {"type": ["string", "null"]},
+        "local_metadata_revisions": {
+          "type": "array",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        },
+        "revision_verified": {"type": "boolean"},
+        "revision_verification_source": {"type": ["string", "null"]},
+        "source_files_sha256": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
         "class_name": {"type": ["string", "null"]},
         "python_file": {"type": ["string", "null"]}
       }

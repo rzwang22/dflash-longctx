@@ -79,8 +79,10 @@ python scripts/collect_environment.py \
   --output outputs/phase0-smoke/preflight-environment.json \
   --target-model Qwen/Qwen3-8B \
   --target-revision b968826d9c46dd6066d109eabc6255188de91218 \
+  --target-model-path /mnt/sevenT/wrz_data/models/Qwen3-8B-b968826d \
   --draft-model z-lab/Qwen3-8B-DFlash-b16 \
   --draft-revision 9b41424b7109f9c5413454f481b09a82b85333f4 \
+  --draft-model-path /mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16 \
   --device cuda:0 \
   --dtype bfloat16 \
   --max-new-tokens 32
@@ -92,18 +94,36 @@ It does not load a tokenizer or model.
 
 ## 4. Run the single-GPU smoke test
 
+For the H100 server's verified local downloads, use the canonical Hub IDs and
+revisions for provenance while loading from explicit local directories:
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 python experiments/phase0_smoke.py \
   --target-model Qwen/Qwen3-8B \
   --target-revision b968826d9c46dd6066d109eabc6255188de91218 \
+  --target-model-path /mnt/sevenT/wrz_data/models/Qwen3-8B-b968826d \
   --draft-model z-lab/Qwen3-8B-DFlash-b16 \
   --draft-revision 9b41424b7109f9c5413454f481b09a82b85333f4 \
+  --draft-model-path /mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16 \
   --device cuda:0 \
   --dtype bfloat16 \
   --max-new-tokens 32 \
   --prompt "How many positive whole-number divisors does 196 have?" \
   --output-dir outputs/phase0-smoke
 ```
+
+With `--target-model-path` and `--draft-model-path`, all three Transformers
+loads use `local_files_only=True`; no Hub request or silent network fallback is
+allowed. The script reads commit IDs from each directory's
+`.cache/huggingface/download/*.metadata`, requires one unique revision matching
+the corresponding canonical revision, and records SHA-256 hashes for available
+configuration, tokenizer, index, and custom-code files. Model weight files are
+not copied into the repository.
+
+If Hub access is reliable, omit only the two `--*-model-path` arguments to use
+the original Hub-loading path. Do not place a filesystem path in
+`--target-model` or `--draft-model`, because those fields are reserved for the
+canonical IDs recorded in results.
 
 The script refuses CPU/MPS fallback and performs its CUDA check before importing
 Transformers or loading model files. Do not run this generation command on a
@@ -119,8 +139,9 @@ different local-code path before the basic remote-code path is known to work.
 The smoke-test output directory contains:
 
 - `result.json`: structured run configuration, requested and resolved model
-  revisions, loaded classes/files, token counts, timing, generated text,
-  acceptance availability, and any error;
+  revisions, local/Hub source kind, revision-verification evidence, selected
+  source-file hashes, loaded classes/files, token counts, timing, generated
+  text, acceptance availability, and any error;
 - `environment.json`: environment snapshot embedded in the result as a
   standalone file;
 - `terminal.log`: mirrored Python stdout/stderr, including explicit failures;
@@ -170,6 +191,18 @@ the immutable revision. For gated/proxied environments, configure the normal
 Hugging Face authentication mechanism outside the repository. Never save a
 token in tracked files or command output. Retry the exact same pinned command
 after fixing connectivity; do not silently replace a model or revision.
+
+If verified local directories are available, use the two explicit
+`--*-model-path` arguments instead. `UV_HTTP_*` variables affect uv package
+installation, not Hugging Face model requests.
+
+### Local model revision cannot be verified
+
+Keep the canonical ID in `--target-model`/`--draft-model`, pass the directory in
+the corresponding `--*-model-path`, and confirm that the directory retains
+`.cache/huggingface/download/*.metadata`. The metadata must resolve to exactly
+the requested immutable commit. A directory name containing a short hash is not
+treated as revision proof.
 
 ### Draft has no `spec_generate`, or custom code is rejected
 

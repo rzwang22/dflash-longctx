@@ -191,8 +191,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--target-model", default=DEFAULT_TARGET_MODEL)
     parser.add_argument("--target-revision", default=DEFAULT_TARGET_REVISION)
+    parser.add_argument("--target-model-path", type=Path, default=None)
     parser.add_argument("--draft-model", default=DEFAULT_DRAFT_MODEL)
     parser.add_argument("--draft-revision", default=DEFAULT_DRAFT_REVISION)
+    parser.add_argument("--draft-model-path", type=Path, default=None)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--max-new-tokens", type=int, default=32)
@@ -216,8 +218,14 @@ def main(argv: list[str] | None = None) -> int:
     run_config = {
         "target_model": args.target_model,
         "target_revision": args.target_revision,
+        "target_model_path": str(args.target_model_path)
+        if args.target_model_path
+        else None,
         "draft_model": args.draft_model,
         "draft_revision": args.draft_revision,
+        "draft_model_path": str(args.draft_model_path)
+        if args.draft_model_path
+        else None,
         "device": args.device,
         "dtype": args.dtype,
         "batch_size": 1,
