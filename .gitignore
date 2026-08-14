@@ -1,3 +1,42 @@
+# Python
 __pycache__/
-cache/
+*.py[cod]
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local datasets, experiment artifacts, and large raw outputs
+cache/
+outputs/
+raw_outputs/
+artifacts/raw/
+profiler/
+
+# Hugging Face caches
+.cache/
+huggingface/
+hf_cache/
+transformers_modules/
+
+# Model weights and checkpoints
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# Secrets and local environment configuration
+.env
+.env.*
+!.env.example
+.hf_token
+token.txt
+
+# Nsight and profiler raw files
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+*.pt.trace.json

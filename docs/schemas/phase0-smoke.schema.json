@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase0-smoke.schema.json",
+  "title": "DFlash Phase 0 smoke-test result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "timestamp_utc",
+    "repository",
+    "command",
+    "configuration",
+    "environment",
+    "models",
+    "code_paths",
+    "generation",
+    "acceptance",
+    "artifacts",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "timestamp_utc": {"type": "string", "format": "date-time"},
+    "repository": {"$ref": "#/$defs/repository"},
+    "command": {"type": "string"},
+    "configuration": {"$ref": "#/$defs/configuration"},
+    "environment": {"type": "object"},
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "draft"],
+      "properties": {
+        "target": {"$ref": "#/$defs/model"},
+        "draft": {"$ref": "#/$defs/model"}
+      }
+    },
+    "code_paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spec_generate_definition_file"],
+      "properties": {
+        "spec_generate_definition_file": {"type": ["string", "null"]}
+      }
+    },
+    "generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt_tokens", "generated_tokens", "elapsed_seconds", "text"],
+      "properties": {
+        "prompt_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "generated_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "elapsed_seconds": {"type": ["number", "null"], "minimum": 0},
+        "text": {"type": ["string", "null"]}
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "lengths", "mean_length", "source", "unavailable_reason"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "lengths": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "array", "items": {"type": "integer", "minimum": 0}}
+          ]
+        },
+        "mean_length": {"type": ["number", "null"], "minimum": 0},
+        "source": {"type": ["string", "null"]},
+        "unavailable_reason": {"type": ["string", "null"]}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result_json", "terminal_log", "environment_json"],
+      "properties": {
+        "result_json": {"type": ["string", "null"]},
+        "terminal_log": {"type": ["string", "null"]},
+        "environment_json": {"type": ["string", "null"]}
+      }
+    },
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "message"],
+          "properties": {
+            "type": {"type": "string"},
+            "message": {"type": "string"}
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "repository": {
+      "type": "object",
+      "required": ["root", "commit_sha", "branch", "dirty"],
+      "properties": {
+        "root": {"type": "string"},
+        "commit_sha": {"type": ["string", "null"]},
+        "branch": {"type": ["string", "null"]},
+        "dirty": {"type": ["boolean", "null"]}
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_model",
+        "target_revision",
+        "draft_model",
+        "draft_revision",
+        "device",
+        "dtype",
+        "batch_size",
+        "temperature",
+        "max_new_tokens",
+        "prompt",
+        "trust_remote_code",
+        "backend",
+        "enable_thinking",
+        "output_dir"
+      ],
+      "properties": {
+        "target_model": {"type": "string"},
+        "target_revision": {"type": "string"},
+        "draft_model": {"type": "string"},
+        "draft_revision": {"type": "string"},
+        "device": {"type": "string"},
+        "dtype": {"enum": ["auto", "bfloat16", "float16", "float32"]},
+        "batch_size": {"const": 1},
+        "temperature": {"const": 0.0},
+        "max_new_tokens": {"type": "integer", "minimum": 1},
+        "prompt": {"type": "string", "minLength": 1},
+        "trust_remote_code": {"const": true},
+        "backend": {"const": "transformers"},
+        "enable_thinking": {"const": false},
+        "output_dir": {"type": "string"}
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "requested_revision", "resolved_revision", "class_name", "python_file"],
+      "properties": {
+        "id": {"type": "string"},
+        "requested_revision": {"type": "string"},
+        "resolved_revision": {"type": ["string", "null"]},
+        "class_name": {"type": ["string", "null"]},
+        "python_file": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
