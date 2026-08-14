@@ -14,6 +14,8 @@ outputs/
 raw_outputs/
 artifacts/raw/
 profiler/
+materialized_models/
+nsight/
 
 # Hugging Face caches
 .cache/

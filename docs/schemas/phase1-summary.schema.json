@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase1-summary.schema.json",
+  "title": "Phase 1A DFlash observability summary",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "timestamp_utc",
+    "command",
+    "repository",
+    "configuration",
+    "generation",
+    "measurements",
+    "instrumentation_overhead",
+    "equivalence",
+    "attention_backend",
+    "artifacts",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "timestamp_utc": {"type": "string", "format": "date-time"},
+    "command": {"type": "string"},
+    "repository": {"type": "object"},
+    "configuration": {
+      "type": "object",
+      "required": [
+        "target_model",
+        "target_revision",
+        "target_model_path",
+        "draft_model",
+        "draft_revision",
+        "draft_model_path",
+        "materialized_draft_path",
+        "device",
+        "dtype",
+        "prompt",
+        "max_new_tokens",
+        "temperature",
+        "batch_size",
+        "warmup_runs",
+        "measurement_runs",
+        "enable_diagnostics",
+        "enable_profiling",
+        "run_mode"
+      ],
+      "properties": {
+        "target_model": {"type": "string"},
+        "target_revision": {"type": "string"},
+        "target_model_path": {"type": ["string", "null"]},
+        "draft_model": {"type": "string"},
+        "draft_revision": {"type": "string"},
+        "draft_model_path": {"type": ["string", "null"]},
+        "materialized_draft_path": {"type": "string"},
+        "device": {"type": "string"},
+        "dtype": {"type": "string"},
+        "prompt": {"type": "string"},
+        "max_new_tokens": {"type": "integer", "minimum": 1},
+        "temperature": {"const": 0.0},
+        "batch_size": {"const": 1},
+        "warmup_runs": {"type": "integer", "minimum": 0},
+        "measurement_runs": {"type": "integer", "minimum": 1},
+        "enable_diagnostics": {"type": "boolean"},
+        "enable_profiling": {"type": "boolean"},
+        "run_mode": {"enum": ["observe", "ab"]}
+      }
+    },
+    "generation": {
+      "type": "object",
+      "required": ["prompt_tokens", "generated_tokens", "output_ids", "text", "stop_reason"],
+      "properties": {
+        "prompt_tokens": {"type": ["integer", "null"]},
+        "generated_tokens": {"type": ["integer", "null"]},
+        "output_ids": {
+          "type": ["array", "null"],
+          "items": {"type": "integer"}
+        },
+        "text": {"type": ["string", "null"]},
+        "stop_reason": {"enum": ["eos", "max_new_tokens", null]}
+      }
+    },
+    "measurements": {"type": "array", "items": {"type": "object"}},
+    "instrumentation_overhead": {"type": ["object", "null"]},
+    "equivalence": {"type": ["object", "null"]},
+    "attention_backend": {"type": ["object", "null"]},
+    "artifacts": {"type": "object"},
+    "error": {"type": ["object", "null"]}
+  }
+}

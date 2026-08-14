@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase1-source-provenance.schema.json",
+  "title": "Phase 1A loaded-source provenance",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "repository_custom_code_commit",
+    "base_model_id",
+    "base_model_revision",
+    "materialized_model_path",
+    "custom_code_sha256",
+    "actual_loaded_module_path",
+    "actual_loaded_module_sha256",
+    "loaded_source_matches_repository",
+    "spec_generate",
+    "original",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "repository_custom_code_commit": {"type": ["string", "null"]},
+    "base_model_id": {"const": "z-lab/Qwen3-8B-DFlash-b16"},
+    "base_model_revision": {"const": "9b41424b7109f9c5413454f481b09a82b85333f4"},
+    "materialized_model_path": {"type": ["string", "null"]},
+    "custom_code_sha256": {"type": ["object", "null"]},
+    "actual_loaded_module_path": {"type": ["string", "null"]},
+    "actual_loaded_module_sha256": {"type": ["string", "null"]},
+    "loaded_source_matches_repository": {"type": ["boolean", "null"]},
+    "spec_generate": {"type": ["object", "null"]},
+    "original": {"type": ["object", "null"]},
+    "error": {"type": ["object", "null"]}
+  }
+}

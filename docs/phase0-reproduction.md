@@ -1,5 +1,11 @@
 # Phase 0 DFlash baseline reproduction
 
+Phase 0 is frozen at GPU-validated commit
+`a2e5e7353f38c443abaf2f2f8170b5b8c5a0b685`, annotated by tag
+`phase0-gpu-validated-h100-a2e5e73`. Phase 1A adds version-controlled custom
+code and opt-in observability without changing this baseline; see
+`docs/phase1-observability.md`.
+
 This procedure creates a single-GPU, Transformers-based Qwen3-8B DFlash smoke
 test. It does not run sparse attention, long-context experiments, or the
 official multi-process benchmark.
@@ -74,15 +80,23 @@ environment/run because it may change attention dispatch.
 
 ## 3. Collect the pre-run environment
 
+Set the two machine-local directories in the shell; do not commit their
+server-specific values:
+
+```bash
+export TARGET_MODEL_DIR="/path/to/Qwen3-8B-b968826d"
+export DRAFT_MODEL_DIR="/path/to/Qwen3-8B-DFlash-b16"
+```
+
 ```bash
 python scripts/collect_environment.py \
   --output outputs/phase0-smoke/preflight-environment.json \
   --target-model Qwen/Qwen3-8B \
   --target-revision b968826d9c46dd6066d109eabc6255188de91218 \
-  --target-model-path /mnt/sevenT/wrz_data/models/Qwen3-8B-b968826d \
+  --target-model-path "$TARGET_MODEL_DIR" \
   --draft-model z-lab/Qwen3-8B-DFlash-b16 \
   --draft-revision 9b41424b7109f9c5413454f481b09a82b85333f4 \
-  --draft-model-path /mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16 \
+  --draft-model-path "$DRAFT_MODEL_DIR" \
   --device cuda:0 \
   --dtype bfloat16 \
   --max-new-tokens 32
@@ -101,10 +115,10 @@ revisions for provenance while loading from explicit local directories:
 CUDA_VISIBLE_DEVICES=0 python experiments/phase0_smoke.py \
   --target-model Qwen/Qwen3-8B \
   --target-revision b968826d9c46dd6066d109eabc6255188de91218 \
-  --target-model-path /mnt/sevenT/wrz_data/models/Qwen3-8B-b968826d \
+  --target-model-path "$TARGET_MODEL_DIR" \
   --draft-model z-lab/Qwen3-8B-DFlash-b16 \
   --draft-revision 9b41424b7109f9c5413454f481b09a82b85333f4 \
-  --draft-model-path /mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16 \
+  --draft-model-path "$DRAFT_MODEL_DIR" \
   --device cuda:0 \
   --dtype bfloat16 \
   --max-new-tokens 32 \

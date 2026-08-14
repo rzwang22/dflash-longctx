@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "model_id": "z-lab/Qwen3-8B-DFlash-b16",
+  "revision": "9b41424b7109f9c5413454f481b09a82b85333f4",
+  "source_url": "https://huggingface.co/z-lab/Qwen3-8B-DFlash-b16/tree/9b41424b7109f9c5413454f481b09a82b85333f4",
+  "license": {
+    "identifier": "MIT",
+    "model_card_declares": "mit",
+    "file": "LICENSE",
+    "sha256": "6fd2aebd899c0b48ea9abb845aef043c6dadff00a6726a10a1bc32db528a5422"
+  },
+  "original_files": {
+    "config.json": {
+      "upstream_sha256": "9834d608c9ca53d5548b415471ae9e8ebc9aab6cedfc2a7af95b6bd097373102",
+      "vendored_sha256": "9834d608c9ca53d5548b415471ae9e8ebc9aab6cedfc2a7af95b6bd097373102",
+      "transformation": null
+    },
+    "dflash.py": {
+      "upstream_sha256": "17ab761ba665a41965b27bdc3a1c6795d1b07b285ec1f0789ad146f2ee9c1cc5",
+      "vendored_sha256": "17ab761ba665a41965b27bdc3a1c6795d1b07b285ec1f0789ad146f2ee9c1cc5",
+      "transformation": null
+    },
+    "modeling_dflash.py": {
+      "upstream_sha256": "d2b61a1fa5d469830c2285b552d75773274943fae5ac66dc2713beddea338528",
+      "vendored_sha256": "d2b61a1fa5d469830c2285b552d75773274943fae5ac66dc2713beddea338528",
+      "transformation": null
+    },
+    "utils.py": {
+      "upstream_sha256": "00b91431932c94b87443d9e2c0cf4d743846bd6c9666c9c736008df7bbd0faf1",
+      "vendored_sha256": "a3c75cc8de132fb8803368d5720b62879a0c63e6860c37af745dd6debbfb367f",
+      "transformation": "Added a final newline; Python source semantics are unchanged."
+    }
+  },
+  "weight_files_not_vendored": {
+    "model.safetensors": {
+      "git_lfs_oid_sha256": "c702878094f38ad5843e6ac40b327720b3147ffbf669a5d9ca1974865ca6c080",
+      "size_bytes": 2097259104
+    }
+  }
+}
