@@ -25,6 +25,7 @@ from .phase1_observability import (
     gpu_memory_snapshot,
     nvtx_range,
     tensor_shape,
+    validate_attention_kv_lengths,
 )
 from .utils import build_target_layer_ids, extract_context_feature, sample
 
@@ -95,6 +96,13 @@ class Qwen3DFlashAttention(nn.Module):
         phase1_attention_records = kwargs.pop("phase1_attention_records", None)
         phase1_round_index = kwargs.pop("phase1_round_index", None)
         phase1_profiling = kwargs.pop("phase1_profiling", False)
+        phase1_attention_timer = kwargs.pop("phase1_attention_timer", None)
+        phase1_attention_timing_pairs = kwargs.pop(
+            "phase1_attention_timing_pairs", None
+        )
+        phase1_context_length_before = kwargs.pop(
+            "phase1_context_length_before", None
+        )
         bsz, q_len = hidden_states.shape[:-1]
         ctx_len = target_hidden.shape[1]
         q = self.q_proj(hidden_states)
@@ -114,51 +122,95 @@ class Qwen3DFlashAttention(nn.Module):
         v = v.transpose(1, 2)
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        cached_context_kv_length = 0
         if past_key_values is not None:
+            cached_context_kv_length = int(
+                past_key_values.get_seq_length(self.layer_idx)
+            )
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             k, v = past_key_values.update(k, v, self.layer_idx, cache_kwargs)
-        if phase1_attention_records is not None:
-            phase1_attention_records.append(
-                {
-                    "round_index": phase1_round_index,
-                    "layer_index": self.layer_idx,
-                    "configured_attention_implementation": self.config._attn_implementation,
-                    "calls_pytorch_sdpa": self.config._attn_implementation == "sdpa",
-                    "dtype": str(q.dtype),
-                    "batch_size": int(bsz),
-                    "query_length": int(q_len),
-                    "injected_context_length": int(ctx_len),
-                    "current_block_kv_length": int(ctx_len + q_len),
-                    "effective_kv_length": int(k.shape[-2]),
-                    "query_head_count": int(self.config.num_attention_heads),
-                    "key_value_head_count": int(self.config.num_key_value_heads),
-                    "head_dimension": int(self.head_dim),
-                    "query_shape": tensor_shape(q),
-                    "key_shape": tensor_shape(k),
-                    "value_shape": tensor_shape(v),
-                    "theoretical_qk_score_elements": int(
-                        bsz * self.config.num_attention_heads * q_len * k.shape[-2]
-                    ),
-                    "kernel_latency_isolated": False,
-                }
+        effective_kv_length = int(k.shape[-2])
+        persistent_context_kv_length = effective_kv_length - int(q_len)
+        kv_length_invariants = None
+        if phase1_context_length_before is not None:
+            kv_length_invariants = validate_attention_kv_lengths(
+                context_length_before=int(phase1_context_length_before),
+                cached_context_kv_length=cached_context_kv_length,
+                newly_injected_hidden_length=int(ctx_len),
+                persistent_context_kv_length=persistent_context_kv_length,
+                query_length=int(q_len),
+                effective_kv_length=effective_kv_length,
             )
+        attention_record = None
+        if phase1_attention_records is not None:
+            attention_record = {
+                "round_index": phase1_round_index,
+                "layer_index": self.layer_idx,
+                "configured_attention_implementation": self.config._attn_implementation,
+                "calls_pytorch_sdpa": self.config._attn_implementation == "sdpa",
+                "dtype": str(q.dtype),
+                "batch_size": int(bsz),
+                "query_length": int(q_len),
+                # Compatibility alias: this has always meant the number of
+                # target hidden states newly supplied in this round.
+                "injected_context_length": int(ctx_len),
+                "newly_injected_hidden_length": int(ctx_len),
+                "cached_context_kv_length_before_injection": (
+                    cached_context_kv_length
+                ),
+                "persistent_context_kv_length": persistent_context_kv_length,
+                "current_block_kv_length": int(ctx_len + q_len),
+                "effective_kv_length": effective_kv_length,
+                "query_head_count": int(self.config.num_attention_heads),
+                "key_value_head_count": int(self.config.num_key_value_heads),
+                "head_dimension": int(self.head_dim),
+                "query_shape": tensor_shape(q),
+                "key_shape": tensor_shape(k),
+                "value_shape": tensor_shape(v),
+                "theoretical_qk_score_elements": int(
+                    bsz * self.config.num_attention_heads * q_len * k.shape[-2]
+                ),
+                "kv_length_invariants": kv_length_invariants,
+                "combined_attention_cuda_elapsed_ms": None,
+                "cuda_region_isolated": True,
+                "kernel_latency_isolated": False,
+                "timing_scope": (
+                    "combined persistent-context and current-block attention"
+                ),
+            }
+            phase1_attention_records.append(attention_record)
         attn_fn: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
             attn_fn = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-        with nvtx_range(
-            torch, "dflash.attention.combined_context_block", phase1_profiling
+        attention_pair = (
+            phase1_attention_timer.start()
+            if phase1_profiling and phase1_attention_timer is not None
+            else None
+        )
+        try:
+            with nvtx_range(
+                torch, "dflash.attention.combined_context_block", phase1_profiling
+            ):
+                attn_output, attn_weights = attn_fn(
+                    self,
+                    q,
+                    k,
+                    v,
+                    attention_mask,
+                    dropout=0.0 if not self.training else self.attention_dropout,
+                    scaling=self.scaling,
+                    sliding_window=self.sliding_window,
+                    **kwargs,
+                )
+        finally:
+            if attention_pair is not None:
+                phase1_attention_timer.stop(attention_pair)
+        if (
+            attention_pair is not None
+            and attention_record is not None
+            and phase1_attention_timing_pairs is not None
         ):
-            attn_output, attn_weights = attn_fn(
-                self,
-                q,
-                k,
-                v,
-                attention_mask,
-                dropout=0.0 if not self.training else self.attention_dropout,
-                scaling=self.scaling,
-                sliding_window=self.sliding_window,
-                **kwargs,
-            )
+            phase1_attention_timing_pairs.append((attention_record, attention_pair))
         attn_output = attn_output.reshape(bsz, q_len, -1)
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
@@ -455,6 +507,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             torch.cuda.reset_peak_memory_stats(target.device)
         timer = DeferredCudaTimer(torch, enabled=enable_profiling, device=target.device)
         attention_records = []
+        attention_timing_pairs = []
         round_timing_pairs = []
         rounds = []
         accepted_draft_lengths = []
@@ -511,6 +564,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             phase1_attention_records=attention_records,
                             phase1_round_index=round_index,
                             phase1_profiling=enable_profiling,
+                            phase1_attention_timer=timer,
+                            phase1_attention_timing_pairs=attention_timing_pairs,
+                            phase1_context_length_before=context_length_before,
                         )
                         draft_logits = target.lm_head(
                             draft_hidden[:, -block_size + 1 :, :]
@@ -606,6 +662,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             "draft_cuda_elapsed_ms": None,
                             "verification_cpu_elapsed_ms": None,
                             "verification_cuda_elapsed_ms": None,
+                            "combined_attention_cuda_elapsed_ms": None,
+                            "combined_attention_over_draft_ratio": None,
+                            "combined_attention_over_round_ratio": None,
                             "commit_cpu_elapsed_ms": commit_cpu_elapsed_ms,
                             "round_cpu_elapsed_ms": None,
                             "round_cuda_elapsed_ms": None,
@@ -639,10 +698,21 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         timer.stop(total_pair)
         timer.resolve()
 
+        for attention_record, attention_pair in attention_timing_pairs:
+            attention_record["combined_attention_cuda_elapsed_ms"] = timer.values(
+                attention_pair
+            )["cuda_elapsed_ms"]
+
         for accounting, draft_pair, verify_pair, round_pair in round_timing_pairs:
             draft_timing = timer.values(draft_pair)
             verify_timing = timer.values(verify_pair)
             round_timing = timer.values(round_pair)
+            combined_attention_cuda_elapsed_ms = sum(
+                record["combined_attention_cuda_elapsed_ms"] or 0.0
+                for record in accounting["attention_calls"]
+            )
+            draft_cuda_elapsed_ms = draft_timing["cuda_elapsed_ms"]
+            round_cuda_elapsed_ms = round_timing["cuda_elapsed_ms"]
             accounting["timing"].update(
                 {
                     "draft_cpu_elapsed_ms": draft_timing["cpu_elapsed_ms"],
@@ -651,8 +721,34 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     "verification_cuda_elapsed_ms": verify_timing["cuda_elapsed_ms"],
                     "round_cpu_elapsed_ms": round_timing["cpu_elapsed_ms"],
                     "round_cuda_elapsed_ms": round_timing["cuda_elapsed_ms"],
+                    "combined_attention_cuda_elapsed_ms": (
+                        combined_attention_cuda_elapsed_ms
+                        if enable_profiling
+                        else None
+                    ),
+                    "combined_attention_over_draft_ratio": (
+                        combined_attention_cuda_elapsed_ms / draft_cuda_elapsed_ms
+                        if draft_cuda_elapsed_ms
+                        else None
+                    ),
+                    "combined_attention_over_round_ratio": (
+                        combined_attention_cuda_elapsed_ms / round_cuda_elapsed_ms
+                        if round_cuda_elapsed_ms
+                        else None
+                    ),
                 }
             )
+
+        combined_attention_total_ms = sum(
+            record["combined_attention_cuda_elapsed_ms"] or 0.0
+            for record in attention_records
+        )
+        draft_total_ms = sum(
+            record["timing"]["draft_cuda_elapsed_ms"] or 0.0 for record in rounds
+        )
+        round_total_ms = sum(
+            record["timing"]["round_cuda_elapsed_ms"] or 0.0 for record in rounds
+        )
 
         diagnostics = {
             "schema_version": "1.0",
@@ -679,6 +775,23 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 "explicit_cuda_synchronize_count": 1 if enable_profiling else 0,
                 "prefill": timer.values(prefill_pair),
                 "total": timer.values(total_pair),
+                "combined_attention": {
+                    "cuda_elapsed_ms": combined_attention_total_ms
+                    if enable_profiling
+                    else None,
+                    "over_draft_ratio": (
+                        combined_attention_total_ms / draft_total_ms
+                        if draft_total_ms
+                        else None
+                    ),
+                    "over_round_ratio": (
+                        combined_attention_total_ms / round_total_ms
+                        if round_total_ms
+                        else None
+                    ),
+                    "call_count": len(attention_records),
+                    "scope": "sum of per-layer combined SDPA calls",
+                },
                 "memory": gpu_memory_snapshot(torch, target.device)
                 if enable_profiling
                 else None,

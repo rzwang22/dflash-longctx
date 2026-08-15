@@ -102,6 +102,47 @@ def gpu_memory_snapshot(torch_module: Any, device: Any) -> dict[str, int]:
     }
 
 
+def validate_attention_kv_lengths(
+    *,
+    context_length_before: int,
+    cached_context_kv_length: int,
+    newly_injected_hidden_length: int,
+    persistent_context_kv_length: int,
+    query_length: int,
+    effective_kv_length: int,
+) -> dict[str, bool]:
+    """Validate the context/KV meanings at the actual combined attention call.
+
+    The draft cache contains context committed before the current round.  Projecting
+    ``target_hidden`` appends the newly committed context features.  The SDPA K/V
+    tensors then contain that complete persistent context followed by the current
+    speculative query block.
+    """
+
+    invariants = {
+        "persistent_equals_context_before": (
+            persistent_context_kv_length == context_length_before
+        ),
+        "persistent_partition": (
+            persistent_context_kv_length
+            == cached_context_kv_length + newly_injected_hidden_length
+        ),
+        "effective_partition": (
+            effective_kv_length == persistent_context_kv_length + query_length
+        ),
+    }
+    if not all(invariants.values()):
+        raise RuntimeError(
+            "DFlash attention KV length invariant failed: "
+            f"context_length_before={context_length_before}, "
+            f"cached_context_kv_length={cached_context_kv_length}, "
+            f"newly_injected_hidden_length={newly_injected_hidden_length}, "
+            f"persistent_context_kv_length={persistent_context_kv_length}, "
+            f"query_length={query_length}, effective_kv_length={effective_kv_length}"
+        )
+    return invariants
+
+
 def build_round_accounting(
     *,
     round_index: int,

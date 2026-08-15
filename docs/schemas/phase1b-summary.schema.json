@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase1b-summary.schema.json",
+  "title": "Phase 1B aggregate summary",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "sample_length_record_count",
+    "profiling_round_record_count",
+    "aggregates",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "sample_length_record_count": {"type": "integer", "minimum": 0},
+    "profiling_round_record_count": {"type": "integer", "minimum": 0},
+    "aggregates": {"type": ["object", "null"]},
+    "error": {"type": ["object", "null"]}
+  }
+}

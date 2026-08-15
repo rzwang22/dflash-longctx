@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase1b-manifest.schema.json",
+  "title": "Phase 1B sweep manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "created_at_utc",
+    "command",
+    "repository",
+    "configuration",
+    "workload",
+    "measurement_policy",
+    "model_position_limit",
+    "attention_backend",
+    "artifacts",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "created_at_utc": {"type": "string"},
+    "command": {"type": "string"},
+    "repository": {"type": "object"},
+    "configuration": {"type": "object"},
+    "workload": {
+      "type": "object",
+      "required": [
+        "dataset",
+        "split",
+        "seed",
+        "prompt_template_id",
+        "sample_ids",
+        "samples",
+        "raw_dataset_in_repository",
+        "filler_or_repeated_text_used"
+      ]
+    },
+    "measurement_policy": {
+      "type": "object",
+      "required": [
+        "formal_end_to_end_latency_source",
+        "component_timing_source",
+        "output_token_ids_must_match",
+        "combined_attention_scope",
+        "injected_kv_only_latency_reported"
+      ]
+    },
+    "model_position_limit": {"type": ["integer", "null"]},
+    "attention_backend": {"type": ["object", "null"]},
+    "artifacts": {"type": "object"},
+    "error": {"type": ["object", "null"]}
+  }
+}

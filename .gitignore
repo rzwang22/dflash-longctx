@@ -16,6 +16,12 @@ artifacts/raw/
 profiler/
 materialized_models/
 nsight/
+data/
+local_data/
+datasets_cache/
+govreport*.jsonl
+*.arrow
+*.parquet
 
 # Hugging Face caches
 .cache/

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase1b-sample.schema.json",
+  "title": "One Phase 1B sample/context-length record",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "sample_id",
+    "source_sample_id",
+    "dataset_split",
+    "random_seed",
+    "prompt_template_id",
+    "source_text_sha256",
+    "report_prefix_sha256",
+    "prompt_sha256",
+    "input_token_ids_sha256",
+    "nominal_prompt_length",
+    "actual_prompt_length",
+    "exact_nominal_length",
+    "nominal_prompt_length_shortfall",
+    "max_new_tokens",
+    "generated_token_count",
+    "generated_output_token_ids",
+    "generated_output_token_ids_sha256",
+    "generated_text",
+    "control_profile_output_token_ids_equal",
+    "all_repeat_output_token_ids_equal",
+    "control_timing",
+    "profiling_timing",
+    "accounting",
+    "memory",
+    "theoretical_attention_shape"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "sample_id": {"type": "string"},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "actual_prompt_length": {"type": "integer", "minimum": 1},
+    "exact_nominal_length": {"type": "boolean"},
+    "nominal_prompt_length_shortfall": {"type": "integer", "minimum": 0, "maximum": 16},
+    "generated_token_count": {"type": "integer", "minimum": 0},
+    "control_profile_output_token_ids_equal": {"const": true},
+    "all_repeat_output_token_ids_equal": {"const": true},
+    "control_timing": {
+      "type": "object",
+      "required": ["source", "formal_end_to_end", "repeats", "total_cuda_elapsed_ms"]
+    },
+    "profiling_timing": {
+      "type": "object",
+      "required": [
+        "source",
+        "formal_end_to_end",
+        "repeats",
+        "prefill_cuda_elapsed_ms",
+        "decode_cuda_elapsed_ms",
+        "total_cuda_elapsed_ms",
+        "combined_attention_cuda_elapsed_ms"
+      ]
+    },
+    "accounting": {"type": "object"},
+    "memory": {"type": "object"},
+    "theoretical_attention_shape": {"type": "object"}
+  }
+}

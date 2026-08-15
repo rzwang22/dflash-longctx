@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase1b-round.schema.json",
+  "title": "One Phase 1B profiling-path speculative round",
+  "type": "object",
+  "required": [
+    "sample_id",
+    "source_sample_id",
+    "nominal_prompt_length",
+    "actual_prompt_length",
+    "measurement_run",
+    "timing_source",
+    "round_index",
+    "context_length_before",
+    "context_length_after",
+    "proposed_draft_token_count",
+    "accepted_draft_token_count",
+    "rejected_draft_token_count",
+    "committed_token_count",
+    "returned_token_delta",
+    "truncated_token_count",
+    "stop_reason",
+    "attention_calls",
+    "timing",
+    "gpu_memory"
+  ],
+  "properties": {
+    "timing_source": {"const": "diagnostics_profiling_path"},
+    "attention_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "layer_index",
+          "query_length",
+          "injected_context_length",
+          "newly_injected_hidden_length",
+          "cached_context_kv_length_before_injection",
+          "persistent_context_kv_length",
+          "effective_kv_length",
+          "theoretical_qk_score_elements",
+          "kv_length_invariants",
+          "combined_attention_cuda_elapsed_ms",
+          "timing_scope"
+        ],
+        "properties": {
+          "query_length": {"type": "integer", "minimum": 1},
+          "injected_context_length": {"type": "integer", "minimum": 1},
+          "newly_injected_hidden_length": {"type": "integer", "minimum": 1},
+          "persistent_context_kv_length": {"type": "integer", "minimum": 1},
+          "effective_kv_length": {"type": "integer", "minimum": 1},
+          "combined_attention_cuda_elapsed_ms": {"type": "number", "minimum": 0},
+          "kv_length_invariants": {
+            "type": "object",
+            "additionalProperties": {"const": true}
+          }
+        }
+      }
+    },
+    "timing": {
+      "type": "object",
+      "required": [
+        "draft_cuda_elapsed_ms",
+        "combined_attention_cuda_elapsed_ms",
+        "verification_cuda_elapsed_ms",
+        "round_cuda_elapsed_ms",
+        "combined_attention_over_draft_ratio",
+        "combined_attention_over_round_ratio"
+      ]
+    }
+  }
+}

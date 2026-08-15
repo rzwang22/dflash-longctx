@@ -133,6 +133,12 @@ KV lengths, head counts, head dimension, theoretical QK score elements, and an
 NVTX range around the combined call. Separating costs requires a later
 context-length sweep or counterfactual execution.
 
+Phase 1B preserves `injected_context_length` as a compatibility alias and
+clarifies that it counts newly supplied `target_hidden` positions, not all
+persistent context KV. New records use `newly_injected_hidden_length`,
+`persistent_context_kv_length`, and `effective_kv_length`; their exact meanings
+and invariants are documented in `phase1b-longctx-baseline.md`.
+
 ## Attention backend provenance
 
 The summary records target and draft `_attn_implementation`, whether that value
