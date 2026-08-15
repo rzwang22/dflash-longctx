@@ -168,6 +168,7 @@ def _micro(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         item["acceptance_eligible_full_block_acceptance_count"] for item in accountings
     )
     returned = sum(item["returned_token_count"] for item in accountings)
+    truncated = sum(item["truncated_token_count"] for item in accountings)
     rounds = sum(item["round_count"] for item in accountings)
     eligible_rounds = sum(
         item["acceptance_eligible_round_count"] for item in accountings
@@ -191,6 +192,7 @@ def _micro(samples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "correction_token_count": corrections,
         "full_block_acceptance_count": full_blocks,
         "returned_token_count": returned,
+        "truncated_token_count": truncated,
         "round_count": rounds,
         "acceptance_eligible_round_count": eligible_rounds,
     }
@@ -221,6 +223,8 @@ def aggregate_sweep(
         "profiling_timing.verification_cuda_elapsed_ms.median",
         "profiling_timing.combined_attention_over_draft_ratio.median",
         "profiling_timing.combined_attention_over_round_ratio.median",
+        "profiling_timing.draft_over_round_ratio.median",
+        "profiling_timing.verification_over_round_ratio.median",
         "memory.peak_allocated_bytes",
         "memory.peak_reserved_bytes",
         "accounting.non_terminal_acceptance_rate",
@@ -258,6 +262,20 @@ def aggregate_sweep(
                 row["timing"]["combined_attention_over_round_ratio"]
                 for row in round_group
             ),
+            "draft_over_round_ratio": distribution(
+                row["timing"]["draft_cuda_elapsed_ms"]
+                / row["timing"]["round_cuda_elapsed_ms"]
+                if row["timing"]["round_cuda_elapsed_ms"]
+                else None
+                for row in round_group
+            ),
+            "verification_over_round_ratio": distribution(
+                row["timing"]["verification_cuda_elapsed_ms"]
+                / row["timing"]["round_cuda_elapsed_ms"]
+                if row["timing"]["round_cuda_elapsed_ms"]
+                else None
+                for row in round_group
+            ),
             "raw_all_round_accepted_length": distribution(
                 row["accepted_draft_token_count"] for row in round_group
             ),
@@ -275,6 +293,12 @@ def aggregate_sweep(
             ),
             "committed_token_count": distribution(
                 row["committed_token_count"] for row in round_group
+            ),
+            "non_terminal_committed_token_count": distribution(
+                row["committed_token_count"]
+                for row in round_group
+                if row["stop_reason"] == "continue"
+                and row["truncated_token_count"] == 0
             ),
             "returned_token_delta": distribution(
                 row["returned_token_delta"] for row in round_group

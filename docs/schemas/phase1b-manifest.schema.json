@@ -12,6 +12,7 @@
     "configuration",
     "workload",
     "measurement_policy",
+    "accounting_policy",
     "model_position_limit",
     "attention_backend",
     "artifacts",
@@ -28,14 +29,33 @@
       "type": "object",
       "required": [
         "dataset",
+        "task",
         "split",
         "seed",
-        "prompt_template_id",
+        "prompt_template",
+        "sample_policy",
+        "paired_context_length_comparison",
         "sample_ids",
+        "sample_ids_by_length",
+        "cohort",
+        "inventory",
         "samples",
         "raw_dataset_in_repository",
         "filler_or_repeated_text_used"
-      ]
+      ],
+      "properties": {
+        "dataset": {"const": "LongBench"},
+        "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+        "prompt_template": {
+          "type": "object",
+          "required": ["name", "version", "id", "sha256", "template"]
+        },
+        "sample_policy": {"enum": ["matched", "per-length"]},
+        "paired_context_length_comparison": {"type": "boolean"},
+        "sample_ids_by_length": {"type": "object"},
+        "cohort": {"type": ["object", "null"]},
+        "inventory": {"type": ["object", "null"]}
+      }
     },
     "measurement_policy": {
       "type": "object",
@@ -45,6 +65,16 @@
         "output_token_ids_must_match",
         "combined_attention_scope",
         "injected_kv_only_latency_reported"
+      ]
+    },
+    "accounting_policy": {
+      "type": "object",
+      "required": [
+        "accepted_draft_tokens",
+        "committed_tokens",
+        "raw_all_round_metrics",
+        "primary_acceptance_scope",
+        "terminal_and_truncation_metrics"
       ]
     },
     "model_position_limit": {"type": ["integer", "null"]},

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the Phase 1B offline GovReport long-context DFlash baseline sweep."""
+"""Run or inventory a Phase 1B.1 LongBench long-context DFlash workload."""
 
 from __future__ import annotations
 
@@ -28,9 +28,13 @@ from dflash.phase1b.metrics import (
 )
 from dflash.phase1b.workload import (
     DEFAULT_CONTEXT_LENGTHS,
-    PROMPT_TEMPLATE_ID,
-    build_nested_workloads,
-    load_govreport_records,
+    LONG_BENCH_TASKS,
+    build_longbench_workloads,
+    build_workload_inventory,
+    load_longbench_records,
+    prepare_longbench_records,
+    prompt_template_metadata,
+    resolve_jsonl_path,
 )
 from experiments.phase0_smoke import (
     TeeStream,
@@ -56,6 +60,34 @@ from scripts.collect_environment import (
 )
 
 SCHEMA_VERSION = "1.0"
+
+SUMMARY_CSV_FIELDS = (
+    "nominal_prompt_length",
+    "sample_count",
+    "control_total_cuda_median_ms",
+    "control_total_cuda_mean_ms",
+    "control_total_cuda_p90_ms",
+    "generated_tokens_per_second_median",
+    "profile_prefill_cuda_median_ms",
+    "profile_decode_cuda_median_ms",
+    "profile_draft_cuda_median_ms",
+    "profile_combined_attention_cuda_median_ms",
+    "profile_verification_cuda_median_ms",
+    "profile_round_cuda_median_ms",
+    "profile_draft_over_round_median",
+    "profile_verification_over_round_median",
+    "profile_combined_attention_over_draft_median",
+    "profile_combined_attention_over_round_median",
+    "mean_non_terminal_accepted_draft_tokens",
+    "mean_non_terminal_committed_tokens",
+    "round_count",
+    "acceptance_eligible_round_count",
+    "truncated_token_count",
+    "micro_raw_all_round_accepted_over_proposed",
+    "micro_non_terminal_accepted_over_proposed",
+    "macro_non_terminal_acceptance_rate",
+    "macro_effective_returned_tokens_per_round",
+)
 
 
 def parse_context_lengths(value: str) -> tuple[int, ...]:
@@ -88,16 +120,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-model-path", type=Path, default=None)
     parser.add_argument("--draft-model", default=DRAFT_MODEL_ID)
     parser.add_argument("--draft-revision", default=DRAFT_REVISION)
-    parser.add_argument("--materialized-draft-path", type=Path, required=True)
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--govreport-jsonl", type=Path)
-    source.add_argument("--govreport-dataset-path", type=Path)
-    source.add_argument("--govreport-dataset-cache", type=Path)
+    parser.add_argument("--materialized-draft-path", type=Path, default=None)
+    parser.add_argument("--longbench-root", type=Path, default=None)
+    parser.add_argument(
+        "--longbench-task", choices=LONG_BENCH_TASKS, default="gov_report"
+    )
+    parser.add_argument("--dataset-jsonl", type=Path, default=None)
+    parser.add_argument("--govreport-jsonl", type=Path, default=None)
+    parser.add_argument("--govreport-dataset-path", type=Path, default=None)
+    parser.add_argument("--govreport-dataset-cache", type=Path, default=None)
     parser.add_argument("--dataset-name", default="ccdv/govreport-summarization")
     parser.add_argument("--dataset-config", default=None)
-    parser.add_argument("--dataset-split", default="train")
+    parser.add_argument("--dataset-split", default="test")
+    parser.add_argument("--context-field", default=None)
     parser.add_argument("--text-field", default=None)
+    parser.add_argument("--query-field", default=None)
+    parser.add_argument("--answers-field", default=None)
     parser.add_argument("--id-field", default=None)
+    parser.add_argument(
+        "--sample-policy", choices=("matched", "per-length"), default="matched"
+    )
+    parser.add_argument("--inspect-workload-only", action="store_true")
     parser.add_argument("--seed", type=int, default=20260815)
     parser.add_argument(
         "--context-lengths",
@@ -127,6 +170,36 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = build_parser().parse_args(argv)
+    direct_jsonl = resolve_jsonl_path(
+        task=args.longbench_task,
+        longbench_root=args.longbench_root,
+        dataset_jsonl=args.dataset_jsonl,
+        govreport_jsonl=args.govreport_jsonl,
+    )
+    source_count = sum(
+        (
+            direct_jsonl is not None,
+            args.govreport_dataset_path is not None,
+            args.govreport_dataset_cache is not None,
+        )
+    )
+    if source_count != 1:
+        raise ValueError(
+            "Choose exactly one LongBench JSONL/root or backward-compatible local "
+            "Hugging Face dataset source"
+        )
+    if args.longbench_task != "gov_report" and (
+        args.govreport_dataset_path is not None
+        or args.govreport_dataset_cache is not None
+    ):
+        raise ValueError(
+            "--govreport-dataset-path and --govreport-dataset-cache are "
+            "backward-compatible GovReport sources only"
+        )
+    if args.context_field and args.text_field and args.context_field != args.text_field:
+        raise ValueError("--context-field and compatibility --text-field disagree")
+    if not args.inspect_workload_only and args.materialized_draft_path is None:
+        raise ValueError("Generation mode requires --materialized-draft-path")
     if args.pilot_samples <= 0:
         raise ValueError("--pilot-samples must be positive")
     if args.timing_repeats <= 0:
@@ -153,8 +226,15 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
         else None,
         "draft_model": args.draft_model,
         "draft_revision": args.draft_revision,
-        "materialized_draft_path": str(args.materialized_draft_path),
+        "materialized_draft_path": (
+            str(args.materialized_draft_path) if args.materialized_draft_path else None
+        ),
         "dataset_source": {
+            "longbench_root": (
+                str(args.longbench_root) if args.longbench_root else None
+            ),
+            "longbench_task": args.longbench_task,
+            "dataset_jsonl": str(args.dataset_jsonl) if args.dataset_jsonl else None,
             "jsonl_path": str(args.govreport_jsonl) if args.govreport_jsonl else None,
             "dataset_path": (
                 str(args.govreport_dataset_path)
@@ -169,9 +249,15 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
             "dataset_name": args.dataset_name,
             "dataset_config": args.dataset_config,
             "split": args.dataset_split,
+            "context_field": args.context_field,
             "text_field": args.text_field,
+            "query_field": args.query_field,
+            "answers_field": args.answers_field,
             "id_field": args.id_field,
         },
+        "sample_policy": args.sample_policy,
+        "paired_context_length_comparison": args.sample_policy == "matched",
+        "inspect_workload_only": args.inspect_workload_only,
         "context_lengths": list(args.context_lengths),
         "pilot_samples": args.pilot_samples,
         "timing_repeats": args.timing_repeats,
@@ -200,11 +286,17 @@ def new_manifest(
         "repository": environment["repository"],
         "configuration": run_configuration(args),
         "workload": {
-            "dataset": "GovReport",
+            "dataset": "LongBench",
+            "task": args.longbench_task,
             "split": args.dataset_split,
             "seed": args.seed,
-            "prompt_template_id": PROMPT_TEMPLATE_ID,
+            "prompt_template": prompt_template_metadata(args.longbench_task),
+            "sample_policy": args.sample_policy,
+            "paired_context_length_comparison": args.sample_policy == "matched",
             "sample_ids": [],
+            "sample_ids_by_length": {},
+            "cohort": None,
+            "inventory": None,
             "samples": [],
             "raw_dataset_in_repository": False,
             "filler_or_repeated_text_used": False,
@@ -220,6 +312,13 @@ def new_manifest(
                 "actual SDPA call over persistent context KV and current block KV"
             ),
             "injected_kv_only_latency_reported": False,
+        },
+        "accounting_policy": {
+            "accepted_draft_tokens": "accepted draft proposals; seed excluded",
+            "committed_tokens": "accepted draft proposals plus the seed",
+            "raw_all_round_metrics": "retain every executed round",
+            "primary_acceptance_scope": "non-terminal, non-truncated rounds",
+            "terminal_and_truncation_metrics": "reported separately",
         },
         "model_position_limit": None,
         "attention_backend": None,
@@ -237,6 +336,154 @@ def new_summary() -> dict[str, Any]:
         "aggregates": None,
         "error": None,
     }
+
+
+def _resolved_jsonl(args: argparse.Namespace) -> Path | None:
+    return resolve_jsonl_path(
+        task=args.longbench_task,
+        longbench_root=args.longbench_root,
+        dataset_jsonl=args.dataset_jsonl,
+        govreport_jsonl=args.govreport_jsonl,
+    )
+
+
+def _load_tokenizer_only(args: argparse.Namespace) -> tuple[Any, dict[str, Any], str]:
+    """Load only the target tokenizer; never instantiate a model or require CUDA."""
+
+    try:
+        import transformers
+        from transformers import AutoTokenizer
+    except ImportError as exc:
+        raise RuntimeError("Transformers tokenizer support is not installed") from exc
+
+    target_source = _resolve_model_source(
+        "target", args.target_model, args.target_revision, args.target_model_path
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        target_source["load_source"],
+        trust_remote_code=True,
+        **_pretrained_location_kwargs(target_source),
+    )
+    return tokenizer, target_source, transformers.__version__
+
+
+def _prepare_workload(
+    args: argparse.Namespace, tokenizer: Any, *, build_cohort: bool
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, Any],
+    list[dict[str, Any]] | None,
+    dict[str, Any] | None,
+]:
+    """Load, validate, inventory, and optionally select before any model load."""
+
+    records = load_longbench_records(
+        jsonl_path=_resolved_jsonl(args),
+        dataset_path=args.govreport_dataset_path,
+        dataset_cache_dir=args.govreport_dataset_cache,
+        dataset_name=args.dataset_name,
+        dataset_config=args.dataset_config,
+        split=args.dataset_split,
+    )
+    prepared = prepare_longbench_records(
+        records,
+        tokenizer=tokenizer,
+        task=args.longbench_task,
+        split=args.dataset_split,
+        seed=args.seed,
+        context_field=args.context_field,
+        text_field=args.text_field,
+        query_field=args.query_field,
+        answers_field=args.answers_field,
+        id_field=args.id_field,
+    )
+    inventory = build_workload_inventory(
+        prepared,
+        task=args.longbench_task,
+        nominal_lengths=args.context_lengths,
+        requested_sample_count=args.pilot_samples,
+    )
+    inventory.update(
+        {
+            "status": "ok",
+            "mode": (
+                "inspect_workload_only"
+                if args.inspect_workload_only
+                else "generation_preflight"
+            ),
+            "models_loaded": False,
+            "cuda_required": False,
+            "error": None,
+            "dataset_jsonl": (
+                str(_resolved_jsonl(args)) if _resolved_jsonl(args) else None
+            ),
+            "source_record_count": len(records),
+            "skipped_record_count": len(records) - len(prepared),
+            "dataset_split": args.dataset_split,
+            "requested_context_lengths": list(args.context_lengths),
+            "requested_sample_count": args.pilot_samples,
+            "field_mapping": {
+                "context": args.context_field or args.text_field or "auto: context",
+                "query": args.query_field or "auto: input",
+                "answers": args.answers_field or "auto: answers",
+                "sample_id": args.id_field or "auto: _id/id/hash",
+            },
+        }
+    )
+    if not build_cohort:
+        return prepared, inventory, None, None
+
+    provisional_position_limit = max(args.context_lengths) + args.max_new_tokens
+    workloads, cohort = build_longbench_workloads(
+        prepared,
+        tokenizer=tokenizer,
+        task=args.longbench_task,
+        nominal_lengths=args.context_lengths,
+        sample_count=args.pilot_samples,
+        sample_policy=args.sample_policy,
+        max_new_tokens=args.max_new_tokens,
+        model_position_limit=provisional_position_limit,
+    )
+    return prepared, inventory, workloads, cohort
+
+
+def _print_inventory(inventory: dict[str, Any]) -> None:
+    print(f"LongBench task: {inventory['task']}")
+    print(
+        "Records: "
+        f"source={inventory.get('source_record_count', inventory['record_count'])} "
+        f"usable={inventory['record_count']} "
+        f"skipped={inventory.get('skipped_record_count', 0)}"
+    )
+    print("Prompt length | Eligible samples")
+    print("--------------+-----------------")
+    for length, details in inventory["eligible_by_prompt_length"].items():
+        print(f"{int(length):>13,} | {details['eligible_sample_count']:>16,}")
+    lengths = inventory["document_token_length"]
+    print(
+        "Document tokens: "
+        f"min={lengths['min']} median={lengths['median']} "
+        f"p90={lengths['p90']} max={lengths['max']}"
+    )
+    print("Sample IDs reaching maximum requested length:")
+    maximum_ids = inventory["sample_ids_reaching_maximum_length"]
+    maximum_source_ids = inventory.get(
+        "source_sample_ids_reaching_maximum_length", []
+    )
+    if maximum_ids:
+        for sample_id, source_id in zip(maximum_ids, maximum_source_ids, strict=True):
+            print(f"  {sample_id} (source={source_id})")
+    else:
+        print("  (none)")
+    matched = inventory["recommendations"]["matched"]
+    print(
+        "Recommended matched pilot: "
+        f"samples={matched['sample_count']} lengths={matched['context_lengths']}"
+    )
+    per_length = inventory["recommendations"]["per_length"][
+        "sample_count_by_length"
+    ]
+    print(f"Recommended per-length sample counts: {per_length}")
 
 
 def _sha256_token_ids(token_ids: Sequence[int]) -> str:
@@ -265,6 +512,8 @@ def _profile_components(diagnostics: dict[str, Any]) -> dict[str, float | None]:
         "verification_cuda_elapsed_ms": verification,
         "combined_attention_over_draft_ratio": combined / draft if draft else None,
         "combined_attention_over_round_ratio": combined / decode if decode else None,
+        "draft_over_round_ratio": draft / decode if decode else None,
+        "verification_over_round_ratio": verification / decode if decode else None,
     }
 
 
@@ -278,6 +527,8 @@ def _timing_distributions(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "verification_cuda_elapsed_ms",
         "combined_attention_over_draft_ratio",
         "combined_attention_over_round_ratio",
+        "draft_over_round_ratio",
+        "verification_over_round_ratio",
     )
     return {
         field: distribution(record.get(field) for record in records) for field in fields
@@ -305,27 +556,10 @@ def _workload_manifest_rows(
 
 
 def _write_summary_csv(path: Path, aggregates: dict[str, Any]) -> None:
-    fieldnames = [
-        "nominal_prompt_length",
-        "sample_count",
-        "control_total_cuda_median_ms",
-        "control_total_cuda_mean_ms",
-        "control_total_cuda_p90_ms",
-        "generated_tokens_per_second_median",
-        "profile_prefill_cuda_median_ms",
-        "profile_decode_cuda_median_ms",
-        "profile_combined_attention_cuda_median_ms",
-        "profile_combined_attention_over_draft_median",
-        "profile_combined_attention_over_round_median",
-        "micro_raw_all_round_accepted_over_proposed",
-        "micro_non_terminal_accepted_over_proposed",
-        "macro_non_terminal_acceptance_rate",
-        "macro_effective_returned_tokens_per_round",
-    ]
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
     with temporary.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer = csv.DictWriter(stream, fieldnames=SUMMARY_CSV_FIELDS)
         writer.writeheader()
         for length, group in aggregates["by_context_length"].items():
             sample = group["sample_level"]
@@ -346,8 +580,23 @@ def _write_summary_csv(path: Path, aggregates: dict[str, Any]) -> None:
                     "profile_decode_cuda_median_ms": sample[
                         "profiling_timing.decode_cuda_elapsed_ms.median"
                     ]["median"],
+                    "profile_draft_cuda_median_ms": sample[
+                        "profiling_timing.draft_cuda_elapsed_ms.median"
+                    ]["median"],
                     "profile_combined_attention_cuda_median_ms": sample[
                         "profiling_timing.combined_attention_cuda_elapsed_ms.median"
+                    ]["median"],
+                    "profile_verification_cuda_median_ms": sample[
+                        "profiling_timing.verification_cuda_elapsed_ms.median"
+                    ]["median"],
+                    "profile_round_cuda_median_ms": group["round_level"][
+                        "round_cuda_elapsed_ms"
+                    ]["median"],
+                    "profile_draft_over_round_median": sample[
+                        "profiling_timing.draft_over_round_ratio.median"
+                    ]["median"],
+                    "profile_verification_over_round_median": sample[
+                        "profiling_timing.verification_over_round_ratio.median"
                     ]["median"],
                     "profile_combined_attention_over_draft_median": sample[
                         "profiling_timing.combined_attention_over_draft_ratio.median"
@@ -355,6 +604,19 @@ def _write_summary_csv(path: Path, aggregates: dict[str, Any]) -> None:
                     "profile_combined_attention_over_round_median": sample[
                         "profiling_timing.combined_attention_over_round_ratio.median"
                     ]["median"],
+                    "mean_non_terminal_accepted_draft_tokens": group["round_level"][
+                        "non_terminal_accepted_length"
+                    ]["mean"],
+                    "mean_non_terminal_committed_tokens": group["round_level"][
+                        "non_terminal_committed_token_count"
+                    ]["mean"],
+                    "round_count": group["micro_average"]["round_count"],
+                    "acceptance_eligible_round_count": group["micro_average"][
+                        "acceptance_eligible_round_count"
+                    ],
+                    "truncated_token_count": group["micro_average"][
+                        "truncated_token_count"
+                    ],
                     "micro_raw_all_round_accepted_over_proposed": group[
                         "micro_average"
                     ]["raw_all_round_accepted_over_proposed"],
@@ -459,6 +721,8 @@ def _run_one_workload(
                 {
                     "sample_id": workload["sample_id"],
                     "source_sample_id": workload["source_sample_id"],
+                    "longbench_task": workload["longbench_task"],
+                    "sample_policy": workload["sample_policy"],
                     "nominal_prompt_length": workload["nominal_prompt_length"],
                     "actual_prompt_length": workload["actual_prompt_length"],
                     "timing_source": "diagnostics_profiling_path",
@@ -492,10 +756,24 @@ def _run_one_workload(
         "schema_version": SCHEMA_VERSION,
         "sample_id": workload["sample_id"],
         "source_sample_id": workload["source_sample_id"],
+        "longbench_task": workload["longbench_task"],
+        "sample_policy": workload["sample_policy"],
+        "paired_context_length_comparison": workload[
+            "paired_context_length_comparison"
+        ],
         "dataset_split": workload["dataset_split"],
         "random_seed": workload["random_seed"],
         "prompt_template_id": workload["prompt_template_id"],
+        "prompt_template_name": workload["prompt_template_name"],
+        "prompt_template_version": workload["prompt_template_version"],
+        "prompt_template_sha256": workload["prompt_template_sha256"],
         "source_text_sha256": workload["source_text_sha256"],
+        "document_token_length": workload["document_token_length"],
+        "fixed_prompt_length": workload["fixed_prompt_length"],
+        "query_sha256": workload["query_sha256"],
+        "reference_answers": workload["reference_answers"],
+        "reference_answers_sha256": workload["reference_answers_sha256"],
+        "context_prefix_sha256": workload["context_prefix_sha256"],
         "report_prefix_sha256": workload["report_prefix_sha256"],
         "prompt_sha256": workload["prompt_sha256"],
         "input_token_ids_sha256": workload["input_token_ids_sha256"],
@@ -577,22 +855,45 @@ def run_sweep(
     samples_path: Path,
     rounds_path: Path,
 ) -> None:
+    tokenizer, target_source, transformers_version = _load_tokenizer_only(args)
+    prepared, inventory, _, _ = _prepare_workload(
+        args, tokenizer, build_cohort=False
+    )
+    manifest["workload"]["inventory"] = inventory
+    _print_inventory(inventory)
+    provisional_position_limit = max(args.context_lengths) + args.max_new_tokens
+    workloads, cohort = build_longbench_workloads(
+        prepared,
+        tokenizer=tokenizer,
+        task=args.longbench_task,
+        nominal_lengths=args.context_lengths,
+        sample_count=args.pilot_samples,
+        sample_policy=args.sample_policy,
+        max_new_tokens=args.max_new_tokens,
+        model_position_limit=provisional_position_limit,
+    )
+    manifest["workload"]["cohort"] = cohort
+    manifest["workload"]["sample_ids"] = sorted(
+        {row["sample_id"] for row in workloads}
+    )
+    manifest["workload"]["sample_ids_by_length"] = cohort[
+        "sample_ids_by_length"
+    ]
+    manifest["workload"]["samples"] = _workload_manifest_rows(workloads)
+    print(
+        "Workload preflight passed before model loading: "
+        f"policy={args.sample_policy}, records={len(workloads)}"
+    )
+
+    # No CUDA or target/draft model is touched until the inventory and cohort
+    # checks above have succeeded.
     torch_module = _require_cuda(args)
     try:
-        import transformers
-        from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoModel, AutoModelForCausalLM
     except ImportError as exc:
         raise RuntimeError("Transformers backend is not installed") from exc
 
-    target_source = _resolve_model_source(
-        "target", args.target_model, args.target_revision, args.target_model_path
-    )
     dtype = _torch_dtype(torch_module, args.dtype)
-    tokenizer = AutoTokenizer.from_pretrained(
-        target_source["load_source"],
-        trust_remote_code=True,
-        **_pretrained_location_kwargs(target_source),
-    )
     target = AutoModelForCausalLM.from_pretrained(
         target_source["load_source"],
         trust_remote_code=True,
@@ -620,6 +921,13 @@ def run_sweep(
     provenance["status"] = "ok"
 
     position_limit = _position_limit(target, tokenizer)
+    for workload in workloads:
+        if workload["actual_prompt_length"] + args.max_new_tokens > position_limit:
+            raise RuntimeError(
+                f"Sample {workload['sample_id']} at nominal length "
+                f"{workload['nominal_prompt_length']} exceeds target position limit "
+                f"{position_limit} after reserving {args.max_new_tokens} output tokens"
+            )
     manifest["model_position_limit"] = position_limit
     manifest["attention_backend"] = attention_backend_snapshot(
         torch_module, target=target, draft=draft
@@ -631,30 +939,8 @@ def run_sweep(
         )
     if tokenizer.eos_token_id is None:
         raise RuntimeError("The target tokenizer does not define eos_token_id")
-    records = load_govreport_records(
-        jsonl_path=args.govreport_jsonl,
-        dataset_path=args.govreport_dataset_path,
-        dataset_cache_dir=args.govreport_dataset_cache,
-        dataset_name=args.dataset_name,
-        dataset_config=args.dataset_config,
-        split=args.dataset_split,
-    )
-    workloads = build_nested_workloads(
-        records,
-        tokenizer=tokenizer,
-        nominal_lengths=args.context_lengths,
-        sample_count=args.pilot_samples,
-        split=args.dataset_split,
-        seed=args.seed,
-        max_new_tokens=args.max_new_tokens,
-        model_position_limit=position_limit,
-        text_field=args.text_field,
-        id_field=args.id_field,
-    )
-    manifest["workload"]["sample_ids"] = sorted({row["sample_id"] for row in workloads})
-    manifest["workload"]["samples"] = _workload_manifest_rows(workloads)
     print(f"Git commit: {manifest['repository']['commit_sha']}")
-    print(f"Transformers: {transformers.__version__}")
+    print(f"Transformers: {transformers_version}")
     print(f"GPU: {torch_module.cuda.get_device_name(args.device)}")
     print(f"Model position limit: {position_limit}")
     print(f"Instrumented DFlash module: {provenance['actual_loaded_module_path']}")
@@ -725,12 +1011,118 @@ def validate_artifacts(
             raise ValueError("A sample exceeds the model position limit")
 
 
+def run_inventory_only(args: argparse.Namespace) -> dict[str, Any]:
+    """Inspect tokenizer-derived eligibility without CUDA or model construction."""
+
+    tokenizer, target_source, transformers_version = _load_tokenizer_only(args)
+    _, inventory, _, _ = _prepare_workload(args, tokenizer, build_cohort=False)
+    inventory.update(
+        {
+            "status": "ok",
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "mode": "inspect_workload_only",
+            "tokenizer": {
+                "model_id": args.target_model,
+                "revision": args.target_revision,
+                "source_kind": target_source["source_kind"],
+                "load_source": target_source["load_source"],
+                "transformers_version": transformers_version,
+                "class_name": (
+                    f"{tokenizer.__class__.__module__}."
+                    f"{tokenizer.__class__.__qualname__}"
+                ),
+            },
+            "models_loaded": False,
+            "cuda_required": False,
+        }
+    )
+    _print_inventory(inventory)
+    return inventory
+
+
+def _inventory_main(args: argparse.Namespace) -> int:
+    output_dir = args.output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    inventory_path = output_dir / "workload-inventory.json"
+    environment_path = output_dir / "environment.json"
+    terminal_log_path = output_dir / "terminal.log"
+    command = shlex.join([sys.executable, *sys.argv])
+    environment = collect_environment(
+        run_config=run_configuration(args),
+        run_command=command,
+        import_torch=False,
+    )
+    write_json(environment_path, environment)
+    inventory: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "started",
+        "mode": "inspect_workload_only",
+        "task": args.longbench_task,
+        "record_count": 0,
+        "prompt_template": prompt_template_metadata(args.longbench_task),
+        "document_token_length": {
+            "count": 0,
+            "min": None,
+            "median": None,
+            "p90": None,
+            "max": None,
+        },
+        "eligible_by_prompt_length": {},
+        "sample_ids_reaching_maximum_length": [],
+        "source_sample_ids_reaching_maximum_length": [],
+        "recommendations": {},
+        "models_loaded": False,
+        "cuda_required": False,
+        "error": None,
+    }
+    exit_code = 1
+    original_stdout, original_stderr = sys.stdout, sys.stderr
+    with terminal_log_path.open("w", encoding="utf-8", buffering=1) as log:
+        sys.stdout = TeeStream(original_stdout, log)
+        sys.stderr = TeeStream(original_stderr, log)
+        try:
+            print(f"Phase 1B.1 inventory output directory: {output_dir}")
+            inventory = run_inventory_only(args)
+            inventory["error"] = None
+            exit_code = 0
+        except KeyboardInterrupt:
+            inventory["status"] = "error"
+            inventory["error"] = {
+                "type": "KeyboardInterrupt",
+                "message": "Interrupted by user",
+            }
+            exit_code = 130
+            print("ERROR: KeyboardInterrupt: interrupted by user", file=sys.stderr)
+            traceback.print_exc()
+        except Exception as exc:  # noqa: BLE001 - persist inventory failures.
+            inventory["status"] = "error"
+            inventory["error"] = {
+                "type": type(exc).__name__,
+                "message": str(exc),
+            }
+            print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+            traceback.print_exc()
+        finally:
+            try:
+                write_json(inventory_path, inventory)
+                print(f"workload_inventory_json: {inventory_path}")
+                print(f"environment_json: {environment_path}")
+                print(f"terminal_log: {terminal_log_path}")
+            finally:
+                sys.stdout = original_stdout
+                sys.stderr = original_stderr
+    return exit_code
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.inspect_workload_only:
+        return _inventory_main(args)
     output_dir = args.output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = {
         "manifest_json": output_dir / "manifest.json",
+        "workload_inventory_json": output_dir / "workload-inventory.json",
         "samples_jsonl": output_dir / "samples.jsonl",
         "rounds_jsonl": output_dir / "rounds.jsonl",
         "summary_json": output_dir / "summary.json",
@@ -793,6 +1185,31 @@ def main(argv: list[str] | None = None) -> int:
                     summary["profiling_round_record_count"] = len(rounds)
                 validate_artifacts(manifest, summary, samples)
                 write_json(paths["manifest_json"], manifest)
+                inventory = manifest["workload"].get("inventory") or {
+                    "schema_version": SCHEMA_VERSION,
+                    "status": "error",
+                    "mode": "generation_preflight",
+                    "task": args.longbench_task,
+                    "record_count": 0,
+                    "prompt_template": prompt_template_metadata(
+                        args.longbench_task
+                    ),
+                    "document_token_length": {
+                        "count": 0,
+                        "min": None,
+                        "median": None,
+                        "p90": None,
+                        "max": None,
+                    },
+                    "eligible_by_prompt_length": {},
+                    "sample_ids_reaching_maximum_length": [],
+                    "source_sample_ids_reaching_maximum_length": [],
+                    "recommendations": {},
+                    "models_loaded": False,
+                    "cuda_required": False,
+                    "error": manifest["error"],
+                }
+                write_json(paths["workload_inventory_json"], inventory)
                 _atomic_write_jsonl(paths["samples_jsonl"], samples)
                 _atomic_write_jsonl(paths["rounds_jsonl"], rounds)
                 write_json(paths["summary_json"], summary)

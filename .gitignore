@@ -20,6 +20,10 @@ data/
 local_data/
 datasets_cache/
 govreport*.jsonl
+gov_report*.jsonl
+qasper*.jsonl
+hotpotqa*.jsonl
+longbench*.jsonl
 *.arrow
 *.parquet
 

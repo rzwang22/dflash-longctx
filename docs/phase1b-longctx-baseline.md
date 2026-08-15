@@ -1,5 +1,10 @@
 # Phase 1B: DFlash long-context baseline profiling
 
+Phase 1B.1 generalizes the workload and adds model-free inventory preflight.
+For current LongBench commands and cohort semantics, see
+`docs/phase1b1-longbench-workloads.md`. The CUDA instrumentation described here
+is unchanged by Phase 1B.1.
+
 ## Scope
 
 Phase 1B is a measurement-only extension of the H100-validated Phase 1A baseline
@@ -253,6 +258,8 @@ Every run creates all required paths, including on a caught error:
 
 - `manifest.json`: frozen configuration, workload hashes/IDs, measurement policy,
   model position limit, attention backend, and artifact paths;
+- `workload-inventory.json`: tokenizer-derived eligibility and pilot
+  recommendations, produced before model loading;
 - `samples.jsonl`: sample-level control timing, profiling components, output-ID
   equality, accounting, memory, and theoretical shapes;
 - `rounds.jsonl`: repeat-level round accounting, component timing, and layer calls;

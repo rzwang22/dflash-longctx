@@ -6,6 +6,8 @@
   "required": [
     "sample_id",
     "source_sample_id",
+    "longbench_task",
+    "sample_policy",
     "nominal_prompt_length",
     "actual_prompt_length",
     "measurement_run",
@@ -25,6 +27,8 @@
     "gpu_memory"
   ],
   "properties": {
+    "longbench_task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "sample_policy": {"enum": ["matched", "per-length"]},
     "timing_source": {"const": "diagnostics_profiling_path"},
     "attention_calls": {
       "type": "array",

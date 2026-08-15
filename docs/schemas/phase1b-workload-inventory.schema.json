@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase1b-workload-inventory.schema.json",
+  "title": "Phase 1B.1 LongBench workload inventory",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "mode",
+    "task",
+    "record_count",
+    "prompt_template",
+    "document_token_length",
+    "eligible_by_prompt_length",
+    "sample_ids_reaching_maximum_length",
+    "source_sample_ids_reaching_maximum_length",
+    "recommendations",
+    "models_loaded",
+    "cuda_required",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "mode": {"enum": ["inspect_workload_only", "generation_preflight"]},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "record_count": {"type": "integer", "minimum": 0},
+    "prompt_template": {
+      "type": "object",
+      "required": ["name", "version", "id", "sha256", "template"]
+    },
+    "document_token_length": {
+      "type": "object",
+      "required": ["count", "min", "median", "p90", "max"]
+    },
+    "eligible_by_prompt_length": {"type": "object"},
+    "sample_ids_reaching_maximum_length": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "source_sample_ids_reaching_maximum_length": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "recommendations": {"type": "object"},
+    "models_loaded": {"const": false},
+    "cuda_required": {"const": false},
+    "error": {"type": ["object", "null"]}
+  }
+}
