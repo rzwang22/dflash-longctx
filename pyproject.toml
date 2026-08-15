@@ -11,15 +11,14 @@ dependencies = [
     "datasets",
     "requests",
     "huggingface-hub",
+    "jsonschema>=4.18",
 ]
 
 [tool.setuptools.packages.find]
 include = ["dflash*"]
 
 [project.optional-dependencies]
-test = [
-    "jsonschema>=4.18",
-]
+test = []
 transformers = [
     "torch",
     "transformers==4.57.1",

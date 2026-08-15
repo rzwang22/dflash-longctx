@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2b1-confidence-diagnostics.schema.json",
+  "title": "Phase 2B.1 draft-confidence diagnostics",
+  "type": "object",
+  "required": [
+    "schema_version", "label", "predictors_are_target_blind",
+    "target_score_gap_role", "top_k_entropy_semantics", "training_performed",
+    "threshold_generalization_claimed", "confidence_intervals", "results"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "predictors_are_target_blind": {"const": true},
+    "training_performed": {"const": false},
+    "threshold_generalization_claimed": {"const": false},
+    "confidence_intervals": {"type": "null"},
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["scope", "group", "predictor", "auroc", "auprc", "unavailable_reason", "calibration_by_risk_decile"]
+      }
+    }
+  }
+}

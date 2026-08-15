@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2b1-path-survival-event.schema.json",
+  "title": "Phase 2B.1 target-path round event",
+  "type": "object",
+  "required": [
+    "schema_version", "task", "nominal_prompt_length", "sample_id",
+    "generation_repeat", "round_index", "observable_target_horizon",
+    "candidate_unavailable_depth_count", "depth_events", "policy_replays"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "sample_id": {"type": "string"},
+    "generation_repeat": {"type": "integer", "minimum": 0},
+    "round_index": {"type": "integer", "minimum": 0},
+    "observable_target_horizon": {"type": "integer", "minimum": 0, "maximum": 15},
+    "depth_events": {
+      "type": "array",
+      "maxItems": 15,
+      "items": {
+        "type": "object",
+        "required": [
+          "depth", "target_token_in_top_16", "target_token_rank",
+          "target_token_rank_label", "top1_correct",
+          "top_k_probability_mass", "top_k_renormalized_truncated_entropy",
+          "target_prefix_score_rank", "target_prefix_score_rank_lower_bound",
+          "target_prefix_score_rank_censored"
+        ],
+        "properties": {
+          "depth": {"type": "integer", "minimum": 1, "maximum": 15},
+          "target_token_rank": {"type": ["integer", "null"], "minimum": 1, "maximum": 16},
+          "target_prefix_score_rank": {"type": ["integer", "null"], "minimum": 1},
+          "target_prefix_score_rank_lower_bound": {"type": ["integer", "null"], "minimum": 1},
+          "target_prefix_score_rank_censored": {"type": "boolean"}
+        }
+      }
+    },
+    "policy_replays": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["policy", "policy_variant", "policy_class", "policy_uses_target_information", "requested_total_tree_node_budget", "root_included_in_budget", "covered_target_prefix_depth", "depth_survival"],
+        "properties": {
+          "policy": {"enum": ["top1_chain", "score_beam", "confidence_gated", "layerwise_beam", "oracle_prefix_closed"]},
+          "policy_class": {"enum": ["deployable", "deployable_diagnostic", "oracle"]},
+          "policy_uses_target_information": {"type": "boolean"},
+          "requested_total_tree_node_budget": {"type": "integer", "minimum": 1},
+          "root_included_in_budget": {"const": true},
+          "covered_target_prefix_depth": {"type": "integer", "minimum": 0, "maximum": 15},
+          "depth_survival": {"type": "array", "maxItems": 15}
+        }
+      }
+    }
+  }
+}

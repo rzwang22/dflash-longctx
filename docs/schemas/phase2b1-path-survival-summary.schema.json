@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2b1-path-survival-summary.schema.json",
+  "title": "Phase 2B.1 path-survival aggregate summary",
+  "type": "object",
+  "required": [
+    "schema_version", "round_micro_treats_rounds_as_observations_not_independent_samples",
+    "sample_macro_uses_sample_as_aggregation_unit", "confidence_intervals",
+    "full_depth_and_right_censored_counts_reported_separately", "groups"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "confidence_intervals": {"type": "null"},
+    "groups": {"type": "array", "items": {"type": "object"}}
+  }
+}
