@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-manifest.schema.json",
+  "title": "Phase 2C online bounded-tree manifest",
+  "type": "object",
+  "required": ["schema_version", "status", "configuration", "workload", "phase2c", "measurement_policy", "interpretation", "artifacts", "error"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "configuration": {
+      "type": "object",
+      "required": ["phase", "mode", "batch_size", "temperature", "block_size", "tree_configurations"],
+      "properties": {
+        "phase": {"const": "2C"},
+        "mode": {"const": "online_bounded_marginal_tree"},
+        "batch_size": {"const": 1},
+        "temperature": {"const": 0.0},
+        "block_size": {"const": 16},
+        "tree_configurations": {"type": "array", "minItems": 1}
+      }
+    },
+    "workload": {"type": "object"},
+    "phase2c": {
+      "type": "object",
+      "required": ["policy_uses_target_information", "maximum_draft_depth", "node_budget_includes_root", "score_rule", "tie_breaking", "mask_semantics", "position_ids", "cache_position", "kv_compaction"],
+      "properties": {
+        "policy_uses_target_information": {"const": false},
+        "maximum_draft_depth": {"const": 15},
+        "node_budget_includes_root": {"const": true},
+        "score_rule": {"type": "string"},
+        "tie_breaking": {"type": "string"},
+        "mask_semantics": {"type": "string"},
+        "position_ids": {"type": "string"},
+        "cache_position": {"type": "string"},
+        "kv_compaction": {"type": "string"}
+      }
+    },
+    "measurement_policy": {"type": "object"},
+    "interpretation": {"type": "object"},
+    "artifacts": {"type": "object"},
+    "error": {"type": ["object", "null"]}
+  }
+}

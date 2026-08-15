@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-sample.schema.json",
+  "title": "Phase 2C sample/configuration result",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "actual_prompt_length", "configuration_id", "tree_policy", "node_budget", "beam_width", "generated_token_count", "generated_output_token_ids", "reference", "control", "profiling", "correctness"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "sample_id": {"type": "string", "minLength": 1},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "actual_prompt_length": {"type": "integer", "minimum": 1},
+    "configuration_id": {"type": "string", "minLength": 1},
+    "tree_policy": {"enum": ["top1_chain", "layerwise_beam"]},
+    "node_budget": {"enum": [16, 32, 64, 128]},
+    "beam_width": {"type": "integer", "minimum": 1},
+    "generated_token_count": {"type": "integer", "minimum": 0},
+    "generated_output_token_ids": {"type": "array", "items": {"type": "integer"}},
+    "reference": {"type": "object"},
+    "control": {"type": "object"},
+    "profiling": {"type": "object"},
+    "correctness": {"type": "object"}
+  }
+}

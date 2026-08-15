@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-correctness-summary.schema.json",
+  "title": "Phase 2C end-to-end correctness summary",
+  "type": "object",
+  "required": ["schema_version", "status", "all_checks_passed", "records", "error"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "all_checks_passed": {"type": "boolean"},
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task", "sample_id", "nominal_prompt_length", "configuration_id", "reference_output_ids_equal", "control_profile_output_ids_equal", "passed"]
+      }
+    },
+    "error": {"type": ["object", "null"]}
+  }
+}

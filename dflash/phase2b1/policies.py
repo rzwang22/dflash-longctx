@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from dflash.phase2b.tree import Node, validate_prefix_closed
+from dflash.phase2b.tree import Node
+from dflash.phase2c.core import layerwise_beam_tree
+
+__all__ = ["layerwise_beam_tree"]
 
 
 def _score_maps(positions: list[dict[str, Any]]) -> list[dict[int, float]]:
@@ -15,43 +18,6 @@ def _score_maps(positions: list[dict[str, Any]]) -> list[dict[int, float]]:
         }
         for position in positions
     ]
-
-
-def _priority(prefix: Node, score_maps: list[dict[int, float]]) -> tuple[Any, ...]:
-    cumulative = sum(score_maps[index][token] for index, token in enumerate(prefix))
-    return (-cumulative / len(prefix), -cumulative, len(prefix), prefix)
-
-
-def layerwise_beam_tree(
-    positions: list[dict[str, Any]], *, budget: int, beam_width: int
-) -> set[Node]:
-    """Retain best same-depth prefixes while respecting a total-node budget.
-
-    The fixed-width beam is independent of the requested total budget. Layers
-    are inserted in depth/score order until the budget is exhausted, making
-    every smaller-budget result a subset of every larger-budget result.
-    Selection uses only captured draft scores.
-    """
-
-    if beam_width < 1:
-        raise ValueError("beam_width must be positive")
-    if budget < 1:
-        raise ValueError("total-node budget must include at least the root")
-    score_maps = _score_maps(positions)
-    nodes: set[Node] = {()}
-    active: list[Node] = [()]
-    for index, position in enumerate(positions):
-        token_ids = [int(item["token_id"]) for item in position["candidates"]]
-        expanded = [prefix + (token,) for prefix in active for token in token_ids]
-        expanded.sort(key=lambda prefix: _priority(prefix, score_maps))
-        active = expanded[:beam_width]
-        remaining = budget - len(nodes)
-        if remaining <= 0:
-            break
-        nodes.update(active[:remaining])
-        if remaining < len(active):
-            break
-    return validate_prefix_closed(nodes, budget=budget)
 
 
 def per_depth_policy_state(

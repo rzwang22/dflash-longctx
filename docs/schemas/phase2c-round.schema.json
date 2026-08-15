@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-round.schema.json",
+  "title": "Phase 2C profiling-path online tree round",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "profiling_repeat", "round_index", "generated_root_offset", "prefix_cache_length_before_round", "requested_node_count", "actual_node_count", "beam_width", "maximum_tree_depth", "per_depth_node_counts", "accepted_draft_token_count", "committed_token_count", "target_token_kind", "terminal_round", "raw_cumulative_generated_token_count", "cumulative_generated_token_count", "truncated_token_count", "tree_metadata", "tree_attention", "cache_compaction", "timing", "output_ids_equal_reference", "gold_check_status", "offline_comparison_status"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "sample_id": {"type": "string"},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "configuration_id": {"type": "string"},
+    "profiling_repeat": {"type": "integer", "minimum": 0},
+    "round_index": {"type": "integer", "minimum": 0},
+    "generated_root_offset": {"type": "integer", "minimum": 0},
+    "prefix_cache_length_before_round": {"type": "integer", "minimum": 0},
+    "requested_node_count": {"enum": [16, 32, 64, 128]},
+    "actual_node_count": {"type": "integer", "minimum": 1, "maximum": 128},
+    "beam_width": {"type": "integer", "minimum": 1},
+    "maximum_tree_depth": {"type": "integer", "minimum": 0, "maximum": 15},
+    "per_depth_node_counts": {"type": ["array", "object"]},
+    "accepted_draft_token_count": {"type": "integer", "minimum": 0, "maximum": 15},
+    "committed_token_count": {"type": "integer", "minimum": 1, "maximum": 16},
+    "target_token_kind": {"enum": ["correction", "bonus"]},
+    "terminal_round": {"type": "boolean"},
+    "raw_cumulative_generated_token_count": {"type": "integer", "minimum": 1},
+    "cumulative_generated_token_count": {"type": "integer", "minimum": 0},
+    "truncated_token_count": {"type": "integer", "minimum": 0},
+    "tree_metadata": {"type": "object"},
+    "tree_attention": {"type": "object"},
+    "cache_compaction": {"type": "object"},
+    "timing": {
+      "type": "object",
+      "required": ["draft_hidden_logits_cuda_elapsed_ms", "topk_cuda_elapsed_ms", "tree_construction_cuda_elapsed_ms", "mask_construction_cuda_elapsed_ms", "verification_cuda_elapsed_ms", "traversal_cuda_elapsed_ms", "kv_compaction_cuda_elapsed_ms", "total_draft_cuda_elapsed_ms", "total_verification_cuda_elapsed_ms", "round_cuda_elapsed_ms"]
+    },
+    "output_ids_equal_reference": {"const": true},
+    "gold_check_status": {"enum": ["not_run", "passed"]},
+    "offline_comparison_status": {"type": "string"}
+  }
+}

@@ -10,11 +10,14 @@ pinned model repository. `utils.py` differs only by a final newline added by the
 repository patching workflow; both hashes and that normalization are recorded in
 `provenance.json`.
 
-`instrumented/dflash.py` is the Phase 1A implementation. Its default
+`instrumented/dflash.py` is the opt-in observability/Phase 2C implementation. Its default
 `spec_generate` path delegates to an algorithmic transcription of the pinned
 implementation and returns the same tensor type. Diagnostics and profiling are
 available only through new opt-in keyword arguments. The accompanying
-`phase1_observability.py` is first-party instrumentation, not upstream code.
+`phase1_observability.py` and materialized `phase2c_online.py` are first-party
+instrumentation, not upstream code. The latter is copied from
+`dflash/phase2c/core.py` so online construction and CPU replay share a
+repository-controlled policy definition.
 
 No model weight, tokenizer, Hugging Face cache, or generated materialization is
 stored here. Use `scripts/materialize_dflash.py` to combine one of these code

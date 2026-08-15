@@ -227,6 +227,8 @@ def _loaded_source_record(draft: Any, manifest: dict[str, Any]) -> dict[str, Any
     dependency_symbols = {"utils.py": "sample"}
     if "phase1_observability.py" in manifest["effective_custom_code_sha256"]:
         dependency_symbols["phase1_observability.py"] = "build_round_accounting"
+    if "phase2c_online.py" in manifest["effective_custom_code_sha256"]:
+        dependency_symbols["phase2c_online.py"] = "build_online_tree_tensors"
     loaded_dependencies = {}
     for filename, symbol_name in dependency_symbols.items():
         symbol = unwrapped_spec_generate.__globals__.get(symbol_name)
@@ -250,7 +252,11 @@ def _loaded_source_record(draft: Any, manifest: dict[str, Any]) -> dict[str, Any
             "matches_repository": dependency_matches,
         }
     generation_helpers = {}
-    for name in ("_spec_generate_reference", "_spec_generate_observed"):
+    for name in (
+        "_spec_generate_reference",
+        "_spec_generate_observed",
+        "_spec_generate_online_tree",
+    ):
         helper = getattr(draft, name, None)
         if helper is not None:
             generation_helpers[name] = locate_callable(helper)

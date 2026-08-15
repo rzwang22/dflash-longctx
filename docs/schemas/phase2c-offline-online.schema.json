@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-offline-online.schema.json",
+  "title": "Phase 2B.1 offline to Phase 2C online exact-root alignment",
+  "type": "object",
+  "required": ["schema_version", "status", "exact_matched_round_count", "unmatched_online_round_count", "unmatched_offline_round_count", "matched_round_agreement_rate", "unmatched_rounds_are_mismatches", "rows"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["disabled", "ok"]},
+    "exact_matched_round_count": {"type": "integer", "minimum": 0},
+    "unmatched_online_round_count": {"type": "integer", "minimum": 0},
+    "unmatched_offline_round_count": {"type": "integer", "minimum": 0},
+    "matched_round_agreement_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "unmatched_rounds_are_mismatches": {"const": false},
+    "rows": {"type": "array", "items": {"type": "object"}}
+  }
+}
