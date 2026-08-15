@@ -34,6 +34,11 @@ The preflight then checks:
   score/tie ordering;
 - exact observable-depth, terminal, full-depth, and right-censoring semantics.
 
+Right-censoring is defined relative to the shared final verified output: fewer
+than 15 tokens remain after a round's root. It does not imply that this round is
+terminal. The stored reference must exactly equal the corresponding final-output
+slice, and a right-censored slice must end exactly at the final-output boundary.
+
 No missing target token is filled or inferred. `candidate_unavailable` means only
 that the observed target token is absent from the captured candidate set at that
 static position. It is not a claim that the model could never recover it under a

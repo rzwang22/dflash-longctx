@@ -96,15 +96,22 @@ def _capture(
 
 
 def _built_capture(
-    *, censored: bool = False, task: str = "gov_report"
+    *,
+    censored: bool = False,
+    terminal_round: bool | None = None,
+    task: str = "gov_report",
 ) -> tuple[dict, dict]:
     positions = _positions()
     baseline = [position["baseline_token_id"] for position in positions]
     accepted = 1
     correction = positions[1]["candidates"][1]["token_id"]
-    generated = (
-        [42, baseline[0]] if censored else [42, baseline[0], correction, *baseline[2:]]
-    )
+    terminal_round = censored if terminal_round is None else terminal_round
+    if not censored:
+        generated = [42, baseline[0], correction, *baseline[2:]]
+    elif terminal_round:
+        generated = [42, baseline[0]]
+    else:
+        generated = [42, baseline[0], correction]
     diagnostics = {
         "tree_candidate_capture": {"enabled": True},
         "draft_block_size": 16,
@@ -120,8 +127,8 @@ def _built_capture(
                 "raw_cumulative_generated_token_count": 2,
                 "cumulative_generated_token_count": 2,
                 "returned_token_delta": 2,
-                "stop_reason": "max_new_tokens" if censored else "continue",
-                "truncated_token_count": 1 if censored else 0,
+                "stop_reason": "max_new_tokens" if terminal_round else "continue",
+                "truncated_token_count": 1 if terminal_round else 0,
                 "tree_candidate_capture": {
                     "round_index": 0,
                     "root_token_id": 42,
@@ -198,8 +205,22 @@ def _write_fixture(
     task: str = "gov_report",
     duplicate: bool = False,
     omit_provenance_field: str | None = None,
+    censored: bool = False,
+    terminal_round: bool | None = None,
+    malformed_truncated_reference: bool = False,
 ) -> None:
-    row, sample = _built_capture(task=task)
+    row, sample = _built_capture(
+        task=task, censored=censored, terminal_round=terminal_round
+    )
+    if malformed_truncated_reference:
+        row["reference_target_continuation_token_ids"] = row[
+            "reference_target_continuation_token_ids"
+        ][:-1]
+        row["reference_observed_depth"] = len(
+            row["reference_target_continuation_token_ids"]
+        )
+        row["reference_right_censored"] = True
+        row["full_depth_evaluation_eligible"] = False
     manifest = {
         "schema_version": "1.0",
         "status": "ok",
@@ -485,6 +506,54 @@ class Phase2B1Tests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 ValueError, "actual_loaded_module_sha256.*required property"
+            ):
+                validate_capture_directories(
+                    [directory], schema_dir=REPO_ROOT / "docs/schemas"
+                )
+
+    def test_terminal_right_censored_capture_passes_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            _write_fixture(directory, censored=True, terminal_round=True)
+            result = validate_capture_directories(
+                [directory], schema_dir=REPO_ROOT / "docs/schemas"
+            )
+            row = result["rounds"][0]
+            self.assertTrue(row["terminal_round"])
+            self.assertTrue(row["reference_right_censored"])
+            self.assertEqual(
+                row["round_output_start_offset"] + 1 + row["reference_observed_depth"],
+                len(row["final_verified_output_token_ids"]),
+            )
+
+    def test_nonterminal_right_censored_capture_at_boundary_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            _write_fixture(directory, censored=True, terminal_round=False)
+            result = validate_capture_directories(
+                [directory], schema_dir=REPO_ROOT / "docs/schemas"
+            )
+            row = result["rounds"][0]
+            self.assertFalse(row["terminal_round"])
+            self.assertTrue(row["reference_right_censored"])
+            self.assertEqual(
+                row["reference_target_continuation_token_ids"],
+                row["final_verified_output_token_ids"][
+                    row["round_output_start_offset"] + 1 :
+                ],
+            )
+
+    def test_malformed_censored_reference_before_boundary_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            _write_fixture(
+                directory,
+                censored=True,
+                terminal_round=False,
+                malformed_truncated_reference=True,
+            )
+            with self.assertRaisesRegex(
+                ValueError, "must reach the final-output boundary"
             ):
                 validate_capture_directories(
                     [directory], schema_dir=REPO_ROOT / "docs/schemas"

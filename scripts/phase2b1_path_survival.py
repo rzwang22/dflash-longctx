@@ -411,7 +411,7 @@ def _manifest(
             "maximum_draft_depth": 15,
             "scoring_rule": "mean cumulative captured draft log_probability; at equal depth equivalent to cumulative score",
             "tie_breaking": "higher normalized score, higher cumulative score, shorter depth, lexicographically ascending token IDs",
-            "censoring_rule": "reference depth below 15 is right-censored and excluded from depth checkpoints it cannot observe",
+            "censoring_rule": "reference depth below 15 is right-censored, must end at the final verified output boundary, does not imply a terminal round, and is excluded from unobserved depth checkpoints",
         },
         "policy_classes": {
             "top1_chain": {"deployable": True, "uses_target": False},

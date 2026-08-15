@@ -186,7 +186,19 @@ def validate_capture_directories(
                 != sample["final_verified_output_token_ids"]
             ):
                 raise ValueError(f"round/sample final output mismatch: {key}")
-            reference = row["reference_target_continuation_token_ids"]
+            final_output = [
+                int(token) for token in row["final_verified_output_token_ids"]
+            ]
+            root_offset = int(row["round_output_start_offset"])
+            if not 0 <= root_offset < len(final_output):
+                raise ValueError("round root offset is outside final verified output")
+            if int(row["root_token_id"]) != final_output[root_offset]:
+                raise ValueError(
+                    "round root token does not match final verified output"
+                )
+            reference = [
+                int(token) for token in row["reference_target_continuation_token_ids"]
+            ]
             observed = int(row["reference_observed_depth"])
             right_censored = bool(row["reference_right_censored"])
             if len(reference) != observed:
@@ -197,8 +209,15 @@ def validate_capture_directories(
                 )
             if bool(row["full_depth_evaluation_eligible"]) != (observed == 15):
                 raise ValueError("full-depth eligibility is inconsistent")
-            if right_censored and not bool(row["terminal_round"]):
-                raise ValueError("right-censored capture must be terminal")
+            if right_censored and root_offset + 1 + observed != len(final_output):
+                raise ValueError(
+                    "right-censored reference must reach the final-output boundary"
+                )
+            expected_reference = final_output[root_offset + 1 : root_offset + 16]
+            if reference != expected_reference:
+                raise ValueError(
+                    "captured reference does not exactly match the final-output slice"
+                )
             if right_censored and not row.get("censor_reason"):
                 raise ValueError("right-censored capture must include censor_reason")
             if (
