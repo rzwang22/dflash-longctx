@@ -95,7 +95,9 @@ def _capture(
     }
 
 
-def _built_capture(*, censored: bool = False) -> tuple[dict, dict]:
+def _built_capture(
+    *, censored: bool = False, task: str = "gov_report"
+) -> tuple[dict, dict]:
     positions = _positions()
     baseline = [position["baseline_token_id"] for position in positions]
     accepted = 1
@@ -139,10 +141,10 @@ def _built_capture(*, censored: bool = False) -> tuple[dict, dict]:
         ],
     }
     metadata = {
-        "task": "gov_report",
+        "task": task,
         "dataset_split": "test",
-        "sample_id": "sample-a",
-        "source_sample_id": "sample-a",
+        "sample_id": f"{task}-sample-a",
+        "source_sample_id": f"{task}-sample-a",
         "source_index": 0,
         "source_text_sha256": "a" * 64,
         "context_prefix_sha256": "b" * 64,
@@ -157,7 +159,10 @@ def _built_capture(*, censored: bool = False) -> tuple[dict, dict]:
             "draft_model_revision": "9b41424b7109f9c5413454f481b09a82b85333f4",
             "materialization_id": "fixture",
             "actual_loaded_module_sha256": "1" * 64,
-            "actual_loaded_dependency_sha256": {"phase1_observability.py": "2" * 64},
+            "actual_loaded_dependency_sha256": {
+                "utils.py": "2" * 64,
+                "phase1_observability.py": "3" * 64,
+            },
             "target_model_id": "Qwen/Qwen3-8B",
             "target_model_revision": "3" * 40,
         },
@@ -169,10 +174,10 @@ def _built_capture(*, censored: bool = False) -> tuple[dict, dict]:
     )[0]
     sample = {
         "schema_version": "1.0",
-        "task": "gov_report",
+        "task": task,
         "dataset_split": "test",
-        "sample_id": "sample-a",
-        "source_sample_id": "sample-a",
+        "sample_id": f"{task}-sample-a",
+        "source_sample_id": f"{task}-sample-a",
         "source_text_sha256": "a" * 64,
         "context_prefix_sha256": "b" * 64,
         "nominal_prompt_length": 1024,
@@ -187,8 +192,14 @@ def _built_capture(*, censored: bool = False) -> tuple[dict, dict]:
     return row, sample
 
 
-def _write_fixture(directory: Path, *, duplicate: bool = False) -> None:
-    row, sample = _built_capture()
+def _write_fixture(
+    directory: Path,
+    *,
+    task: str = "gov_report",
+    duplicate: bool = False,
+    omit_provenance_field: str | None = None,
+) -> None:
+    row, sample = _built_capture(task=task)
     manifest = {
         "schema_version": "1.0",
         "status": "ok",
@@ -204,7 +215,7 @@ def _write_fixture(directory: Path, *, duplicate: bool = False) -> None:
             "full_vocabulary_logits_saved": False,
             "target_logits_saved": False,
         },
-        "workload": {},
+        "workload": {"longbench_task": task},
         "measurement_policy": {},
         "alignment_policy": {},
         "interpretation": {},
@@ -217,16 +228,35 @@ def _write_fixture(directory: Path, *, duplicate: bool = False) -> None:
         "repository_custom_code_commit": "f" * 40,
         "base_model_id": "z-lab/Qwen3-8B-DFlash-b16",
         "base_model_revision": "9b41424b7109f9c5413454f481b09a82b85333f4",
+        "implementation": "instrumented",
         "materialization_id": "fixture",
         "materialized_model_path": "/fixture",
-        "custom_code_sha256": {},
-        "actual_loaded_module_path": "/fixture/modeling_dflash.py",
+        "custom_code_sha256": {"dflash.py": "1" * 64},
+        "actual_loaded_module_path": "/fixture/dflash.py",
         "actual_loaded_module_sha256": "1" * 64,
         "loaded_source_matches_repository": True,
+        "actual_loaded_dependencies": {
+            "utils.py": {
+                "actual_loaded_sha256": "2" * 64,
+                "matches_repository": True,
+            },
+            "phase1_observability.py": {
+                "actual_loaded_sha256": "3" * 64,
+                "matches_repository": True,
+            },
+        },
+        "controlled_but_not_imported_files": ["modeling_dflash.py"],
         "spec_generate": {},
-        "original": {},
+        "generation_helpers": {},
+        "weight_provenance": [{"filename": "model.safetensors"}],
+        "target": {
+            "id": "Qwen/Qwen3-8B",
+            "requested_revision": "3" * 40,
+        },
         "error": None,
     }
+    if omit_provenance_field is not None:
+        provenance.pop(omit_provenance_field)
     (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (directory / "samples.jsonl").write_text(
         json.dumps(sample) + "\n", encoding="utf-8"
@@ -413,15 +443,52 @@ class Phase2B1Tests(unittest.TestCase):
         )
         self.assertEqual(group["depth_survival"]["4"]["eligible_round_count"], 0)
 
-    def test_capture_schema_and_provenance_preflight(self) -> None:
+    def test_all_three_real_phase2b_provenance_shapes_pass_without_original(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directories = []
+            for task in ("gov_report", "qasper", "hotpotqa"):
+                directory = root / task
+                directory.mkdir()
+                _write_fixture(directory, task=task)
+                provenance = json.loads(
+                    (directory / "source-provenance.json").read_text(encoding="utf-8")
+                )
+                self.assertNotIn("original", provenance)
+                directories.append(directory)
+            result = validate_capture_directories(
+                directories, schema_dir=REPO_ROOT / "docs/schemas"
+            )
+            self.assertEqual(len(result["rounds"]), 3)
+            self.assertEqual(
+                {record["task"] for record in result["inputs"]},
+                {"gov_report", "qasper", "hotpotqa"},
+            )
+            self.assertTrue(
+                all(record["input_git_sha"] == "f" * 40 for record in result["inputs"])
+            )
+            self.assertTrue(
+                all(
+                    record["source_provenance_schema"]
+                    == "phase2b1-capture-source-provenance.schema.json"
+                    for record in result["inputs"]
+                )
+            )
+
+    def test_phase2b_provenance_still_requires_relied_on_source_hash(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
-            _write_fixture(directory)
-            result = validate_capture_directories(
-                [directory], schema_dir=REPO_ROOT / "docs/schemas"
+            _write_fixture(
+                directory, omit_provenance_field="actual_loaded_module_sha256"
             )
-            self.assertEqual(len(result["rounds"]), 1)
-            self.assertEqual(result["inputs"][0]["input_git_sha"], "f" * 40)
+            with self.assertRaisesRegex(
+                ValueError, "actual_loaded_module_sha256.*required property"
+            ):
+                validate_capture_directories(
+                    [directory], schema_dir=REPO_ROOT / "docs/schemas"
+                )
 
     def test_duplicate_round_id_fails_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

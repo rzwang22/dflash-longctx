@@ -18,9 +18,11 @@
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["capture_directory", "capture_directory_sha256", "artifact_sha256", "capture_schema_version", "input_git_sha", "top_k", "task", "sample_count", "round_count"],
+        "required": ["capture_directory", "capture_directory_sha256", "artifact_sha256", "capture_schema_version", "source_provenance_schema", "source_provenance_schema_version", "input_git_sha", "top_k", "task", "sample_count", "round_count"],
         "properties": {
           "capture_directory_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "source_provenance_schema": {"const": "phase2b1-capture-source-provenance.schema.json"},
+          "source_provenance_schema_version": {"const": "1.0"},
           "input_git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
           "top_k": {"type": "integer", "minimum": 16}
         }

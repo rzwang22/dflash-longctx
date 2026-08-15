@@ -9,8 +9,18 @@ sparse KV, training, or any change to DFlash generation.
 ## Strict preflight
 
 All capture directories are completely validated before the output directory is
-created. The preflight validates the Phase 2B manifest, sample, round, and Phase
-1 source-provenance schemas, and then checks:
+created. The preflight validates the Phase 2B manifest, sample, round, and
+Phase-2B-specific instrumented source-provenance schemas.
+
+The Phase 2B schema follows the artifact emitted by `phase2b_tree_capture.py`:
+it does not require the Phase 1A A/B-only `original` record. If an older artifact
+does contain `original`, the field is accepted but is not used. Validation still
+requires the instrumented materialization ID, loaded module and dependency
+hashes, repository match, pinned draft model/revision, target provenance, and
+weight provenance. This compatibility handling is in memory and never rewrites
+the capture directory.
+
+The preflight then checks:
 
 - successful capture/provenance status and repository-source matching;
 - batch size 1, temperature 0, block size 16, draft depth 15, and Top-K 16;

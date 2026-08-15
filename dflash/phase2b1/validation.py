@@ -101,7 +101,8 @@ def validate_capture_directories(
         provenance = _read_json(paths["source-provenance.json"])
         _validate_schema(manifest, schema_dir / "phase2b-capture-manifest.schema.json")
         _validate_schema(
-            provenance, schema_dir / "phase1-source-provenance.schema.json"
+            provenance,
+            schema_dir / "phase2b1-capture-source-provenance.schema.json",
         )
         for sample in samples:
             _validate_schema(sample, schema_dir / "phase2b-capture-sample.schema.json")
@@ -220,6 +221,14 @@ def validate_capture_directories(
                     raise ValueError(
                         f"round capture provenance mismatch for {row_field}: {key}"
                     )
+            expected_dependency_hashes = {
+                filename: record["actual_loaded_sha256"]
+                for filename, record in provenance["actual_loaded_dependencies"].items()
+            }
+            if row_provenance.get("actual_loaded_dependency_sha256") != (
+                expected_dependency_hashes
+            ):
+                raise ValueError(f"round capture dependency provenance mismatch: {key}")
             round_id = (*key, int(row["generation_repeat"]), int(row["round_index"]))
             if round_id in seen_local or round_id in global_round_ids:
                 raise ValueError(
@@ -243,6 +252,8 @@ def validate_capture_directories(
                 ).hexdigest(),
                 "artifact_sha256": file_hashes,
                 "capture_schema_version": manifest["schema_version"],
+                "source_provenance_schema": "phase2b1-capture-source-provenance.schema.json",
+                "source_provenance_schema_version": provenance["schema_version"],
                 "input_git_sha": provenance["repository_custom_code_commit"],
                 "top_k": int(configuration["top_k"]),
                 "task": next(iter(sample_map))[0],
