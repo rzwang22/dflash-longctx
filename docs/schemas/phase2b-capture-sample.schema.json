@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2b-capture-sample.schema.json",
+  "title": "Phase 2B capture sample",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "source_sample_id", "source_text_sha256", "nominal_prompt_length", "actual_prompt_length", "generated_token_count", "final_verified_output_token_ids", "control_capture_output_token_ids_equal", "capture_repeats", "full_vocabulary_logits_saved", "target_logits_saved"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "sample_id": {"type": "string"},
+    "source_sample_id": {"type": "string"},
+    "source_text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "actual_prompt_length": {"type": "integer", "minimum": 1},
+    "generated_token_count": {"type": "integer", "minimum": 0},
+    "final_verified_output_token_ids": {"type": "array", "items": {"type": "integer"}},
+    "control_capture_output_token_ids_equal": {"const": true},
+    "capture_repeats": {"type": "array", "minItems": 1},
+    "full_vocabulary_logits_saved": {"const": false},
+    "target_logits_saved": {"const": false}
+  }
+}

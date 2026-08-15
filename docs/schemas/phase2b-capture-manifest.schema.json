@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2b-capture-manifest.schema.json",
+  "title": "Phase 2B exact-candidate capture manifest",
+  "type": "object",
+  "required": ["schema_version", "status", "configuration", "workload", "measurement_policy", "alignment_policy", "interpretation", "artifacts", "error"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "configuration": {
+      "type": "object",
+      "required": ["phase", "mode", "top_k", "control_then_capture", "control_capture_token_exact_required", "full_vocabulary_logits_saved", "target_logits_saved"],
+      "properties": {
+        "phase": {"const": "2B"},
+        "mode": {"const": "exact_draft_candidate_capture"},
+        "top_k": {"type": "integer", "minimum": 2, "maximum": 16},
+        "control_then_capture": {"const": true},
+        "control_capture_token_exact_required": {"const": true},
+        "full_vocabulary_logits_saved": {"const": false},
+        "target_logits_saved": {"const": false}
+      }
+    },
+    "workload": {"type": "object"},
+    "measurement_policy": {"type": "object"},
+    "alignment_policy": {"type": "object"},
+    "interpretation": {"type": "object"},
+    "artifacts": {"type": "object"},
+    "error": {"type": ["object", "null"]}
+  }
+}

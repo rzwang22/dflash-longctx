@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2b-tree-policy-config.schema.json",
+  "title": "Phase 2B tree policy configuration",
+  "type": "object",
+  "required": ["schema_version", "node_budget_semantics", "candidate_node_budgets", "maximum_depth", "maximum_per_position_candidates", "prefix_closed", "unique_prefix_nodes", "static_parallel_logit_candidates", "cartesian_product_materialized", "policies", "forbidden_interpretations"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "maximum_depth": {"const": 15},
+    "maximum_per_position_candidates": {"const": 16},
+    "prefix_closed": {"const": true},
+    "unique_prefix_nodes": {"const": true},
+    "static_parallel_logit_candidates": {"const": true},
+    "cartesian_product_materialized": {"const": false},
+    "policies": {"type": "object", "required": ["top1_chain", "score_beam", "confidence_gated", "oracle_prefix_closed"]},
+    "forbidden_interpretations": {"type": "array", "minItems": 6, "items": {"type": "string"}}
+  }
+}

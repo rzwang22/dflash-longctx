@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2b-tree-summary.schema.json",
+  "title": "Phase 2B offline tree aggregate",
+  "type": "object",
+  "required": ["schema_version", "event_count", "by_task_context_budget_policy", "overall_by_budget_policy", "interpretation"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "event_count": {"type": "integer", "minimum": 0},
+    "by_task_context_budget_policy": {"type": "object"},
+    "overall_by_budget_policy": {"type": "object"},
+    "interpretation": {
+      "type": "object",
+      "required": ["offline_coverage_feasibility_only", "actual_tree_acceptance_measured", "latency_measured", "speedup_claim_supported", "committed_tokens_are_coverage_upper_bounds", "oracle_uses_target_information", "deployable_policies_use_target_information"]
+    }
+  }
+}

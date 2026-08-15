@@ -21,6 +21,7 @@ from transformers.cache_utils import Cache
 from .phase1_observability import (
     DeferredCudaTimer,
     TargetModuleCudaProfiler,
+    build_tree_candidate_capture,
     build_target_rank_events,
     build_round_accounting,
     finalize_generation_result,
@@ -31,6 +32,7 @@ from .phase1_observability import (
     tensor_shape,
     validate_attention_kv_lengths,
     validate_phase2a_mode_options,
+    validate_phase2b_capture_options,
 )
 from .utils import build_target_layer_ids, extract_context_feature, sample
 
@@ -341,6 +343,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         rank_top_ms: list[int] | None = None,
         rank_max_m: int = 16,
         enable_verification_profiling: bool = False,
+        enable_tree_capture: bool = False,
+        tree_top_k: int = 16,
     ):
         """Generate with the pinned behavior; diagnostics are strictly opt-in."""
 
@@ -353,12 +357,22 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             rank_top_ms=rank_top_ms,
             rank_max_m=rank_max_m,
         )
+        validate_phase2b_capture_options(
+            enable_tree_capture=enable_tree_capture,
+            tree_top_k=tree_top_k,
+            enable_rank_diagnostics=enable_rank_diagnostics,
+            enable_verification_profiling=enable_verification_profiling,
+            enable_profiling=enable_profiling,
+            return_diagnostics=return_diagnostics,
+            temperature=temperature,
+        )
         if not any(
             (
                 return_diagnostics,
                 enable_profiling,
                 enable_rank_diagnostics,
                 enable_verification_profiling,
+                enable_tree_capture,
             )
         ):
             return self._spec_generate_reference(
@@ -380,6 +394,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             rank_top_ms=configured_rank_top_ms,
             rank_max_m=rank_max_m,
             enable_verification_profiling=enable_verification_profiling,
+            enable_tree_capture=enable_tree_capture,
+            tree_top_k=tree_top_k,
         )
 
     def _spec_generate_reference(
@@ -510,6 +526,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         rank_top_ms: list[int],
         rank_max_m: int,
         enable_verification_profiling: bool,
+        enable_tree_capture: bool,
+        tree_top_k: int,
     ):
         """Run the same algorithm with optional accounting, events, and NVTX."""
 
@@ -652,6 +670,19 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             .sum(dim=1)[0]
                             .item()
                         )
+                        current_tree_capture = None
+                        if enable_tree_capture:
+                            current_tree_capture = build_tree_candidate_capture(
+                                torch,
+                                draft_logits=draft_logits,
+                                block_output_ids=block_output_ids,
+                                target_verification_token_ids=posterior[:, :-1],
+                                round_index=round_index,
+                                context_length_before=context_length_before,
+                                prompt_length=num_input_tokens,
+                                accepted_draft_tokens=accepted_draft_tokens,
+                                top_k=tree_top_k,
+                            )
                         if enable_rank_diagnostics:
                             current_rank_events = build_target_rank_events(
                                 torch,
@@ -740,6 +771,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         "gpu_memory": gpu_memory_snapshot(torch, target.device)
                         if enable_profiling
                         else None,
+                        "tree_candidate_capture": current_tree_capture,
                     }
                 )
                 rounds.append(accounting)
@@ -904,6 +936,24 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 "target_bonus_token_ranked": False,
                 "interpretation": "single-frontier recoverability only",
                 "tree_accepted_length_derived": False,
+            },
+            "tree_candidate_capture": {
+                "enabled": enable_tree_capture,
+                "top_k": tree_top_k if enable_tree_capture else None,
+                "round_count": len(rounds) if enable_tree_capture else 0,
+                "logit_source": (
+                    "exact final draft logits used by temperature-zero sampling"
+                    if enable_tree_capture
+                    else None
+                ),
+                "score_semantics": (
+                    "normalized log probability from log_softmax"
+                    if enable_tree_capture
+                    else None
+                ),
+                "full_vocabulary_logits_saved": False,
+                "target_logits_saved": False,
+                "extra_draft_forward_calls": 0,
             },
             "target_module_profiling": target_module_profiling,
             "profiling": {

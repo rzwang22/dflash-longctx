@@ -7,6 +7,7 @@ CPU-only development machines.
 
 from __future__ import annotations
 
+import math
 import time
 from contextlib import nullcontext
 from types import TracebackType
@@ -173,6 +174,158 @@ def validate_phase2a_mode_options(
         if rank_max_m < 16 or rank_max_m < max(configured):
             raise ValueError("rank max_m must be >= 16 and every requested Top-M")
     return configured
+
+
+def validate_phase2b_capture_options(
+    *,
+    enable_tree_capture: bool,
+    tree_top_k: int,
+    enable_rank_diagnostics: bool,
+    enable_verification_profiling: bool,
+    enable_profiling: bool,
+    return_diagnostics: bool,
+    temperature: float,
+) -> None:
+    """Validate the isolated Phase 2B candidate capture mode."""
+
+    if not enable_tree_capture:
+        return
+    if not return_diagnostics:
+        raise ValueError("Phase 2B tree capture requires return_diagnostics=True")
+    if temperature != 0.0:
+        raise ValueError("Phase 2B tree capture requires temperature=0")
+    if enable_rank_diagnostics or enable_verification_profiling or enable_profiling:
+        raise ValueError(
+            "Phase 2B tree capture is isolated from Phase 2A rank/profiling modes"
+        )
+    if not 2 <= tree_top_k <= 16:
+        raise ValueError("Phase 2B tree_top_k must be between 2 and 16")
+
+
+def build_tree_candidate_capture(
+    torch_module: Any,
+    *,
+    draft_logits: Any,
+    block_output_ids: Any,
+    target_verification_token_ids: Any,
+    round_index: int,
+    context_length_before: int,
+    prompt_length: int,
+    accepted_draft_tokens: int,
+    top_k: int,
+) -> dict[str, Any]:
+    """Extract bounded candidates from the exact logits used by draft sampling.
+
+    Only ``P * top_k`` token IDs and normalized log probabilities cross to CPU.
+    The full-vocabulary logits remain transient GPU tensors owned by generation.
+    """
+
+    if len(draft_logits.shape) != 3 or int(draft_logits.shape[0]) != 1:
+        raise ValueError("tree capture requires draft logits shaped [1, P, V]")
+    proposed_count = int(draft_logits.shape[1])
+    vocabulary_size = int(draft_logits.shape[2])
+    if proposed_count <= 0 or not 2 <= top_k <= min(16, vocabulary_size):
+        raise ValueError("tree capture top_k must be in [2, min(16, vocab_size)]")
+    if (
+        len(block_output_ids.shape) != 2
+        or int(block_output_ids.shape[0]) != 1
+        or int(block_output_ids.shape[1]) != proposed_count + 1
+    ):
+        raise ValueError("tree capture block IDs do not align with draft logits")
+    if (
+        len(target_verification_token_ids.shape) != 2
+        or int(target_verification_token_ids.shape[0]) != 1
+        or int(target_verification_token_ids.shape[1]) < proposed_count
+    ):
+        raise ValueError("tree capture verification IDs do not align with drafts")
+    if not 0 <= accepted_draft_tokens <= proposed_count:
+        raise ValueError("accepted draft length is outside the proposed block")
+
+    draft = draft_logits[0]
+    ordered_token_ids = torch_module.argsort(
+        draft, dim=-1, descending=True, stable=True
+    )[:, :top_k]
+    normalized_log_probabilities = torch_module.log_softmax(
+        draft.float(), dim=-1
+    )
+    ordered_log_probabilities = torch_module.gather(
+        normalized_log_probabilities, 1, ordered_token_ids
+    )
+
+    baseline_ids = block_output_ids[0, 1:].detach()
+    top1_ids = ordered_token_ids[:, 0]
+    if not bool(torch_module.equal(baseline_ids, top1_ids)):
+        raise RuntimeError(
+            "Phase 2B alignment failed: sampled draft IDs differ from exact-logit "
+            f"Top-1 at round={round_index}, context={context_length_before}, "
+            f"draft={baseline_ids.cpu().tolist()}, top1={top1_ids.cpu().tolist()}"
+        )
+
+    verification_ids = target_verification_token_ids[0, :proposed_count]
+    verification_lcp = int(
+        (baseline_ids == verification_ids).cumprod(dim=0).sum().item()
+    )
+    if verification_lcp != accepted_draft_tokens:
+        raise RuntimeError(
+            "Phase 2B verification alignment failed: "
+            f"round={round_index}, context={context_length_before}, "
+            f"accepted={accepted_draft_tokens}, lcp={verification_lcp}, "
+            f"draft={baseline_ids.cpu().tolist()}, "
+            f"verification={verification_ids.detach().cpu().tolist()}"
+        )
+
+    top_ids_cpu = ordered_token_ids.detach().cpu().tolist()
+    top_log_probs_cpu = ordered_log_probabilities.detach().cpu().tolist()
+    baseline_ids_cpu = baseline_ids.cpu().tolist()
+    positions = []
+    for position_index in range(proposed_count):
+        candidates = []
+        for candidate_index in range(top_k):
+            log_probability = float(top_log_probs_cpu[position_index][candidate_index])
+            if not math.isfinite(log_probability):
+                raise RuntimeError(
+                    "Phase 2B capture encountered a non-finite normalized score at "
+                    f"round={round_index}, position={position_index + 1}, "
+                    f"rank={candidate_index + 1}"
+                )
+            candidates.append(
+                {
+                    "rank": candidate_index + 1,
+                    "token_id": int(top_ids_cpu[position_index][candidate_index]),
+                    "log_probability": log_probability,
+                }
+            )
+        positions.append(
+            {
+                "block_position": position_index + 1,
+                "baseline_token_id": int(baseline_ids_cpu[position_index]),
+                "candidates": candidates,
+                "top1_top2_log_probability_margin": float(
+                    candidates[0]["log_probability"]
+                    - candidates[1]["log_probability"]
+                ),
+            }
+        )
+
+    root_token_id = int(block_output_ids[0, 0].detach().cpu().item())
+    return {
+        "round_index": int(round_index),
+        "root_token_id": root_token_id,
+        "root_absolute_output_index": int(context_length_before),
+        "round_output_start_offset": int(context_length_before - prompt_length),
+        "baseline_draft_token_ids": [int(value) for value in baseline_ids_cpu],
+        "positions": positions,
+        "top_k": int(top_k),
+        "proposed_draft_token_count": proposed_count,
+        "accepted_draft_token_count": int(accepted_draft_tokens),
+        "immediate_verification_lcp": verification_lcp,
+        "immediate_alignment_verified": True,
+        "logit_source": "exact final draft logits used by temperature-zero sampling",
+        "score_semantics": "normalized log probability from log_softmax",
+        "tie_break_rule": "descending_logit_then_ascending_token_id",
+        "full_vocabulary_logits_saved": False,
+        "target_verification_token_ids_saved": False,
+    }
 
 
 def build_target_rank_events(

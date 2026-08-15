@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2b-tree-event.schema.json",
+  "title": "Phase 2B offline tree policy event",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "round_index", "policy", "policy_class", "policy_variant", "oracle", "deployable", "policy_uses_target_information", "requested_total_tree_node_budget", "total_node_count", "candidate_node_count", "total_tree_nodes", "draft_candidate_nodes", "leaf_count", "maximum_depth", "prefix_sharing_ratio", "baseline_accepted_draft_token_count", "covered_target_prefix_depth", "covered_target_tokens_per_candidate_node", "committed_tokens_upper_bound", "extra_covered_depth_vs_top1", "extra_covered_tokens", "depth_recall", "full_depth_evaluation_eligible", "reference_right_censored", "actual_accepted_length_derived", "latency_or_speedup_derived"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "policy": {"enum": ["top1_chain", "score_beam", "confidence_gated", "oracle_prefix_closed"]},
+    "policy_class": {"enum": ["deployable", "oracle"]},
+    "oracle": {"type": "boolean"},
+    "deployable": {"type": "boolean"},
+    "policy_uses_target_information": {"type": "boolean"},
+    "requested_total_tree_node_budget": {"type": "integer", "minimum": 16},
+    "total_node_count": {"type": "integer", "minimum": 1},
+    "candidate_node_count": {"type": "integer", "minimum": 0},
+    "covered_target_prefix_depth": {"type": "integer", "minimum": 0, "maximum": 15},
+    "committed_tokens_upper_bound": {"type": "integer", "minimum": 1, "maximum": 16},
+    "depth_recall": {"type": "object", "required": ["1", "2", "4", "8", "15"]},
+    "actual_accepted_length_derived": {"const": false},
+    "latency_or_speedup_derived": {"const": false}
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2b-replay-manifest.schema.json",
+  "title": "Phase 2B offline replay manifest",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "mode", "created_at_utc", "command", "repository", "capture_rounds", "capture_rounds_sha256", "capture_round_count", "tree_event_count", "node_budgets", "policies", "confidence_thresholds", "confidence_branch_width", "root_counts_toward_budget", "maximum_draft_depth", "target_label_source", "right_censoring_rule", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2B"},
+    "status": {"const": "ok"},
+    "mode": {"const": "offline_cpu_replay"},
+    "repository": {"type": "object", "required": ["commit_sha", "branch", "dirty"]},
+    "capture_rounds_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "capture_round_count": {"type": "integer", "minimum": 1},
+    "tree_event_count": {"type": "integer", "minimum": 1},
+    "node_budgets": {"type": "array", "items": {"type": "integer", "minimum": 16}},
+    "policies": {"type": "array", "items": {"type": "string"}},
+    "root_counts_toward_budget": {"const": true},
+    "maximum_draft_depth": {"const": 15},
+    "artifacts": {"type": "array", "minItems": 7, "items": {"type": "string"}}
+  }
+}

@@ -17,6 +17,9 @@ dependencies = [
 include = ["dflash*"]
 
 [project.optional-dependencies]
+test = [
+    "jsonschema>=4.18",
+]
 transformers = [
     "torch",
     "transformers==4.57.1",
