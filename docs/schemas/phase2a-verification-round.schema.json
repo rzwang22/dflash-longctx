@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2a-verification-round.schema.json",
+  "title": "Phase 2A verification round profile",
+  "type": "object",
+  "required": [
+    "task",
+    "sample_id",
+    "nominal_prompt_length",
+    "actual_prompt_length",
+    "round_index",
+    "target_self_attention_module_cuda_ms",
+    "target_mlp_module_cuda_ms",
+    "target_lm_head_cuda_ms",
+    "target_verification_cuda_ms",
+    "target_unattributed_cuda_ms",
+    "target_self_attention_over_verification",
+    "target_mlp_over_verification",
+    "target_lm_head_over_verification",
+    "partition_reliable",
+    "per_layer",
+    "draft_cuda_ms",
+    "round_cuda_ms",
+    "draft_over_round",
+    "verification_over_round"
+  ],
+  "properties": {
+    "round_index": {"type": "integer", "minimum": 0},
+    "partition_reliable": {"type": "boolean"},
+    "per_layer": {"type": "array"},
+    "target_unattributed_cuda_ms": {"type": ["number", "null"]}
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2a-nsight-breakdown.schema.json",
+  "title": "Phase 2A Nsight verification kernel breakdown",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "source_reports",
+    "scope_totals",
+    "scope_category_totals",
+    "kernel_rows",
+    "nvtx_projection_rows",
+    "classification_rules",
+    "classification_semantics"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"const": "parsed"},
+    "source_reports": {"type": "array"},
+    "scope_totals": {"type": "object"},
+    "scope_category_totals": {"type": "array"},
+    "kernel_rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "scope",
+          "nvtx_range",
+          "raw_kernel_name",
+          "classification_rule",
+          "classification_pattern",
+          "classified_category",
+          "kernel_count",
+          "total_duration_ns",
+          "over_complete_verification_kernel_time"
+        ]
+      }
+    },
+    "nvtx_projection_rows": {"type": "array"},
+    "classification_rules": {"type": "array"},
+    "classification_semantics": {"type": "object"}
+  }
+}

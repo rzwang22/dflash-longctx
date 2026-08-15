@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2a-sample.schema.json",
+  "title": "Phase 2A sample result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_mode",
+    "task",
+    "sample_id",
+    "source_sample_id",
+    "nominal_prompt_length",
+    "actual_prompt_length",
+    "generated_token_count",
+    "generated_output_token_ids",
+    "generated_output_token_ids_sha256",
+    "generated_text",
+    "control_diagnostic_output_token_ids_equal",
+    "control_timing",
+    "diagnostic_repeats"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_mode": {"enum": ["rank", "verification-profile"]},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "generated_token_count": {"type": "integer", "minimum": 0},
+    "generated_output_token_ids": {
+      "type": "array",
+      "items": {"type": "integer"}
+    },
+    "control_diagnostic_output_token_ids_equal": {"const": true},
+    "control_timing": {"type": "array"},
+    "diagnostic_repeats": {"type": "array"}
+  }
+}

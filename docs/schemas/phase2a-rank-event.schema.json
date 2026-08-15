@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2a-rank-event.schema.json",
+  "title": "Phase 2A target-rank event",
+  "type": "object",
+  "required": [
+    "task",
+    "sample_id",
+    "nominal_prompt_length",
+    "actual_prompt_length",
+    "round_index",
+    "block_position",
+    "position_category",
+    "accepted_prefix_length",
+    "target_token_id",
+    "draft_top1_token_id",
+    "target_rank_in_draft",
+    "target_in_top_1",
+    "target_in_top_2",
+    "target_in_top_4",
+    "target_in_top_8",
+    "target_in_top_16",
+    "target_logit",
+    "draft_top1_logit",
+    "top1_minus_target_logit_margin",
+    "top_m_token_ids",
+    "top_m_logits",
+    "tree_accepted_length_derived"
+  ],
+  "properties": {
+    "position_category": {
+      "enum": [
+        "accepted_prefix",
+        "first_rejection_frontier",
+        "post_rejection_counterfactual",
+        "full_block_accepted"
+      ]
+    },
+    "round_index": {"type": "integer", "minimum": 0},
+    "block_position": {"type": "integer", "minimum": 1, "maximum": 15},
+    "target_rank_in_draft": {"type": "integer", "minimum": 1},
+    "top_m_token_ids": {"type": "array", "items": {"type": "integer"}},
+    "top_m_logits": {"type": "array", "items": {"type": "number"}},
+    "tree_accepted_length_derived": {"const": false}
+  }
+}

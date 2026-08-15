@@ -20,12 +20,17 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.cache_utils import Cache
 from .phase1_observability import (
     DeferredCudaTimer,
+    TargetModuleCudaProfiler,
+    build_target_rank_events,
     build_round_accounting,
     finalize_generation_result,
     gpu_memory_snapshot,
     nvtx_range,
+    resolve_target_module_records,
+    summarize_target_module_records,
     tensor_shape,
     validate_attention_kv_lengths,
+    validate_phase2a_mode_options,
 )
 from .utils import build_target_layer_ids, extract_context_feature, sample
 
@@ -332,10 +337,30 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         *,
         return_diagnostics: bool = False,
         enable_profiling: bool = False,
+        enable_rank_diagnostics: bool = False,
+        rank_top_ms: list[int] | None = None,
+        rank_max_m: int = 16,
+        enable_verification_profiling: bool = False,
     ):
         """Generate with the pinned behavior; diagnostics are strictly opt-in."""
 
-        if not return_diagnostics and not enable_profiling:
+        configured_rank_top_ms = validate_phase2a_mode_options(
+            enable_rank_diagnostics=enable_rank_diagnostics,
+            enable_verification_profiling=enable_verification_profiling,
+            enable_profiling=enable_profiling,
+            return_diagnostics=return_diagnostics,
+            temperature=temperature,
+            rank_top_ms=rank_top_ms,
+            rank_max_m=rank_max_m,
+        )
+        if not any(
+            (
+                return_diagnostics,
+                enable_profiling,
+                enable_rank_diagnostics,
+                enable_verification_profiling,
+            )
+        ):
             return self._spec_generate_reference(
                 target=target,
                 input_ids=input_ids,
@@ -351,6 +376,10 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             temperature=temperature,
             return_diagnostics=return_diagnostics,
             enable_profiling=enable_profiling,
+            enable_rank_diagnostics=enable_rank_diagnostics,
+            rank_top_ms=configured_rank_top_ms,
+            rank_max_m=rank_max_m,
+            enable_verification_profiling=enable_verification_profiling,
         )
 
     def _spec_generate_reference(
@@ -477,6 +506,10 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         *,
         return_diagnostics: bool,
         enable_profiling: bool,
+        enable_rank_diagnostics: bool,
+        rank_top_ms: list[int],
+        rank_max_m: int,
+        enable_verification_profiling: bool,
     ):
         """Run the same algorithm with optional accounting, events, and NVTX."""
 
@@ -508,15 +541,28 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         timer = DeferredCudaTimer(torch, enabled=enable_profiling, device=target.device)
         attention_records = []
         attention_timing_pairs = []
+        target_module_records = []
         round_timing_pairs = []
         rounds = []
+        rank_events = []
         accepted_draft_lengths = []
         cache_commit_lengths = []
         total_pair = timer.start()
 
         with nvtx_range(torch, "dflash.total", enable_profiling):
             prefill_pair = timer.start()
-            with nvtx_range(torch, "dflash.prefill", enable_profiling):
+            with (
+                nvtx_range(torch, "dflash.prefill", enable_profiling),
+                TargetModuleCudaProfiler(
+                    torch,
+                    timer=timer,
+                    target=target,
+                    stage="prefill",
+                    round_index=None,
+                    records=target_module_records,
+                    enabled=enable_verification_profiling,
+                ),
+            ):
                 output = target(
                     input_ids,
                     position_ids=position_ids[:, :num_input_tokens],
@@ -576,7 +622,18 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     timer.stop(draft_pair)
 
                     verify_pair = timer.start()
-                    with nvtx_range(torch, "dflash.verify", enable_profiling):
+                    with (
+                        nvtx_range(torch, "dflash.verify", enable_profiling),
+                        TargetModuleCudaProfiler(
+                            torch,
+                            timer=timer,
+                            target=target,
+                            stage="verification",
+                            round_index=round_index,
+                            records=target_module_records,
+                            enabled=enable_verification_profiling,
+                        ),
+                    ):
                         output = target(
                             block_output_ids,
                             position_ids=block_position_ids,
@@ -595,6 +652,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             .sum(dim=1)[0]
                             .item()
                         )
+                        if enable_rank_diagnostics:
+                            current_rank_events = build_target_rank_events(
+                                torch,
+                                draft_logits=draft_logits,
+                                target_verification_logits=output.logits,
+                                round_index=round_index,
+                                accepted_prefix_length=accepted_draft_tokens,
+                                top_ms=rank_top_ms,
+                                max_m=rank_max_m,
+                            )
+                            rank_events.extend(current_rank_events)
                         output_ids[:, start : start + accepted_draft_tokens + 1] = (
                             block_output_ids[:, : accepted_draft_tokens + 1]
                         )
@@ -697,6 +765,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     final_stop_reason = "eos"
         timer.stop(total_pair)
         timer.resolve()
+        if enable_verification_profiling:
+            resolve_target_module_records(timer, target_module_records)
 
         for attention_record, attention_pair in attention_timing_pairs:
             attention_record["combined_attention_cuda_elapsed_ms"] = timer.values(
@@ -738,6 +808,24 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     ),
                 }
             )
+            if enable_verification_profiling:
+                round_module_records = [
+                    record
+                    for record in target_module_records
+                    if record["stage"] == "verification"
+                    and record["round_index"] == accounting["round_index"]
+                ]
+                accounting["target_module_profile"] = {
+                    "records": round_module_records,
+                    "summary": summarize_target_module_records(
+                        round_module_records,
+                        total_cuda_ms=verify_timing["cuda_elapsed_ms"],
+                        target_layer_count=len(target.model.layers),
+                        invocation_count=1,
+                    ),
+                }
+            else:
+                accounting["target_module_profile"] = None
 
         combined_attention_total_ms = sum(
             record["combined_attention_cuda_elapsed_ms"] or 0.0
@@ -749,6 +837,52 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         round_total_ms = sum(
             record["timing"]["round_cuda_elapsed_ms"] or 0.0 for record in rounds
         )
+        verification_total_ms = sum(
+            record["timing"]["verification_cuda_elapsed_ms"] or 0.0
+            for record in rounds
+        )
+        if enable_verification_profiling:
+            prefill_module_records = [
+                record
+                for record in target_module_records
+                if record["stage"] == "prefill"
+            ]
+            verification_module_records = [
+                record
+                for record in target_module_records
+                if record["stage"] == "verification"
+            ]
+            target_module_profiling = {
+                "enabled": True,
+                "timing_scope": "whole target modules; self-attention includes projections",
+                "pure_sdpa_isolated": False,
+                "prefill": {
+                    "records": prefill_module_records,
+                    "summary": summarize_target_module_records(
+                        prefill_module_records,
+                        total_cuda_ms=timer.values(prefill_pair)["cuda_elapsed_ms"],
+                        target_layer_count=len(target.model.layers),
+                        invocation_count=1,
+                    ),
+                },
+                "verification": {
+                    "records": verification_module_records,
+                    "summary": summarize_target_module_records(
+                        verification_module_records,
+                        total_cuda_ms=verification_total_ms,
+                        target_layer_count=len(target.model.layers),
+                        invocation_count=len(rounds),
+                    ),
+                },
+            }
+        else:
+            target_module_profiling = {
+                "enabled": False,
+                "timing_scope": "not measured",
+                "pure_sdpa_isolated": False,
+                "prefill": None,
+                "verification": None,
+            }
 
         diagnostics = {
             "schema_version": "1.0",
@@ -761,6 +895,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "cache_commit_lengths": cache_commit_lengths,
             "stop_reason": final_stop_reason,
             "rounds": rounds,
+            "rank_diagnostics": {
+                "enabled": enable_rank_diagnostics,
+                "top_ms": rank_top_ms if enable_rank_diagnostics else [],
+                "max_m": rank_max_m if enable_rank_diagnostics else None,
+                "events": rank_events,
+                "full_vocabulary_logits_saved": False,
+                "target_bonus_token_ranked": False,
+                "interpretation": "single-frontier recoverability only",
+                "tree_accepted_length_derived": False,
+            },
+            "target_module_profiling": target_module_profiling,
             "profiling": {
                 "enabled": enable_profiling,
                 "nvtx_ranges": [
@@ -771,6 +916,12 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     "dflash.verify",
                     "dflash.commit",
                     "dflash.attention.combined_context_block",
+                    "target.prefill.layer.{i}.self_attn",
+                    "target.prefill.layer.{i}.mlp",
+                    "target.prefill.lm_head",
+                    "target.verify.layer.{i}.self_attn",
+                    "target.verify.layer.{i}.mlp",
+                    "target.verify.lm_head",
                 ],
                 "explicit_cuda_synchronize_count": 1 if enable_profiling else 0,
                 "prefill": timer.values(prefill_pair),

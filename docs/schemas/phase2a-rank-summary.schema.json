@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2a-rank-summary.schema.json",
+  "title": "Phase 2A rank summary",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "run_mode",
+    "event_count",
+    "aggregates",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "run_mode": {"const": "rank"},
+    "event_count": {"type": "integer", "minimum": 0},
+    "aggregates": {"type": ["object", "null"]},
+    "error": {"type": ["object", "null"]}
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2a-verification-module-event.schema.json",
+  "title": "Phase 2A target module CUDA event",
+  "type": "object",
+  "required": [
+    "task",
+    "sample_id",
+    "nominal_prompt_length",
+    "actual_prompt_length",
+    "stage",
+    "round_index",
+    "module_kind",
+    "layer_index",
+    "nvtx_range",
+    "cpu_elapsed_ms",
+    "cuda_elapsed_ms"
+  ],
+  "properties": {
+    "stage": {"enum": ["prefill", "verification"]},
+    "round_index": {"type": ["integer", "null"], "minimum": 0},
+    "module_kind": {"enum": ["self_attn", "mlp", "lm_head"]},
+    "layer_index": {"type": ["integer", "null"], "minimum": 0},
+    "cpu_elapsed_ms": {"type": ["number", "null"]},
+    "cuda_elapsed_ms": {"type": ["number", "null"]}
+  }
+}

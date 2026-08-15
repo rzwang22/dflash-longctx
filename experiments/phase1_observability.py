@@ -296,6 +296,7 @@ def _call_generation(
     stop_token_ids: list[int],
     return_diagnostics: bool,
     enable_profiling: bool,
+    generation_options: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any] | None, dict[str, Any], str]:
     started_at = time.perf_counter()
     start_event = end_event = None
@@ -311,6 +312,7 @@ def _call_generation(
         stop_token_ids=stop_token_ids,
         return_diagnostics=return_diagnostics,
         enable_profiling=enable_profiling,
+        **(generation_options or {}),
     )
     output_type = f"{type(output).__module__}.{type(output).__qualname__}"
     diagnostics = None

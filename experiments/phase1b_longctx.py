@@ -169,7 +169,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    args = build_parser().parse_args(argv)
+    return validate_args(build_parser().parse_args(argv))
+
+
+def validate_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Validate a Phase 1B-compatible namespace, including Phase 2A extensions."""
+
     direct_jsonl = resolve_jsonl_path(
         task=args.longbench_task,
         longbench_root=args.longbench_root,
