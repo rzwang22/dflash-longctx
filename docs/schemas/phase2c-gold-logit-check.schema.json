@@ -1,20 +1,39 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-gold-logit-check.schema.json",
-  "title": "Phase 2C packed-tree versus linear-path logit gold check",
+  "title": "Phase 2C/2C.1 packed-tree logits gold record",
   "type": "object",
-  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "round_index", "status", "checked_node_count", "all_tree_nodes_checked", "greedy_argmax_all_equal", "top_k_token_ids_all_equal", "maximum_absolute_error", "mean_absolute_error", "maximum_absolute_tolerance", "mean_absolute_tolerance", "nodes"],
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "round_index", "status"],
   "properties": {
     "schema_version": {"const": "1.0"},
-    "status": {"const": "passed"},
-    "checked_node_count": {"type": "integer", "minimum": 1, "maximum": 32},
-    "all_tree_nodes_checked": {"const": true},
-    "greedy_argmax_all_equal": {"const": true},
-    "top_k_token_ids_all_equal": {"const": true},
-    "maximum_absolute_error": {"type": "number", "minimum": 0},
-    "mean_absolute_error": {"type": "number", "minimum": 0},
-    "maximum_absolute_tolerance": {"type": "number", "minimum": 0},
-    "mean_absolute_tolerance": {"type": "number", "minimum": 0},
-    "nodes": {"type": "array", "minItems": 1}
-  }
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "sample_id": {"type": "string", "minLength": 1},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "configuration_id": {"type": "string", "minLength": 1},
+    "round_index": {"type": "integer", "minimum": 0},
+    "status": {"enum": ["diagnostic", "passed", "pass_exact", "pass_semantic_with_numerical_variation", "fail_semantic", "fail_structural", "not_run"]},
+    "availability": {"enum": ["available", "unavailable"]},
+    "comparison_mode": {"enum": ["native", "equal_shape", "same_mask", "math"]},
+    "backend": {"type": "string"},
+    "dtype": {"type": "string"},
+    "structural_status": {"enum": ["pass", "fail", "not_run"]},
+    "semantic_status": {"enum": ["pass", "fail", "not_run"]},
+    "numerical_status": {"type": "string"},
+    "thresholds": {"type": "object"},
+    "warning": {"type": ["string", "null"]},
+    "reason": {"type": ["string", "null"]},
+    "provenance": {"type": "object"},
+    "max_abs_error": {"type": ["number", "null"], "minimum": 0},
+    "mean_abs_error": {"type": ["number", "null"], "minimum": 0},
+    "p99_abs_error": {"type": ["number", "null"], "minimum": 0},
+    "argmax_equal": {"type": ["boolean", "null"]},
+    "top8_ordered_equal": {"type": ["boolean", "null"]},
+    "verifier_decision_relevant": {"type": ["boolean", "null"]}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["availability"]},
+      "then": {"required": ["comparison_mode", "backend", "dtype", "structural_status", "semantic_status", "numerical_status", "thresholds", "warning", "reason", "provenance"]}
+    }
+  ]
 }

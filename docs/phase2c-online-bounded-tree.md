@@ -188,9 +188,12 @@ source-provenance.json
 terminal.log
 gold-logit-checks.jsonl
 gold-kv-checks.jsonl
+gold-layer-localization.jsonl
+gold-comparison-summary.json
+gold-comparison-summary.csv
 ```
 
-The two gold JSONL files are empty when gold checks are disabled. New JSON and
+The three gold JSONL files are empty when gold checks are disabled. New JSON and
 JSONL structures have Draft 2020-12 schemas under `docs/schemas/`.
 
 ## H100 reproduction

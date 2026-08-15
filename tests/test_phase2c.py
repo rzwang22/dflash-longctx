@@ -41,6 +41,8 @@ SCHEMAS = (
     "phase2c-offline-online.schema.json",
     "phase2c-gold-logit-check.schema.json",
     "phase2c-gold-kv-check.schema.json",
+    "phase2c-gold-layer-localization.schema.json",
+    "phase2c-gold-comparison-summary.schema.json",
 )
 
 

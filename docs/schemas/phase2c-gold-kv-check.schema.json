@@ -1,20 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-gold-kv-check.schema.json",
-  "title": "Phase 2C compacted-cache versus dense recomputation gold check",
+  "title": "Phase 2C/2C.1 compacted-cache gold record",
   "type": "object",
-  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "round_index", "status", "greedy_argmax_equal", "top_k_token_ids_equal", "within_bfloat16_tolerance", "compacted_layer_lengths", "next_step_layer_lengths", "dense_reference_layer_lengths", "length_checks", "sibling_nodes_discarded", "correction_or_bonus_absent_from_persistent_cache"],
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "round_index", "status"],
   "properties": {
     "schema_version": {"const": "1.0"},
-    "status": {"const": "passed"},
-    "greedy_argmax_equal": {"const": true},
-    "top_k_token_ids_equal": {"const": true},
-    "within_bfloat16_tolerance": {"const": true},
-    "compacted_layer_lengths": {"type": "array", "minItems": 1, "items": {"type": "integer"}},
-    "next_step_layer_lengths": {"type": "array", "minItems": 1, "items": {"type": "integer"}},
-    "dense_reference_layer_lengths": {"type": "array", "minItems": 1, "items": {"type": "integer"}},
-    "length_checks": {"type": "object"},
-    "sibling_nodes_discarded": {"const": true},
-    "correction_or_bonus_absent_from_persistent_cache": {"const": true}
-  }
+    "status": {"enum": ["passed", "pass_exact", "pass_semantic_with_numerical_variation", "fail_semantic", "fail_structural", "not_run"]},
+    "availability": {"enum": ["available", "unavailable"]},
+    "comparison_mode": {"const": "dense_committed_path"},
+    "backend": {"type": "string"},
+    "dtype": {"type": "string"},
+    "structural_status": {"enum": ["pass", "fail", "not_run"]},
+    "semantic_status": {"enum": ["pass", "fail", "not_run"]},
+    "numerical_status": {"type": "string"},
+    "thresholds": {"type": "object"},
+    "warning": {"type": ["string", "null"]},
+    "reason": {"type": ["string", "null"]},
+    "provenance": {"type": "object"},
+    "layers": {"type": "array"},
+    "next_step_layer_lengths": {"type": "array", "items": {"type": "integer"}},
+    "dense_reference_layer_lengths": {"type": "array", "items": {"type": "integer"}}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["availability"]},
+      "then": {"required": ["comparison_mode", "backend", "dtype", "structural_status", "semantic_status", "numerical_status", "thresholds", "warning", "reason", "provenance"]}
+    }
+  ]
 }

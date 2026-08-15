@@ -25,6 +25,13 @@ from dflash.phase2c.core import (
     SUPPORTED_NODE_BUDGETS,
     TIE_BREAKING_RULE,
 )
+from dflash.phase2c.gold import (
+    DEFAULT_GOLD_THRESHOLDS,
+    GOLD_COMPARISON_MODES,
+    build_gold_comparison_summary,
+    validate_gold_modes,
+    validate_gold_thresholds,
+)
 from dflash.phase2c.metrics import (
     aggregate_tree_results,
     distribution,
@@ -83,6 +90,31 @@ OFFLINE_CSV_FIELDS = (
     "difference",
     "mismatch_reason",
 )
+GOLD_COMPARISON_CSV_FIELDS = (
+    "task",
+    "sample_id",
+    "nominal_prompt_length",
+    "configuration_id",
+    "comparison_mode",
+    "availability",
+    "status",
+    "backend",
+    "dtype",
+    "compared_node_count",
+    "argmax_mismatch_count",
+    "verifier_decision_mismatch_count",
+    "top8_ordered_mismatch_count",
+    "maximum_absolute_error",
+    "mean_absolute_error",
+    "p99_absolute_error",
+    "first_failing_depth",
+    "first_failing_node",
+    "structural_status",
+    "semantic_status",
+    "numerical_status",
+    "warning",
+    "reason",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -116,6 +148,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--draft-top-k", type=int, default=16)
     parser.add_argument("--enable-gold-checks", action="store_true")
+    parser.add_argument(
+        "--gold-comparison-mode",
+        action="append",
+        choices=GOLD_COMPARISON_MODES,
+        dest="gold_comparison_modes",
+        help="Repeat to request multiple Phase 2C.1 logits controls.",
+    )
+    parser.add_argument("--gold-layer-localization", action="store_true")
+    parser.add_argument("--gold-max-rounds", type=int, default=1)
+    parser.add_argument("--gold-record-all-nodes", action="store_true")
+    parser.add_argument(
+        "--gold-max-abs-threshold",
+        type=float,
+        default=DEFAULT_GOLD_THRESHOLDS["maximum_absolute_error"],
+    )
+    parser.add_argument(
+        "--gold-mean-abs-threshold",
+        type=float,
+        default=DEFAULT_GOLD_THRESHOLDS["mean_absolute_error"],
+    )
+    parser.add_argument(
+        "--gold-relative-epsilon",
+        type=float,
+        default=DEFAULT_GOLD_THRESHOLDS["relative_error_epsilon"],
+    )
+    parser.add_argument(
+        "--gold-layer-threshold",
+        type=float,
+        default=DEFAULT_GOLD_THRESHOLDS["layer_localization_p99_error"],
+    )
     parser.add_argument("--phase2b-capture-dir", action="append", type=Path, default=[])
     parser.add_argument("--phase2b1-analysis-dir", type=Path, default=None)
     parser.set_defaults(output_dir=Path("outputs/phase2c-online-tree"))
@@ -172,6 +234,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     args.node_budgets = _unique(args.node_budgets or [16], label="node budget")
     args.beam_widths = _unique(args.beam_widths or [4], label="beam width")
+    args.gold_comparison_modes = validate_gold_modes(
+        args.gold_comparison_modes or ["native"]
+    )
+    args.gold_thresholds = validate_gold_thresholds(
+        {
+            "maximum_absolute_error": args.gold_max_abs_threshold,
+            "mean_absolute_error": args.gold_mean_abs_threshold,
+            "relative_error_epsilon": args.gold_relative_epsilon,
+            "layer_localization_p99_error": args.gold_layer_threshold,
+        }
+    )
     if any(value not in SUPPORTED_NODE_BUDGETS for value in args.node_budgets):
         raise ValueError("node budgets must be chosen from 16,32,64,128")
     if any(value not in SUPPORTED_BEAM_WIDTHS for value in args.beam_widths):
@@ -188,6 +261,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         config["node_budget"] > 32 for config in tree_configurations(args)
     ):
         raise ValueError("gold checks support node budgets 16 and 32 only")
+    if args.gold_max_rounds < 1:
+        raise ValueError("--gold-max-rounds must be positive")
+    if args.gold_layer_localization and not args.enable_gold_checks:
+        raise ValueError("--gold-layer-localization requires --enable-gold-checks")
+    if args.gold_record_all_nodes and not args.enable_gold_checks:
+        raise ValueError("--gold-record-all-nodes requires --enable-gold-checks")
     tree_configurations(args)
     return args
 
@@ -201,6 +280,11 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "tree_configurations": tree_configurations(args),
         "draft_top_k": args.draft_top_k,
         "enable_gold_checks": args.enable_gold_checks,
+        "gold_comparison_modes": list(args.gold_comparison_modes),
+        "gold_layer_localization": args.gold_layer_localization,
+        "gold_max_rounds": args.gold_max_rounds,
+        "gold_record_all_nodes": args.gold_record_all_nodes,
+        "gold_thresholds": args.gold_thresholds,
         "phase2b_capture_dirs": [str(path) for path in args.phase2b_capture_dir],
         "phase2b1_analysis_dir": (
             str(args.phase2b1_analysis_dir) if args.phase2b1_analysis_dir else None
@@ -226,6 +310,22 @@ def _new_manifest(
         "cache_position": "prefix_length + packed node index",
         "kv_compaction": "gather prefix plus root and accepted path at every target layer",
         "correction_bonus_persisted_in_current_round": False,
+        "gold_validation": {
+            "comparison_modes": list(args.gold_comparison_modes),
+            "comparison_mode_backends": {
+                "native": "configured_sdpa_packed_4d_dense_implicit_causal",
+                "equal_shape": "configured_sdpa_equal_shape_explicit_4d",
+                "same_mask": "configured_sdpa_explicit_4d_both_sides",
+                "math": "forced_math_sdpa_explicit_4d_both_sides",
+            },
+            "layer_localization": args.gold_layer_localization,
+            "maximum_rounds": args.gold_max_rounds,
+            "record_all_nodes": args.gold_record_all_nodes,
+            "thresholds": args.gold_thresholds,
+            "configured_attention_implementation_is_not_a_kernel_name": True,
+            "actual_cuda_kernel": None,
+            "numerical_variation_requires_control_evidence": True,
+        },
     }
     manifest["measurement_policy"] = {
         "reference_control": "original DFlash default spec_generate",
@@ -247,9 +347,13 @@ def _new_manifest(
 
 
 def _tree_options(
-    configuration: dict[str, Any], *, profiling: bool, gold_checks: bool
+    configuration: dict[str, Any],
+    *,
+    profiling: bool,
+    gold_checks: bool,
+    args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
-    return {
+    options = {
         "enable_online_tree": True,
         "online_tree_policy": configuration["tree_policy"],
         "online_tree_node_budget": configuration["node_budget"],
@@ -258,6 +362,19 @@ def _tree_options(
         "enable_online_tree_profiling": profiling,
         "enable_online_tree_gold_checks": gold_checks,
     }
+    if gold_checks:
+        if args is None:
+            raise ValueError("gold tree options require parsed Phase 2C.1 arguments")
+        options.update(
+            {
+                "online_tree_gold_comparison_modes": list(args.gold_comparison_modes),
+                "online_tree_gold_layer_localization": args.gold_layer_localization,
+                "online_tree_gold_max_rounds": args.gold_max_rounds,
+                "online_tree_gold_record_all_nodes": args.gold_record_all_nodes,
+                "online_tree_gold_thresholds": args.gold_thresholds,
+            }
+        )
+    return options
 
 
 def _require_equal(torch_module: Any, left: Any, right: Any, *, label: str) -> None:
@@ -371,6 +488,7 @@ def _run_sample_configuration(
     dict[str, Any],
     list[dict[str, Any]],
     list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
     input_ids = torch_module.tensor(
         [workload["input_ids"]], dtype=torch_module.long, device=args.device
@@ -477,7 +595,12 @@ def _run_sample_configuration(
 
     gold_logits = []
     gold_kv = []
+    gold_layers = []
     gold_output_equal = None
+    gold_status = "not_run"
+    gold_failure_class = None
+    gold_completed_checks: list[str] = []
+    gold_uncompleted_checks: list[str] = []
     if args.enable_gold_checks:
         gold_ids, gold_diagnostics, _, _ = _call_generation(
             torch_module=torch_module,
@@ -489,16 +612,10 @@ def _run_sample_configuration(
             return_diagnostics=True,
             enable_profiling=False,
             generation_options=_tree_options(
-                configuration, profiling=False, gold_checks=True
+                configuration, profiling=False, gold_checks=True, args=args
             ),
         )
-        _require_equal(
-            torch_module,
-            reference_ids,
-            gold_ids,
-            label=f"reference/gold {configuration['configuration_id']}",
-        )
-        gold_output_equal = True
+        gold_output_equal = bool(torch_module.equal(reference_ids, gold_ids))
         common = {
             "task": workload["longbench_task"],
             "sample_id": workload["sample_id"],
@@ -513,9 +630,36 @@ def _run_sample_configuration(
             {"schema_version": SCHEMA_VERSION, **common, **record}
             for record in gold_diagnostics["phase2c"]["kv_compaction_gold_checks"]
         ]
+        gold_layers = [
+            {"schema_version": SCHEMA_VERSION, **common, **record}
+            for record in gold_diagnostics["phase2c"]["gold_layer_localization"]
+        ]
+        gold_status = gold_diagnostics["phase2c"]["gold_overall_status"]
+        gold_round_results = gold_diagnostics["phase2c"]["gold_round_results"]
+        if not gold_output_equal:
+            gold_status = "fail_semantic"
+            gold_failure_class = "gold_output_ids_mismatch"
+        else:
+            gold_failure_class = next(
+                (
+                    row["failure_class"]
+                    for row in gold_round_results
+                    if row["failure_class"] is not None
+                ),
+                None,
+            )
+        gold_completed_checks = sorted(
+            {check for row in gold_round_results for check in row["completed_checks"]}
+        )
+        gold_uncompleted_checks = sorted(
+            {check for row in gold_round_results for check in row["uncompleted_checks"]}
+        )
+        gold_status_by_round = {
+            int(row["round_index"]): row["status"] for row in gold_round_results
+        }
         for row in round_rows:
-            if row["round_index"] == 0:
-                row["gold_check_status"] = "passed"
+            if row["round_index"] in gold_status_by_round:
+                row["gold_check_status"] = gold_status_by_round[row["round_index"]]
 
     top1_exact = None
     top1_errors: list[str] = []
@@ -525,11 +669,10 @@ def _run_sample_configuration(
             {"rounds": round_rows[: len(reference_diagnostics["rounds"])]},
             prompt_length=int(input_ids.shape[1]),
         )
-        if not top1_exact:
-            raise RuntimeError(
-                "Phase 2C top1_chain round-exact equality failed: "
-                + ", ".join(top1_errors)
-            )
+        if not top1_exact and args.enable_gold_checks:
+            gold_status = "fail_semantic"
+            gold_failure_class = "top1_round_semantics_mismatch"
+            gold_completed_checks.append("top1_round_equivalence")
 
     generated = [
         int(value)
@@ -628,6 +771,10 @@ def _run_sample_configuration(
             "reference_output_ids_equal": True,
             "control_profile_output_ids_equal": True,
             "gold_output_ids_equal": gold_output_equal,
+            "gold_status": gold_status,
+            "gold_failure_class": gold_failure_class,
+            "gold_completed_checks": gold_completed_checks,
+            "gold_uncompleted_checks": gold_uncompleted_checks,
             "top1_round_exact_equal": top1_exact,
             "top1_round_exact_errors": top1_errors,
         },
@@ -639,9 +786,20 @@ def _run_sample_configuration(
         "nominal_prompt_length": sample["nominal_prompt_length"],
         "configuration_id": sample["configuration_id"],
         **sample["correctness"],
-        "passed": True,
+        "passed": (
+            (top1_exact is not False)
+            and (gold_output_equal is not False)
+            and (
+                not args.enable_gold_checks
+                or gold_status
+                in {
+                    "pass_exact",
+                    "pass_semantic_with_numerical_variation",
+                }
+            )
+        ),
     }
-    return sample, round_rows, correctness, gold_logits, gold_kv
+    return sample, round_rows, correctness, gold_logits, gold_kv, gold_layers
 
 
 def _load_reference_and_run(
@@ -654,6 +812,8 @@ def _load_reference_and_run(
     correctness_records: list[dict[str, Any]],
     gold_logits: list[dict[str, Any]],
     gold_kv: list[dict[str, Any]],
+    gold_layers: list[dict[str, Any]],
+    paths: dict[str, Path],
 ) -> None:
     torch_module, tokenizer, target, draft, workloads = _load_inputs(
         args, manifest, provenance
@@ -753,12 +913,49 @@ def _load_reference_and_run(
                 reference_control_repeats=reference_repeats,
                 reference_profile_repeats=reference_profile_repeats,
             )
-            sample, current_rounds, correctness, current_logits, current_kv = result
+            (
+                sample,
+                current_rounds,
+                correctness,
+                current_logits,
+                current_kv,
+                current_layers,
+            ) = result
             samples.append(sample)
             rounds.extend(current_rounds)
             correctness_records.append(correctness)
             gold_logits.extend(current_logits)
             gold_kv.extend(current_kv)
+            gold_layers.extend(current_layers)
+            if args.enable_gold_checks:
+                persist_gold_artifacts(
+                    paths=paths,
+                    gold_logits=gold_logits,
+                    gold_kv=gold_kv,
+                    gold_layers=gold_layers,
+                )
+                write_json(
+                    paths["correctness_summary"],
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "status": "running" if correctness["passed"] else "error",
+                        "gold_status": correctness["gold_status"],
+                        "failure_class": correctness["gold_failure_class"],
+                        "all_checks_passed": all(
+                            row["passed"] for row in correctness_records
+                        ),
+                        "completed_checks": correctness["gold_completed_checks"],
+                        "uncompleted_checks": correctness["gold_uncompleted_checks"],
+                        "records": correctness_records,
+                        "error": None,
+                    },
+                )
+            if not correctness["passed"]:
+                raise RuntimeError(
+                    "Phase 2C.1 gold validation failed after diagnostic artifacts "
+                    f"were persisted: status={correctness['gold_status']} "
+                    f"failure_class={correctness['gold_failure_class']}"
+                )
     manifest["status"] = "ok"
 
 
@@ -865,6 +1062,28 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fields: tuple[str, ...]) 
     temporary_path.replace(path)
 
 
+def persist_gold_artifacts(
+    *,
+    paths: dict[str, Path],
+    gold_logits: list[dict[str, Any]],
+    gold_kv: list[dict[str, Any]],
+    gold_layers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Atomically flush complete gold records before a semantic failure is raised."""
+
+    _atomic_write_jsonl(paths["gold_logit_checks"], gold_logits)
+    _atomic_write_jsonl(paths["gold_kv_checks"], gold_kv)
+    _atomic_write_jsonl(paths["gold_layer_localization"], gold_layers)
+    summary = build_gold_comparison_summary(gold_logits, gold_kv)
+    write_json(paths["gold_comparison_summary"], summary)
+    _write_csv(
+        paths["gold_comparison_summary_csv"],
+        summary["groups"],
+        GOLD_COMPARISON_CSV_FIELDS,
+    )
+    return summary
+
+
 def _validate_schema(payload: Any, schema_name: str) -> None:
     from jsonschema import Draft202012Validator
 
@@ -883,6 +1102,8 @@ def _validate_artifacts(
     offline: dict[str, Any],
     gold_logits: list[dict[str, Any]],
     gold_kv: list[dict[str, Any]],
+    gold_layers: list[dict[str, Any]],
+    gold_comparison_summary: dict[str, Any],
 ) -> None:
     _validate_schema(manifest, "phase2c-manifest.schema.json")
     for sample in samples:
@@ -896,6 +1117,11 @@ def _validate_artifacts(
         _validate_schema(row, "phase2c-gold-logit-check.schema.json")
     for row in gold_kv:
         _validate_schema(row, "phase2c-gold-kv-check.schema.json")
+    for row in gold_layers:
+        _validate_schema(row, "phase2c-gold-layer-localization.schema.json")
+    _validate_schema(
+        gold_comparison_summary, "phase2c-gold-comparison-summary.schema.json"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -917,6 +1143,9 @@ def main(argv: list[str] | None = None) -> int:
         "terminal_log": output_dir / "terminal.log",
         "gold_logit_checks": output_dir / "gold-logit-checks.jsonl",
         "gold_kv_checks": output_dir / "gold-kv-checks.jsonl",
+        "gold_layer_localization": output_dir / "gold-layer-localization.jsonl",
+        "gold_comparison_summary": output_dir / "gold-comparison-summary.json",
+        "gold_comparison_summary_csv": output_dir / "gold-comparison-summary.csv",
     }
     command = shlex.join([sys.executable, *sys.argv])
     environment = collect_environment(
@@ -934,11 +1163,17 @@ def main(argv: list[str] | None = None) -> int:
     correctness_records: list[dict[str, Any]] = []
     gold_logits: list[dict[str, Any]] = []
     gold_kv: list[dict[str, Any]] = []
+    gold_layers: list[dict[str, Any]] = []
+    gold_comparison_summary = build_gold_comparison_summary(gold_logits, gold_kv)
     summary = aggregate_tree_results(samples, rounds)
     correctness = {
         "schema_version": SCHEMA_VERSION,
         "status": "started",
         "all_checks_passed": False,
+        "gold_status": "not_run",
+        "failure_class": None,
+        "completed_checks": [],
+        "uncompleted_checks": [],
         "records": correctness_records,
         "error": None,
     }
@@ -970,6 +1205,8 @@ def main(argv: list[str] | None = None) -> int:
                 correctness_records=correctness_records,
                 gold_logits=gold_logits,
                 gold_kv=gold_kv,
+                gold_layers=gold_layers,
+                paths=paths,
             )
             summary = aggregate_tree_results(samples, rounds)
             correctness.update(
@@ -977,6 +1214,36 @@ def main(argv: list[str] | None = None) -> int:
                     "status": "ok",
                     "all_checks_passed": all(
                         record["passed"] for record in correctness_records
+                    ),
+                    "gold_status": next(
+                        (
+                            record["gold_status"]
+                            for record in reversed(correctness_records)
+                            if record["gold_status"] != "not_run"
+                        ),
+                        "not_run",
+                    ),
+                    "failure_class": next(
+                        (
+                            record["gold_failure_class"]
+                            for record in reversed(correctness_records)
+                            if record["gold_failure_class"] is not None
+                        ),
+                        None,
+                    ),
+                    "completed_checks": sorted(
+                        {
+                            check
+                            for record in correctness_records
+                            for check in record["gold_completed_checks"]
+                        }
+                    ),
+                    "uncompleted_checks": sorted(
+                        {
+                            check
+                            for record in correctness_records
+                            for check in record["gold_uncompleted_checks"]
+                        }
                     ),
                     "error": None,
                 }
@@ -996,6 +1263,12 @@ def main(argv: list[str] | None = None) -> int:
             error = {"type": type(exc).__name__, "message": str(exc)}
             manifest["status"] = provenance["status"] = correctness["status"] = "error"
             manifest["error"] = provenance["error"] = correctness["error"] = error
+            if correctness_records:
+                last = correctness_records[-1]
+                correctness["gold_status"] = last["gold_status"]
+                correctness["failure_class"] = last["gold_failure_class"]
+                correctness["completed_checks"] = last["gold_completed_checks"]
+                correctness["uncompleted_checks"] = last["gold_uncompleted_checks"]
             print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
             traceback.print_exc()
         finally:
@@ -1023,8 +1296,12 @@ def main(argv: list[str] | None = None) -> int:
                     OFFLINE_CSV_FIELDS,
                 )
                 write_json(paths["source_provenance"], provenance)
-                _atomic_write_jsonl(paths["gold_logit_checks"], gold_logits)
-                _atomic_write_jsonl(paths["gold_kv_checks"], gold_kv)
+                gold_comparison_summary = persist_gold_artifacts(
+                    paths=paths,
+                    gold_logits=gold_logits,
+                    gold_kv=gold_kv,
+                    gold_layers=gold_layers,
+                )
                 if exit_code == 0:
                     _validate_artifacts(
                         manifest,
@@ -1035,6 +1312,8 @@ def main(argv: list[str] | None = None) -> int:
                         offline,
                         gold_logits,
                         gold_kv,
+                        gold_layers,
+                        gold_comparison_summary,
                     )
             except Exception:  # noqa: BLE001
                 traceback.print_exc()

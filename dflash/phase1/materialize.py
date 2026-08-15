@@ -166,6 +166,7 @@ def _effective_sources(implementation: str) -> dict[str, Path]:
             INSTRUMENTED_ROOT / "phase1_observability.py"
         )
         sources["phase2c_online.py"] = REPO_ROOT / "dflash" / "phase2c" / "core.py"
+        sources["phase2c_gold.py"] = REPO_ROOT / "dflash" / "phase2c" / "gold.py"
     sources["LICENSE"] = VENDOR_ROOT / "LICENSE"
     return sources
 

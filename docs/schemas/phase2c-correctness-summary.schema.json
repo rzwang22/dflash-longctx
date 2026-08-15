@@ -8,6 +8,10 @@
     "schema_version": {"const": "1.0"},
     "status": {"enum": ["started", "ok", "error"]},
     "all_checks_passed": {"type": "boolean"},
+    "gold_status": {"enum": ["not_run", "pass_exact", "pass_semantic_with_numerical_variation", "fail_semantic", "fail_structural"]},
+    "failure_class": {"type": ["string", "null"]},
+    "completed_checks": {"type": "array", "items": {"type": "string"}},
+    "uncompleted_checks": {"type": "array", "items": {"type": "string"}},
     "records": {
       "type": "array",
       "items": {

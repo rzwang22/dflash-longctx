@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-gold-layer-localization.schema.json",
+  "title": "Phase 2C.1 layer-localization record",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "round_index", "availability", "status", "comparison_mode", "backend", "dtype", "thresholds", "flattened_node_index", "node_depth", "stage", "max_abs_error", "mean_abs_error", "p99_abs_error", "diagnostic_p99_threshold", "exceeds_diagnostic_threshold", "is_first_stage_exceeding_threshold", "discrete_metric_applicable", "warning", "reason", "provenance"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "availability": {"enum": ["available", "unavailable"]},
+    "status": {"enum": ["diagnostic", "not_run"]},
+    "comparison_mode": {"const": "same_mask"},
+    "backend": {"type": "string", "minLength": 1},
+    "dtype": {"type": "string", "minLength": 1},
+    "thresholds": {"type": "object"},
+    "flattened_node_index": {"type": ["integer", "null"]},
+    "node_depth": {"type": ["integer", "null"]},
+    "stage": {"type": ["string", "null"]},
+    "max_abs_error": {"type": ["number", "null"], "minimum": 0},
+    "mean_abs_error": {"type": ["number", "null"], "minimum": 0},
+    "p99_abs_error": {"type": ["number", "null"], "minimum": 0},
+    "first_stage_exceeding_threshold": {"type": ["string", "null"]},
+    "exceeds_diagnostic_threshold": {"type": ["boolean", "null"]},
+    "is_first_stage_exceeding_threshold": {"type": ["boolean", "null"]},
+    "discrete_metric_applicable": {"type": ["boolean", "null"]},
+    "warning": {"type": ["string", "null"]},
+    "reason": {"type": ["string", "null"]},
+    "provenance": {"type": "object"}
+  }
+}

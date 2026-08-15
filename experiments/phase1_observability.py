@@ -229,6 +229,8 @@ def _loaded_source_record(draft: Any, manifest: dict[str, Any]) -> dict[str, Any
         dependency_symbols["phase1_observability.py"] = "build_round_accounting"
     if "phase2c_online.py" in manifest["effective_custom_code_sha256"]:
         dependency_symbols["phase2c_online.py"] = "build_online_tree_tensors"
+    if "phase2c_gold.py" in manifest["effective_custom_code_sha256"]:
+        dependency_symbols["phase2c_gold.py"] = "classify_comparison_matrix"
     loaded_dependencies = {}
     for filename, symbol_name in dependency_symbols.items():
         symbol = unwrapped_spec_generate.__globals__.get(symbol_name)

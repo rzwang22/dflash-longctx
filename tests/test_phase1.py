@@ -129,6 +129,7 @@ class Phase1Tests(unittest.TestCase):
                 "phase1_observability.py", verified["effective_custom_code_sha256"]
             )
             self.assertIn("phase2c_online.py", verified["effective_custom_code_sha256"])
+            self.assertIn("phase2c_gold.py", verified["effective_custom_code_sha256"])
             with self.assertRaisesRegex(RuntimeError, "separate output directory"):
                 materialize_draft(
                     source_model_path=source,

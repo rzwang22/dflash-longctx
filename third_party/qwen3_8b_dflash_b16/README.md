@@ -14,10 +14,12 @@ repository patching workflow; both hashes and that normalization are recorded in
 `spec_generate` path delegates to an algorithmic transcription of the pinned
 implementation and returns the same tensor type. Diagnostics and profiling are
 available only through new opt-in keyword arguments. The accompanying
-`phase1_observability.py` and materialized `phase2c_online.py` are first-party
+`phase1_observability.py`, materialized `phase2c_online.py`, and materialized
+`phase2c_gold.py` are first-party
 instrumentation, not upstream code. The latter is copied from
-`dflash/phase2c/core.py` so online construction and CPU replay share a
-repository-controlled policy definition.
+`dflash/phase2c/core.py`; the gold helper is copied from
+`dflash/phase2c/gold.py`. Online construction, CPU replay, and Phase 2C.1
+classification therefore use repository-controlled definitions.
 
 No model weight, tokenizer, Hugging Face cache, or generated materialization is
 stored here. Use `scripts/materialize_dflash.py` to combine one of these code

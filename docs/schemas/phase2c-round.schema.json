@@ -34,7 +34,7 @@
       "required": ["draft_hidden_logits_cuda_elapsed_ms", "topk_cuda_elapsed_ms", "tree_construction_cuda_elapsed_ms", "mask_construction_cuda_elapsed_ms", "verification_cuda_elapsed_ms", "traversal_cuda_elapsed_ms", "kv_compaction_cuda_elapsed_ms", "total_draft_cuda_elapsed_ms", "total_verification_cuda_elapsed_ms", "round_cuda_elapsed_ms"]
     },
     "output_ids_equal_reference": {"const": true},
-    "gold_check_status": {"enum": ["not_run", "passed"]},
+    "gold_check_status": {"enum": ["not_run", "passed", "pass_exact", "pass_semantic_with_numerical_variation", "fail_semantic", "fail_structural"]},
     "offline_comparison_status": {"type": "string"}
   }
 }

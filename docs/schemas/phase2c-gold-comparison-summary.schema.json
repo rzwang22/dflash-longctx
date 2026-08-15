@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-gold-comparison-summary.schema.json",
+  "title": "Phase 2C.1 comparison-mode summary",
+  "type": "object",
+  "required": ["schema_version", "status", "logit_record_count", "kv_record_count", "groups", "interpretation"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["not_run", "ok", "error"]},
+    "logit_record_count": {"type": "integer", "minimum": 0},
+    "kv_record_count": {"type": "integer", "minimum": 0},
+    "groups": {"type": "array"},
+    "interpretation": {"type": "object"}
+  }
+}
