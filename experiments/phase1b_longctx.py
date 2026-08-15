@@ -141,6 +141,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sample-policy", choices=("matched", "per-length"), default="matched"
     )
     parser.add_argument("--inspect-workload-only", action="store_true")
+    parser.add_argument(
+        "--show-all-eligible-sample-ids",
+        action="store_true",
+        help="Print every maximum-length eligible ID (JSON always keeps all IDs).",
+    )
     parser.add_argument("--seed", type=int, default=20260815)
     parser.add_argument(
         "--context-lengths",
@@ -263,6 +268,7 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "sample_policy": args.sample_policy,
         "paired_context_length_comparison": args.sample_policy == "matched",
         "inspect_workload_only": args.inspect_workload_only,
+        "show_all_eligible_sample_ids": args.show_all_eligible_sample_ids,
         "context_lengths": list(args.context_lengths),
         "pilot_samples": args.pilot_samples,
         "timing_repeats": args.timing_repeats,
@@ -452,7 +458,9 @@ def _prepare_workload(
     return prepared, inventory, workloads, cohort
 
 
-def _print_inventory(inventory: dict[str, Any]) -> None:
+def _print_inventory(
+    inventory: dict[str, Any], *, show_all_sample_ids: bool = False
+) -> None:
     print(f"LongBench task: {inventory['task']}")
     print(
         "Records: "
@@ -476,8 +484,19 @@ def _print_inventory(inventory: dict[str, Any]) -> None:
         "source_sample_ids_reaching_maximum_length", []
     )
     if maximum_ids:
-        for sample_id, source_id in zip(maximum_ids, maximum_source_ids, strict=True):
+        shown_count = (
+            len(maximum_ids) if show_all_sample_ids else min(10, len(maximum_ids))
+        )
+        print(
+            f"  total={len(maximum_ids)} showing={shown_count} "
+            f"omitted={len(maximum_ids) - shown_count}"
+        )
+        for sample_id, source_id in zip(
+            maximum_ids[:shown_count], maximum_source_ids[:shown_count], strict=True
+        ):
             print(f"  {sample_id} (source={source_id})")
+        if shown_count < len(maximum_ids):
+            print("  ... use --show-all-eligible-sample-ids to print all IDs")
     else:
         print("  (none)")
     matched = inventory["recommendations"]["matched"]
@@ -865,7 +884,7 @@ def run_sweep(
         args, tokenizer, build_cohort=False
     )
     manifest["workload"]["inventory"] = inventory
-    _print_inventory(inventory)
+    _print_inventory(inventory, show_all_sample_ids=args.show_all_eligible_sample_ids)
     provisional_position_limit = max(args.context_lengths) + args.max_new_tokens
     workloads, cohort = build_longbench_workloads(
         prepared,
@@ -1041,7 +1060,7 @@ def run_inventory_only(args: argparse.Namespace) -> dict[str, Any]:
             "cuda_required": False,
         }
     )
-    _print_inventory(inventory)
+    _print_inventory(inventory, show_all_sample_ids=args.show_all_eligible_sample_ids)
     return inventory
 
 

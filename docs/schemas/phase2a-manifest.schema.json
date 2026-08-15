@@ -26,12 +26,21 @@
     "repository": {"type": "object"},
     "configuration": {
       "type": "object",
-      "required": ["phase", "run_mode", "rank_top_ms", "rank_max_m"],
+      "required": [
+        "phase",
+        "run_mode",
+        "rank_top_ms",
+        "rank_max_m",
+        "sample_id",
+        "effective_sample_count"
+      ],
       "properties": {
         "phase": {"const": "2A"},
         "run_mode": {"enum": ["rank", "verification-profile"]},
         "rank_top_ms": {"type": "array", "items": {"type": "integer"}},
-        "rank_max_m": {"type": "integer", "minimum": 16}
+        "rank_max_m": {"type": "integer", "minimum": 16},
+        "sample_id": {"type": ["string", "null"]},
+        "effective_sample_count": {"type": "integer", "minimum": 1}
       }
     },
     "workload": {

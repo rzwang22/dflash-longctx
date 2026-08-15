@@ -148,8 +148,25 @@ def _scope(range_name: str) -> str | None:
 
 
 def build_kernel_breakdown(
-    kernel_rows: Sequence[dict[str, Any]], nvtx_rows: Sequence[dict[str, Any]]
+    kernel_rows: Sequence[dict[str, Any]],
+    nvtx_rows: Sequence[dict[str, Any]] | None = None,
+    *,
+    analysis_mode: str | None = None,
+    projection_report_status: str | None = None,
+    source_reports: Sequence[str] | None = None,
 ) -> dict[str, Any]:
+    projection_supplied = nvtx_rows is not None
+    nvtx_rows = [] if nvtx_rows is None else nvtx_rows
+    if projection_report_status is None:
+        projection_report_status = "succeeded" if projection_supplied else "unavailable"
+    if analysis_mode is None:
+        analysis_mode = (
+            "full" if projection_report_status == "succeeded" else "kernel_only"
+        )
+    if source_reports is None:
+        source_reports = ["nvtx_kern_sum"]
+        if projection_report_status == "succeeded":
+            source_reports = [*source_reports, "nvtx_gpu_proj_sum"]
     scoped_rows = []
     for row in kernel_rows:
         scope = _scope(row["nvtx_range"])
@@ -200,7 +217,9 @@ def build_kernel_breakdown(
     return {
         "schema_version": "1.0",
         "status": "parsed",
-        "source_reports": ["nvtx_kern_sum", "nvtx_gpu_proj_sum"],
+        "analysis_mode": analysis_mode,
+        "projection_report_status": projection_report_status,
+        "source_reports": list(source_reports),
         "scope_totals": dict(scope_totals),
         "scope_category_totals": list(scope_category.values()),
         "kernel_rows": scoped_rows,
@@ -223,10 +242,19 @@ def write_nsight_outputs(
     output_dir: Path,
     *,
     kernel_rows: Sequence[dict[str, Any]],
-    nvtx_rows: Sequence[dict[str, Any]],
+    nvtx_rows: Sequence[dict[str, Any]] | None = None,
+    analysis_mode: str | None = None,
+    projection_report_status: str | None = None,
+    source_reports: Sequence[str] | None = None,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    breakdown = build_kernel_breakdown(kernel_rows, nvtx_rows)
+    breakdown = build_kernel_breakdown(
+        kernel_rows,
+        nvtx_rows,
+        analysis_mode=analysis_mode,
+        projection_report_status=projection_report_status,
+        source_reports=source_reports,
+    )
     kernel_path = output_dir / "nsight-kernel-summary.csv"
     nvtx_path = output_dir / "nsight-nvtx-summary.csv"
     breakdown_path = output_dir / "verification-kernel-breakdown.json"

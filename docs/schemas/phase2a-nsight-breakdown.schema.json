@@ -6,6 +6,8 @@
   "required": [
     "schema_version",
     "status",
+    "analysis_mode",
+    "projection_report_status",
     "source_reports",
     "scope_totals",
     "scope_category_totals",
@@ -17,6 +19,10 @@
   "properties": {
     "schema_version": {"const": "1.0"},
     "status": {"const": "parsed"},
+    "analysis_mode": {"enum": ["full", "kernel_only"]},
+    "projection_report_status": {
+      "enum": ["succeeded", "unavailable", "failed", "not_provided"]
+    },
     "source_reports": {"type": "array"},
     "scope_totals": {"type": "object"},
     "scope_category_totals": {"type": "array"},

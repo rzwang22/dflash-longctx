@@ -9,6 +9,10 @@
     "nominal_prompt_length",
     "actual_prompt_length",
     "round_index",
+    "stop_reason",
+    "truncated_token_count",
+    "committed_token_count",
+    "returned_token_delta",
     "target_self_attention_module_cuda_ms",
     "target_mlp_module_cuda_ms",
     "target_lm_head_cuda_ms",
@@ -26,6 +30,10 @@
   ],
   "properties": {
     "round_index": {"type": "integer", "minimum": 0},
+    "stop_reason": {"enum": ["continue", "eos", "max_new_tokens"]},
+    "truncated_token_count": {"type": "integer", "minimum": 0},
+    "committed_token_count": {"type": "integer", "minimum": 1},
+    "returned_token_delta": {"type": "integer", "minimum": 0},
     "partition_reliable": {"type": "boolean"},
     "per_layer": {"type": "array"},
     "target_unattributed_cuda_ms": {"type": ["number", "null"]}

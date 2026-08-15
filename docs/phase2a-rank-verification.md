@@ -16,6 +16,12 @@ This phase measures two questions only:
 It does not implement candidate trees or infer their accepted length, and it
 does not implement any optimization.
 
+Phase 2A.1 adds fixed-sample selection, Nsight 2023.1 compatibility, and an
+offline length-comparison utility without changing instrumented model code. See
+[`phase2a1-nsight-compat.md`](phase2a1-nsight-compat.md) for the current paired
+trace and export commands. Those commands supersede the unpinned per-length
+trace examples below.
+
 ## Rank definition and interpretation
 
 Rank mode is restricted to batch size 1, temperature 0, and the pinned block
@@ -313,13 +319,13 @@ python scripts/phase2a_nsight.py export \
   --output-dir outputs/phase2a-nsight/32k/parsed
 ```
 
-The exporter uses the official Nsight Systems `nvtx_kern_sum` and
-`nvtx_gpu_proj_sum` reports. NVIDIA documents that the first associates kernels
-with enclosing NVTX ranges based on the kernel launch API, while the second
-projects CPU NVTX ranges onto GPU operations. Nested ranges may therefore list
-the same kernel under both a parent and a child scope; the parser records this
-explicitly and does not add parent and child totals together. See the
-[Nsight Systems Analysis Guide](https://docs.nvidia.com/nsight-systems/AnalysisGuide/index.html).
+The Phase 2A.1 exporter requires the official Nsight Systems `nvtx_kern_sum`
+report and treats `nvtx_gpu_proj_sum` as optional. Nsight 2023.1 therefore emits
+a truthful kernel-only analysis instead of failing after producing the required
+kernel CSV. Nested ranges may list the same kernel under both a parent and a
+child scope; the parser records this explicitly and does not add parent and
+child totals together. See the
+[Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/).
 
 Kernel categories use published regular-expression rules and always retain the
 raw kernel name, rule ID, pattern, and resulting category. The rules are a
@@ -345,6 +351,7 @@ Verification-profile mode writes:
 
 ```text
 manifest.json
+workload-inventory.json
 samples.jsonl
 verification-module-events.jsonl
 verification-profile-rounds.jsonl
@@ -361,6 +368,7 @@ Nsight parsing writes:
 nsight-kernel-summary.csv
 nsight-nvtx-summary.csv
 verification-kernel-breakdown.json
+nsight-export-manifest.json
 ```
 
 All generation modes rerun LongBench inventory/cohort preflight before CUDA or

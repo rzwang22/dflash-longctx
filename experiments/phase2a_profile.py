@@ -108,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--rank-top-ms", type=parse_rank_top_ms, default=(2, 4, 8, 16)
     )
     parser.add_argument("--rank-max-m", type=int, default=16)
+    parser.add_argument(
+        "--sample-id",
+        default=None,
+        help="Run exactly one stable LongBench sample ID at every requested length.",
+    )
     parser.set_defaults(
         output_dir=Path("outputs/phase2a"),
         timing_repeats=1,
@@ -123,6 +128,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.rank_max_m < 16 or args.rank_max_m < max(args.rank_top_ms)
     ):
         raise ValueError("--rank-max-m must be at least 16 and every --rank-top-ms")
+    if args.sample_id is not None and args.sample_policy != "matched":
+        raise ValueError("--sample-id requires --sample-policy matched")
     return args
 
 
@@ -133,6 +140,10 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "run_mode": args.run_mode,
         "rank_top_ms": list(args.rank_top_ms),
         "rank_max_m": args.rank_max_m,
+        "sample_id": args.sample_id,
+        "effective_sample_count": 1
+        if args.sample_id is not None
+        else args.pilot_samples,
         "rank_and_verification_profile_mutually_exclusive": True,
     }
 
@@ -246,8 +257,32 @@ def _load_inputs(args: argparse.Namespace, manifest: dict[str, Any], provenance:
     if tokenizer.eos_token_id is None:
         raise RuntimeError("The target tokenizer does not define eos_token_id")
     prepared, inventory, _, _ = _prepare_workload(args, tokenizer, build_cohort=False)
+    explicit_matches = (
+        [row for row in prepared if row["sample_id"] == args.sample_id]
+        if args.sample_id is not None
+        else []
+    )
+    inventory["explicit_sample_selection"] = {
+        "requested_sample_id": args.sample_id,
+        "enabled": args.sample_id is not None,
+        "validated": False,
+        "matching_record_count": len(explicit_matches),
+    }
+    if len(explicit_matches) == 1:
+        selected = explicit_matches[0]
+        inventory["explicit_sample_selection"].update(
+            {
+                "source_sample_id": selected["source_sample_id"],
+                "actual_max_templated_prompt_length": selected[
+                    "source_full_prompt_length"
+                ],
+                "requested_context_lengths": list(args.context_lengths),
+            }
+        )
     manifest["workload"]["inventory"] = inventory
-    _print_inventory(inventory)
+    _print_inventory(
+        inventory, show_all_sample_ids=args.show_all_eligible_sample_ids
+    )
     from dflash.phase1b.workload import build_longbench_workloads
 
     workloads, cohort = build_longbench_workloads(
@@ -259,7 +294,10 @@ def _load_inputs(args: argparse.Namespace, manifest: dict[str, Any], provenance:
         sample_policy=args.sample_policy,
         max_new_tokens=args.max_new_tokens,
         model_position_limit=max(args.context_lengths) + args.max_new_tokens,
+        sample_id=args.sample_id,
     )
+    if args.sample_id is not None:
+        inventory["explicit_sample_selection"]["validated"] = True
     manifest["workload"]["cohort"] = cohort
     manifest["workload"]["sample_ids"] = sorted(
         {row["sample_id"] for row in workloads}
@@ -459,6 +497,16 @@ def _run_workload(
                     {
                         **common,
                         "round_index": round_record["round_index"],
+                        "stop_reason": round_record.get("stop_reason"),
+                        "truncated_token_count": round_record.get(
+                            "truncated_token_count"
+                        ),
+                        "committed_token_count": round_record.get(
+                            "committed_token_count"
+                        ),
+                        "returned_token_delta": round_record.get(
+                            "returned_token_delta"
+                        ),
                         **module_summary,
                         "draft_cuda_ms": round_record["timing"][
                             "draft_cuda_elapsed_ms"
@@ -543,6 +591,7 @@ def _run_workload(
         "task": workload["longbench_task"],
         "sample_id": workload["sample_id"],
         "source_sample_id": workload["source_sample_id"],
+        "explicit_sample_id": workload.get("explicit_sample_id"),
         "nominal_prompt_length": workload["nominal_prompt_length"],
         "actual_prompt_length": workload["actual_prompt_length"],
         "generated_token_count": len(generated_ids),
@@ -622,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     common_paths = {
         "manifest_json": output_dir / "manifest.json",
+        "workload_inventory_json": output_dir / "workload-inventory.json",
         "samples_jsonl": output_dir / "samples.jsonl",
         "environment_json": output_dir / "environment.json",
         "source_provenance_json": output_dir / "source-provenance.json",
@@ -702,6 +752,22 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             try:
                 write_json(paths["manifest_json"], manifest)
+                inventory = manifest["workload"].get("inventory") or {
+                    "schema_version": SCHEMA_VERSION,
+                    "status": "error",
+                    "task": args.longbench_task,
+                    "record_count": 0,
+                    "eligible_by_prompt_length": {},
+                    "sample_ids_reaching_maximum_length": [],
+                    "source_sample_ids_reaching_maximum_length": [],
+                    "explicit_sample_selection": {
+                        "requested_sample_id": args.sample_id,
+                        "enabled": args.sample_id is not None,
+                        "validated": False,
+                    },
+                    "error": manifest["error"],
+                }
+                write_json(paths["workload_inventory_json"], inventory)
                 _atomic_write_jsonl(paths["samples_jsonl"], samples)
                 write_json(paths["source_provenance_json"], provenance)
                 if args.run_mode == "rank":

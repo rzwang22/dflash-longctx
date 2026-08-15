@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2a-nsight-export-manifest.schema.json",
+  "title": "Phase 2A.1 Nsight export manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "analysis_mode",
+    "projection_report_status",
+    "nsys_version",
+    "available_reports",
+    "requested_reports",
+    "required_reports",
+    "optional_reports",
+    "succeeded_reports",
+    "generated_reports",
+    "reused_reports",
+    "unavailable_reports",
+    "failed_reports",
+    "source_reports",
+    "checked_paths",
+    "report_attempts",
+    "artifacts",
+    "input",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["started", "ok", "error"]},
+    "analysis_mode": {"enum": ["full", "kernel_only", null]},
+    "projection_report_status": {
+      "enum": ["succeeded", "unavailable", "failed", null]
+    },
+    "nsys_version": {"type": ["string", "null"]},
+    "available_reports": {"type": "array", "items": {"type": "string"}},
+    "requested_reports": {"type": "array", "items": {"type": "string"}},
+    "required_reports": {"type": "array", "items": {"type": "string"}},
+    "optional_reports": {"type": "array", "items": {"type": "string"}},
+    "succeeded_reports": {"type": "array", "items": {"type": "string"}},
+    "generated_reports": {"type": "array", "items": {"type": "string"}},
+    "reused_reports": {"type": "array", "items": {"type": "string"}},
+    "unavailable_reports": {"type": "array", "items": {"type": "string"}},
+    "failed_reports": {"type": "array", "items": {"type": "string"}},
+    "source_reports": {"type": "array", "items": {"type": "string"}},
+    "checked_paths": {"type": "object"},
+    "report_attempts": {"type": "array"},
+    "artifacts": {"type": "object"},
+    "input": {"type": ["object", "null"]},
+    "error": {"type": ["object", "null"]}
+  }
+}

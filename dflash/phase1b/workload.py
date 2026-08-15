@@ -515,6 +515,7 @@ def build_longbench_workloads(
     sample_policy: str = "matched",
     max_new_tokens: int = 128,
     model_position_limit: int,
+    sample_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Build a matched or explicitly unpaired LongBench cohort."""
 
@@ -530,9 +531,37 @@ def build_longbench_workloads(
         )
     if sample_policy not in {"matched", "per-length"}:
         raise ValueError("sample_policy must be matched or per-length")
+    if sample_id is not None and sample_policy != "matched":
+        raise ValueError("An explicit sample_id requires sample_policy=matched")
 
     selected_by_length: dict[int, list[dict[str, Any]]] = {}
-    if sample_policy == "matched":
+    if sample_id is not None:
+        matches = [row for row in prepared if row["sample_id"] == sample_id]
+        if not matches:
+            raise RuntimeError(
+                f"LongBench task {task}: requested sample ID {sample_id!r} "
+                "does not exist in the prepared workload"
+            )
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"LongBench task {task}: requested sample ID {sample_id!r} is "
+                f"not unique ({len(matches)} prepared records)"
+            )
+        selected = matches[0]
+        unavailable_lengths = [
+            length
+            for length in lengths
+            if selected["fixed_prompt_length"] > length
+            or selected["source_full_prompt_length"] < length
+        ]
+        if unavailable_lengths:
+            raise RuntimeError(
+                f"LongBench sample {sample_id} reaches at most "
+                f"{selected['source_full_prompt_length']} templated prompt tokens; "
+                f"requested lengths {unavailable_lengths} are unavailable"
+            )
+        selected_by_length = {length: [selected] for length in lengths}
+    elif sample_policy == "matched":
         candidates = [
             row
             for row in prepared
@@ -601,6 +630,7 @@ def build_longbench_workloads(
                     "random_seed": row["random_seed"],
                     "sample_policy": sample_policy,
                     "paired_context_length_comparison": sample_policy == "matched",
+                    "explicit_sample_id": sample_id,
                     "prompt_template_id": template["id"],
                     "prompt_template_name": template["name"],
                     "prompt_template_version": template["version"],
@@ -635,7 +665,8 @@ def build_longbench_workloads(
     cohort = {
         "sample_policy": sample_policy,
         "paired_context_length_comparison": sample_policy == "matched",
-        "requested_sample_count": sample_count,
+        "explicit_sample_id": sample_id,
+        "requested_sample_count": 1 if sample_id is not None else sample_count,
         "actual_sample_count_by_length": {
             length: len(ids) for length, ids in sample_ids_by_length.items()
         },

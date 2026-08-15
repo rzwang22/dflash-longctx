@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2a-verification-length-comparison.schema.json",
+  "title": "Phase 2A.1 verification length comparison",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "paired_comparison",
+    "source_sample_ids_by_context_length",
+    "warnings",
+    "measurement_semantics",
+    "rows",
+    "scaling_comparisons"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"const": "ok"},
+    "paired_comparison": {"type": "boolean"},
+    "source_sample_ids_by_context_length": {"type": "object"},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "measurement_semantics": {"type": "object"},
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "task",
+          "context_length",
+          "sample_id",
+          "source_sample_id",
+          "verification_cuda_ms",
+          "self_attention_module_cuda_ms",
+          "mlp_module_cuda_ms",
+          "lm_head_cuda_ms",
+          "unattributed_cuda_ms",
+          "draft_cuda_ms",
+          "round_count",
+          "non_terminal_round_count",
+          "returned_token_count",
+          "total_committed_token_count",
+          "mean_non_terminal_committed_tokens",
+          "verification_cuda_ms_per_round",
+          "self_attention_module_cuda_ms_per_round",
+          "mlp_module_cuda_ms_per_round",
+          "draft_cuda_ms_per_round",
+          "verification_cuda_ms_per_returned_token",
+          "self_attention_cuda_ms_per_returned_token",
+          "verification_cuda_ms_per_committed_token"
+        ]
+      }
+    },
+    "scaling_comparisons": {"type": "object"}
+  }
+}

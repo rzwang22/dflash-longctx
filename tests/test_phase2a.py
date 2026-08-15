@@ -2,19 +2,32 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from dflash.phase1.materialize import VENDOR_ROOT
+from dflash.phase1b.workload import (
+    build_longbench_workloads,
+    build_workload_inventory,
+    prepare_longbench_records,
+)
+from dflash.phase2a.comparison import (
+    COMPARISON_CSV_FIELDS,
+    build_verification_length_comparison,
+    write_verification_length_comparison,
+)
 from dflash.phase2a.nsight import (
     build_kernel_breakdown,
     read_nvtx_kernel_summary,
@@ -23,10 +36,12 @@ from dflash.phase2a.nsight import (
 )
 from dflash.phase2a.rank import aggregate_rank_events, rank_bucket
 from dflash.phase2a.verification import aggregate_verification_samples
+from experiments.phase1b_longctx import _print_inventory
 from experiments.phase2a_profile import (
     RANK_SUMMARY_FIELDS,
     RUN_MODES,
     VERIFICATION_SUMMARY_FIELDS,
+    _load_inputs,
     _new_manifest,
     _rank_csv_rows,
     _require_token_exact,
@@ -34,6 +49,39 @@ from experiments.phase2a_profile import (
     parse_args,
     run_configuration,
 )
+from scripts.phase2a_nsight import build_parser as build_nsight_parser
+from scripts.phase2a_nsight import run_export, run_parse
+
+
+class _CharacterTokenizer:
+    eos_token_id = 0
+    model_max_length = 100_000
+
+    def apply_chat_template(self, messages, **kwargs):
+        del kwargs
+        return list(range(3 + len(messages[0]["content"])))
+
+    def encode(self, text, **kwargs):
+        del kwargs
+        return list(range(len(text)))
+
+
+def _write_kernel_csv(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["NVTX Range", "Kernel Name", "Kern Inst", "Total Time (ns)"])
+        writer.writerow(["dflash.verify", "cutlass_gemm_kernel", 2, 100])
+
+
+def _write_projection_csv(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(
+            ["Range", "Total Proj Time (ns)", "Range Instances", "Total GPU Ops"]
+        )
+        writer.writerow(["dflash.verify", 110, 1, 3])
 
 
 def _load_observability_helper():
@@ -419,6 +467,426 @@ class Phase2ATests(unittest.TestCase):
             )
             self.assertTrue(all(path.is_file() for path in paths.values()))
 
+    def test_nsight_parse_kernel_only_is_truthful_and_has_all_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            kernel_csv = root / "input_nvtx_kern_sum.csv"
+            _write_kernel_csv(kernel_csv)
+            args = build_nsight_parser().parse_args(
+                [
+                    "parse",
+                    "--nvtx-kernel-csv",
+                    str(kernel_csv),
+                    "--output-dir",
+                    str(root / "parsed"),
+                ]
+            )
+            paths = run_parse(args, command="test parse")
+            self.assertEqual(len(paths), 4)
+            manifest = json.loads(
+                paths["nsight_export_manifest_json"].read_text(encoding="utf-8")
+            )
+            breakdown = json.loads(
+                paths["verification_kernel_breakdown_json"].read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["analysis_mode"], "kernel_only")
+            self.assertEqual(manifest["projection_report_status"], "unavailable")
+            self.assertEqual(manifest["source_reports"], ["nvtx_kern_sum"])
+            self.assertEqual(breakdown["nvtx_projection_rows"], [])
+            self.assertNotIn("projected_cuda_duration_ns", json.dumps(breakdown))
+            manifest_schema = json.loads(
+                (
+                    REPO_ROOT
+                    / "docs/schemas/phase2a-nsight-export-manifest.schema.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertTrue(set(manifest_schema["required"]).issubset(manifest))
+            self.assertEqual(
+                paths["nvtx_summary_csv"].read_text(encoding="utf-8").count("\n"),
+                1,
+            )
+
+    def test_nsight_export_new_and_2023_report_compatibility(self) -> None:
+        def run_case(*, projection_available: bool) -> dict:
+            temporary = tempfile.TemporaryDirectory()
+            self.addCleanup(temporary.cleanup)
+            root = Path(temporary.name)
+            report = root / "trace.nsys-rep"
+            report.touch()
+            output = root / "parsed"
+
+            def fake_run(command):
+                if command == ["nsys", "--version"]:
+                    return subprocess.CompletedProcess(
+                        command, 0, "NVIDIA Nsight Systems 2023.1.2\n", ""
+                    )
+                if command == ["nsys", "stats", "--help-reports"]:
+                    reports = "  nvtx_kern_sum - kernels\n"
+                    if projection_available:
+                        reports += "  nvtx_gpu_proj_sum - projected ranges\n"
+                    return subprocess.CompletedProcess(command, 0, reports, "")
+                report_name = command[command.index("--report") + 1]
+                prefix = Path(command[command.index("--output") + 1])
+                csv_path = prefix.parent / f"{prefix.name}_{report_name}.csv"
+                if report_name == "nvtx_kern_sum":
+                    _write_kernel_csv(csv_path)
+                else:
+                    _write_projection_csv(csv_path)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            args = build_nsight_parser().parse_args(
+                [
+                    "export",
+                    "--nsys-rep",
+                    str(report),
+                    "--output-dir",
+                    str(output),
+                ]
+            )
+            with patch("scripts.phase2a_nsight._run_capture", side_effect=fake_run):
+                paths = run_export(args, command="test export")
+            return json.loads(
+                paths["nsight_export_manifest_json"].read_text(encoding="utf-8")
+            )
+
+        full = run_case(projection_available=True)
+        self.assertEqual(full["analysis_mode"], "full")
+        self.assertEqual(
+            full["succeeded_reports"], ["nvtx_kern_sum", "nvtx_gpu_proj_sum"]
+        )
+        self.assertEqual(len(full["report_attempts"]), 2)
+        kernel_only = run_case(projection_available=False)
+        self.assertEqual(kernel_only["analysis_mode"], "kernel_only")
+        self.assertEqual(kernel_only["projection_report_status"], "unavailable")
+        self.assertEqual(len(kernel_only["report_attempts"]), 1)
+
+    def test_optional_projection_failure_does_not_discard_kernel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report = root / "trace.nsys-rep"
+            report.touch()
+
+            def fake_run(command):
+                if command == ["nsys", "--version"]:
+                    return subprocess.CompletedProcess(command, 0, "nsys 2024.1", "")
+                if command == ["nsys", "stats", "--help-reports"]:
+                    return subprocess.CompletedProcess(
+                        command, 0, "nvtx_kern_sum x\nnvtx_gpu_proj_sum x", ""
+                    )
+                report_name = command[command.index("--report") + 1]
+                prefix = Path(command[command.index("--output") + 1])
+                if report_name == "nvtx_kern_sum":
+                    _write_kernel_csv(
+                        prefix.parent / f"{prefix.name}_{report_name}.csv"
+                    )
+                    return subprocess.CompletedProcess(command, 0, "", "")
+                return subprocess.CompletedProcess(command, 1, "", "unsupported")
+
+            args = build_nsight_parser().parse_args(
+                [
+                    "export",
+                    "--nsys-rep",
+                    str(report),
+                    "--output-dir",
+                    str(root / "parsed"),
+                ]
+            )
+            with patch("scripts.phase2a_nsight._run_capture", side_effect=fake_run):
+                paths = run_export(args, command="test optional failure")
+            manifest = json.loads(
+                paths["nsight_export_manifest_json"].read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["status"], "ok")
+            self.assertEqual(manifest["projection_report_status"], "failed")
+            self.assertEqual(manifest["failed_reports"], ["nvtx_gpu_proj_sum"])
+
+    def test_missing_required_nsight_kernel_has_diagnostic_error_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report = root / "trace.nsys-rep"
+            report.touch()
+
+            def fake_run(command):
+                if command == ["nsys", "--version"]:
+                    return subprocess.CompletedProcess(command, 0, "nsys 2023.1", "")
+                if command == ["nsys", "stats", "--help-reports"]:
+                    return subprocess.CompletedProcess(
+                        command, 0, "nvtx_kern_sum x", ""
+                    )
+                return subprocess.CompletedProcess(command, 1, "", "export failed")
+
+            output = root / "parsed"
+            args = build_nsight_parser().parse_args(
+                [
+                    "export",
+                    "--nsys-rep",
+                    str(report),
+                    "--output-dir",
+                    str(output),
+                ]
+            )
+            with (
+                patch("scripts.phase2a_nsight._run_capture", side_effect=fake_run),
+                self.assertRaisesRegex(
+                    RuntimeError, "nsys_version=.*available_reports=.*checked_paths"
+                ),
+            ):
+                run_export(args, command="test required failure")
+            manifest = json.loads(
+                (output / "nsight-export-manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["status"], "error")
+            self.assertIn("nvtx_kern_sum", manifest["failed_reports"])
+
+    def test_explicit_sample_selection_is_exact_nested_and_validated(self) -> None:
+        tokenizer = _CharacterTokenizer()
+        prepared = prepare_longbench_records(
+            [
+                {"_id": "short", "context": "s" * 300, "input": "question"},
+                {"_id": "long", "context": "l" * 900, "input": "question"},
+            ],
+            tokenizer=tokenizer,
+            task="qasper",
+        )
+        selected_id = next(
+            row["sample_id"] for row in prepared if row["source_sample_id"] == "long"
+        )
+        workloads, cohort = build_longbench_workloads(
+            prepared,
+            tokenizer=tokenizer,
+            task="qasper",
+            nominal_lengths=(256, 512),
+            sample_count=8,
+            sample_policy="matched",
+            max_new_tokens=8,
+            model_position_limit=1024,
+            sample_id=selected_id,
+        )
+        self.assertEqual({row["sample_id"] for row in workloads}, {selected_id})
+        self.assertEqual(cohort["explicit_sample_id"], selected_id)
+        self.assertEqual(cohort["requested_sample_count"], 1)
+        self.assertLess(
+            workloads[0]["context_prefix_characters"],
+            workloads[1]["context_prefix_characters"],
+        )
+        self.assertEqual(
+            {row["explicit_sample_id"] for row in workloads}, {selected_id}
+        )
+
+    def test_explicit_sample_missing_and_too_short_errors(self) -> None:
+        tokenizer = _CharacterTokenizer()
+        prepared = prepare_longbench_records(
+            [{"_id": "short", "context": "s" * 300, "input": "question"}],
+            tokenizer=tokenizer,
+            task="qasper",
+        )
+        common = {
+            "prepared": prepared,
+            "tokenizer": tokenizer,
+            "task": "qasper",
+            "nominal_lengths": (256,),
+            "sample_count": 1,
+            "sample_policy": "matched",
+            "max_new_tokens": 8,
+            "model_position_limit": 1024,
+        }
+        with self.assertRaisesRegex(RuntimeError, "does not exist"):
+            build_longbench_workloads(**common, sample_id="qasper-missing")
+        selected_id = prepared[0]["sample_id"]
+        common["nominal_lengths"] = (256, 512)
+        with self.assertRaisesRegex(
+            RuntimeError, rf"{selected_id} reaches at most \d+.*512"
+        ):
+            build_longbench_workloads(**common, sample_id=selected_id)
+
+    def test_explicit_sample_preflight_fails_before_cuda_or_model_load(self) -> None:
+        tokenizer = _CharacterTokenizer()
+        prepared = prepare_longbench_records(
+            [{"_id": "short", "context": "s" * 300, "input": "question"}],
+            tokenizer=tokenizer,
+            task="qasper",
+        )
+        sample_id = prepared[0]["sample_id"]
+        inventory = build_workload_inventory(
+            prepared,
+            task="qasper",
+            nominal_lengths=(256, 512),
+            requested_sample_count=1,
+        )
+        inventory.update(
+            {
+                "source_record_count": 1,
+                "skipped_record_count": 0,
+                "models_loaded": False,
+                "cuda_required": False,
+            }
+        )
+        args = parse_args(
+            [
+                "--dataset-jsonl",
+                "/tmp/qasper.jsonl",
+                "--longbench-task",
+                "qasper",
+                "--materialized-draft-path",
+                "/tmp/draft",
+                "--sample-id",
+                sample_id,
+                "--context-lengths",
+                "256,512",
+                "--pilot-samples",
+                "1",
+            ]
+        )
+        manifest = _new_manifest(
+            args,
+            {"repository": {"commit_sha": "abc", "branch": "test"}},
+            "preflight test",
+        )
+        with (
+            patch(
+                "experiments.phase2a_profile._load_tokenizer_only",
+                return_value=(tokenizer, {}, "test"),
+            ),
+            patch(
+                "experiments.phase2a_profile._prepare_workload",
+                return_value=(prepared, inventory, None, None),
+            ),
+            patch("experiments.phase2a_profile._require_cuda") as require_cuda,
+            self.assertRaisesRegex(RuntimeError, "reaches at most"),
+        ):
+            _load_inputs(args, manifest, {})
+        require_cuda.assert_not_called()
+        selection = manifest["workload"]["inventory"]["explicit_sample_selection"]
+        self.assertEqual(selection["requested_sample_id"], sample_id)
+        self.assertFalse(selection["validated"])
+        self.assertGreater(selection["actual_max_templated_prompt_length"], 0)
+
+    def test_inventory_log_truncates_but_inventory_keeps_every_id(self) -> None:
+        tokenizer = _CharacterTokenizer()
+        prepared = prepare_longbench_records(
+            [
+                {"_id": f"sample-{index}", "context": "x" * 600, "input": "q"}
+                for index in range(12)
+            ],
+            tokenizer=tokenizer,
+            task="qasper",
+        )
+        inventory = build_workload_inventory(
+            prepared,
+            task="qasper",
+            nominal_lengths=(256,),
+            requested_sample_count=8,
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _print_inventory(inventory)
+        self.assertIn("total=12 showing=10 omitted=2", output.getvalue())
+        self.assertEqual(len(inventory["sample_ids_reaching_maximum_length"]), 12)
+        self.assertEqual(
+            len(
+                json.loads(json.dumps(inventory))["sample_ids_reaching_maximum_length"]
+            ),
+            12,
+        )
+
+    def test_verification_length_comparison_uses_true_counts_and_pairing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def write_artifacts(length: int, source_id: str) -> Path:
+                output = root / str(length)
+                output.mkdir()
+                metrics = {
+                    field: {"median": float(length // 1024 + index + 1)}
+                    for index, field in enumerate(VERIFICATION_SUMMARY_FIELDS[3:])
+                }
+                summary = {
+                    "status": "ok",
+                    "run_mode": "verification-profile",
+                    "aggregates": {
+                        "by_task_and_context_length": {
+                            f"gov_report:{length}": {
+                                "task": "gov_report",
+                                "context_length": length,
+                                "sample_count": 1,
+                                "metrics": metrics,
+                            }
+                        }
+                    },
+                }
+                summary_path = output / "verification-profile-summary.json"
+                summary_path.write_text(json.dumps(summary), encoding="utf-8")
+                (output / "samples.jsonl").write_text(
+                    json.dumps(
+                        {
+                            "task": "gov_report",
+                            "sample_id": f"sample-{source_id}",
+                            "source_sample_id": source_id,
+                            "nominal_prompt_length": length,
+                            "actual_prompt_length": length - 1,
+                            "generated_token_count": 8,
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                rounds = [
+                    {
+                        "task": "gov_report",
+                        "sample_id": f"sample-{source_id}",
+                        "nominal_prompt_length": length,
+                        "diagnostic_run": 0,
+                        "round_index": index,
+                        "stop_reason": "continue" if index == 0 else "max_new_tokens",
+                        "truncated_token_count": 0 if index == 0 else 1,
+                        "committed_token_count": 4,
+                        "returned_token_delta": 4,
+                    }
+                    for index in range(2)
+                ]
+                (output / "verification-profile-rounds.jsonl").write_text(
+                    "".join(json.dumps(row) + "\n" for row in rounds),
+                    encoding="utf-8",
+                )
+                return summary_path
+
+            paired_paths = [
+                write_artifacts(length, "same") for length in (1024, 16384, 32768)
+            ]
+            comparison = build_verification_length_comparison(paired_paths)
+            self.assertTrue(comparison["paired_comparison"])
+            comparison_schema = json.loads(
+                (
+                    REPO_ROOT
+                    / "docs/schemas/phase2a-verification-length-comparison.schema.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                set(comparison_schema["required"]).issubset(comparison)
+            )
+            self.assertEqual(comparison["rows"][0]["round_count"], 2)
+            self.assertEqual(comparison["rows"][0]["non_terminal_round_count"], 1)
+            self.assertEqual(comparison["rows"][0]["total_committed_token_count"], 8)
+            self.assertEqual(
+                comparison["scaling_comparisons"]["1k_to_32k"]["round_count_scaling"],
+                1.0,
+            )
+            paths = write_verification_length_comparison(
+                root / "comparison", comparison
+            )
+            with paths["comparison_csv"].open(encoding="utf-8") as stream:
+                header = next(csv.reader(stream))
+            self.assertEqual(tuple(header), COMPARISON_CSV_FIELDS)
+
+            unpaired_path = write_artifacts(4096, "different")
+            unpaired = build_verification_length_comparison(
+                [paired_paths[0], unpaired_path]
+            )
+            self.assertFalse(unpaired["paired_comparison"])
+            self.assertTrue(
+                any("pilot trend" in warning for warning in unpaired["warnings"])
+            )
+
     def test_cli_defaults_overrides_schemas_and_lazy_imports(self) -> None:
         defaults = parse_args(
             [
@@ -464,6 +932,8 @@ class Phase2ATests(unittest.TestCase):
                 "1",
                 "--timing-repeats",
                 "2",
+                "--sample-id",
+                "qasper-fixed",
                 "--output-dir",
                 "/tmp/out",
             ]
@@ -471,9 +941,11 @@ class Phase2ATests(unittest.TestCase):
         self.assertEqual(overridden.run_mode, "verification-profile")
         self.assertEqual(overridden.context_lengths, (1024, 16384))
         self.assertEqual(overridden.timing_repeats, 2)
+        self.assertEqual(overridden.sample_id, "qasper-fixed")
+        self.assertEqual(run_configuration(overridden)["effective_sample_count"], 1)
 
         schemas = sorted((REPO_ROOT / "docs/schemas").glob("phase2a-*.schema.json"))
-        self.assertEqual(len(schemas), 8)
+        self.assertEqual(len(schemas), 10)
         for path in schemas:
             schema = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
@@ -503,6 +975,7 @@ import sys
 import dflash.phase2a
 import experiments.phase2a_profile
 import scripts.phase2a_nsight
+import scripts.phase2a_compare_verification
 for name in ('torch', 'transformers', 'huggingface_hub'):
     assert name not in sys.modules, f'{name} was imported'
 """
