@@ -40,6 +40,16 @@ empirical performance/correctness tradeoff until shadow evaluation observes zero
 false negatives on the intended cohort. It must not be described as strictly
 lossless from a single sample or threshold.
 
+For speculative verification, original DFlash is the token-exact reference.
+The hard output oracle for `always` and triggered `margin` is original DFlash
+equal to the stabilized tree control, together with tree control/profile
+equality, original-reference repeat/profile stability, requested gold-output
+equality, and the structural, semantic KV, and verifier checks. Target-only
+greedy decoding is a fully recorded numerical control, not an authoritative
+oracle: a target-only/original-DFlash mismatch is reported as
+`target_only_reference_numerical_divergence` with its first token offset, token
+IDs/text, and CUDA latency, but does not fail an otherwise valid tree run.
+
 ## Timing policy
 
 CUDA events and NVTX ranges separately cover the packed verification, cache
@@ -124,7 +134,7 @@ python experiments/phase2c_online_tree.py "${COMMON[@]}" \
 
 python experiments/phase2c_online_tree.py "${COMMON[@]}" \
   --decision-stabilization always \
-  --enable-gold-checks --gold-max-rounds 8 \
+  --enable-gold-checks --gold-max-rounds 32 \
   --output-dir outputs/phase2c3-known-always
 
 python experiments/phase2c_online_tree.py "${COMMON[@]}" \
@@ -139,10 +149,11 @@ for THRESHOLD in 0.05 0.1 0.2 0.5; do
 done
 ```
 
-Do not proceed to performance pilots until `always` shows target-only, original
-DFlash, and stabilized token IDs equal; canonical commit lengths and next-step KV
-gold pass; and the `Activities`/`Actions` round is recorded as a corrected native
-decision.
+Do not proceed to performance pilots until `always` shows original DFlash and
+stabilized token IDs equal; canonical commit lengths and next-step KV gold pass;
+and the `Activities`/`Actions` round is recorded as a corrected native decision.
+Any target-only mismatch remains an auxiliary numerical warning in the recorded
+three-way comparison.
 
 ## Shadow cohort and later configurations
 

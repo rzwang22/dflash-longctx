@@ -549,6 +549,51 @@ def _decoded_token(tokenizer: Any, token_id: int | None) -> str | None:
     )
 
 
+def evaluate_output_oracle(
+    *,
+    token_exact_required: bool,
+    reference_tree_output_ids_equal: bool,
+    tree_control_repeat_output_ids_equal_reference: bool,
+    control_profile_output_ids_equal: bool,
+    reference_repeat_output_ids_equal: bool,
+    reference_profile_output_ids_equal: bool,
+    target_only_reference_output_ids_equal: bool,
+    target_only_tree_output_ids_equal: bool,
+) -> dict[str, Any]:
+    """Separate the speculative hard oracle from target-only diagnostics."""
+
+    if not (reference_repeat_output_ids_equal and reference_profile_output_ids_equal):
+        hard_failure_class = "reference_control_profile_output_divergence"
+    elif not control_profile_output_ids_equal:
+        hard_failure_class = "control_profile_output_divergence"
+    elif token_exact_required and not reference_tree_output_ids_equal:
+        hard_failure_class = "reference_tree_output_divergence"
+    elif token_exact_required and not tree_control_repeat_output_ids_equal_reference:
+        hard_failure_class = "tree_control_repeat_output_divergence"
+    else:
+        hard_failure_class = None
+
+    if not target_only_reference_output_ids_equal:
+        target_only_status = "target_only_reference_numerical_divergence"
+    elif not target_only_tree_output_ids_equal:
+        target_only_status = "target_only_tree_numerical_divergence"
+    else:
+        target_only_status = "equal"
+
+    return {
+        "hard_output_relations_passed": hard_failure_class is None,
+        "hard_failure_class": hard_failure_class,
+        "target_only_auxiliary_status": target_only_status,
+        "target_only_auxiliary_warning": (
+            None if target_only_status == "equal" else target_only_status
+        ),
+        "target_only_reference_output_ids_equal": (
+            target_only_reference_output_ids_equal
+        ),
+        "target_only_tree_output_ids_equal": target_only_tree_output_ids_equal,
+    }
+
+
 def _token_ids_sha256(values: list[int]) -> str:
     payload = json.dumps(values, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -1034,13 +1079,29 @@ def _run_sample_configuration(
             else None
         ),
     )
-    if reference_tree["output_ids_equal"] and not pairwise[0]["output_ids_equal"]:
+    token_exact_required = (
+        args.decision_stabilization in {"always", "margin"}
+        or configuration["tree_policy"] == "top1_chain"
+    )
+    output_oracle = evaluate_output_oracle(
+        token_exact_required=token_exact_required,
+        reference_tree_output_ids_equal=reference_tree["output_ids_equal"],
+        tree_control_repeat_output_ids_equal_reference=(
+            reference_control_output_equal
+        ),
+        control_profile_output_ids_equal=control_profile_output_equal,
+        reference_repeat_output_ids_equal=reference_repeat_output_equal,
+        reference_profile_output_ids_equal=reference_profile_output_equal,
+        target_only_reference_output_ids_equal=pairwise[0]["output_ids_equal"],
+        target_only_tree_output_ids_equal=pairwise[1]["output_ids_equal"],
+    )
+    if not (reference_repeat_output_equal and reference_profile_output_equal):
         divergence_classification = {
-            "status": "inconclusive",
-            "failure_class": "target_only_reference_output_divergence",
-            "evidence_complete": False,
+            "status": "failed",
+            "failure_class": "reference_control_profile_output_divergence",
+            "evidence_complete": True,
         }
-    elif reference_tree["output_ids_equal"] and not control_profile_output_equal:
+    elif not control_profile_output_equal:
         divergence_classification = {
             "status": "failed",
             "failure_class": "control_profile_output_divergence",
@@ -1052,22 +1113,14 @@ def _run_sample_configuration(
             "failure_class": "tree_control_repeat_output_divergence",
             "evidence_complete": True,
         }
-    elif reference_tree["output_ids_equal"] and not (
-        reference_repeat_output_equal and reference_profile_output_equal
-    ):
-        divergence_classification = {
-            "status": "failed",
-            "failure_class": "reference_control_profile_output_divergence",
-            "evidence_complete": True,
-        }
-    all_output_relations_equal = (
-        all(row["output_ids_equal"] for row in pairwise)
+    reference_tree_relations_stable = (
+        reference_tree["output_ids_equal"]
         and reference_control_output_equal
         and control_profile_output_equal
         and reference_repeat_output_equal
         and reference_profile_output_equal
     )
-    if all_output_relations_equal:
+    if reference_tree_relations_stable:
         mismatch_message = None
     elif not reference_tree["output_ids_equal"]:
         mismatch_message = (
@@ -1090,10 +1143,7 @@ def _run_sample_configuration(
             f"{configuration['configuration_id']}"
         )
     else:
-        mismatch_message = (
-            "Phase 2C target-only/reference/tree comparison mismatch: "
-            f"{configuration['configuration_id']}"
-        )
+        mismatch_message = None
     uncompleted_divergence_checks = []
     if not reference_tree["output_ids_equal"] and not args.enable_gold_checks:
         uncompleted_divergence_checks.append(
@@ -1124,7 +1174,7 @@ def _run_sample_configuration(
         )
     divergence_record = {
         "schema_version": SCHEMA_VERSION,
-        "status": "pass" if all_output_relations_equal else "failed",
+        "status": "pass" if reference_tree_relations_stable else "failed",
         "task": workload["longbench_task"],
         "sample_id": workload["sample_id"],
         "nominal_prompt_length": workload["nominal_prompt_length"],
@@ -1134,6 +1184,22 @@ def _run_sample_configuration(
         "reference_output_ids": reference_generated,
         "tree_control_output_ids": control_generated,
         "target_only_output_ids": target_only_generated,
+        "target_only_auxiliary_status": output_oracle[
+            "target_only_auxiliary_status"
+        ],
+        "target_only_auxiliary_warning": output_oracle[
+            "target_only_auxiliary_warning"
+        ],
+        "target_only_reference_first_divergent_generated_token_offset": pairwise[
+            0
+        ]["first_divergent_generated_token_offset"],
+        "target_only_reference_first_divergent_absolute_sequence_position": pairwise[
+            0
+        ]["first_divergent_absolute_sequence_position"],
+        "target_only_token_id": pairwise[0]["left_token_id"],
+        "target_only_token_text": pairwise[0]["left_token_text"],
+        "target_only_reference_token_id": pairwise[0]["right_token_id"],
+        "target_only_reference_token_text": pairwise[0]["right_token_text"],
         "reference_returned_token_count": len(reference_generated),
         "tree_returned_token_count": len(control_generated),
         "longest_common_prefix_length": reference_tree["longest_common_prefix_length"],
@@ -1289,10 +1355,6 @@ def _run_sample_configuration(
         )
         for field in component_fields
     }
-    token_exact_required = (
-        args.decision_stabilization in {"always", "margin"}
-        or configuration["tree_policy"] == "top1_chain"
-    )
     sample = {
         "schema_version": SCHEMA_VERSION,
         "task": workload["longbench_task"],
@@ -1338,6 +1400,19 @@ def _run_sample_configuration(
             "cuda_elapsed_ms": target_only_cuda_elapsed_ms,
             "explicit_attention_mask": True,
             "greedy_sampling_warnings_suppressed_without_sampling_change": True,
+            "auxiliary_status": output_oracle["target_only_auxiliary_status"],
+            "reference_output_ids_equal": pairwise[0]["output_ids_equal"],
+            "tree_output_ids_equal": pairwise[1]["output_ids_equal"],
+            "reference_first_divergent_generated_token_offset": pairwise[0][
+                "first_divergent_generated_token_offset"
+            ],
+            "reference_first_divergent_absolute_sequence_position": pairwise[0][
+                "first_divergent_absolute_sequence_position"
+            ],
+            "divergent_token_id": pairwise[0]["left_token_id"],
+            "divergent_token_text": pairwise[0]["left_token_text"],
+            "reference_token_id": pairwise[0]["right_token_id"],
+            "reference_token_text": pairwise[0]["right_token_text"],
         },
         "profiling": {
             "formal_end_to_end": False,
@@ -1361,9 +1436,18 @@ def _run_sample_configuration(
         "correctness": {
             "token_exact_required": token_exact_required,
             "reference_output_ids_equal": reference_control_output_equal,
+            "original_dflash_reference_tree_output_ids_equal": reference_tree[
+                "output_ids_equal"
+            ],
             "control_profile_output_ids_equal": control_profile_output_equal,
             "target_only_reference_output_ids_equal": pairwise[0]["output_ids_equal"],
             "target_only_tree_output_ids_equal": pairwise[1]["output_ids_equal"],
+            "target_only_auxiliary_status": output_oracle[
+                "target_only_auxiliary_status"
+            ],
+            "target_only_auxiliary_warning": output_oracle[
+                "target_only_auxiliary_warning"
+            ],
             "divergence_classification": divergence_classification,
             "output_divergence_failure_class": divergence_classification[
                 "failure_class"
@@ -1390,15 +1474,7 @@ def _run_sample_configuration(
         and configuration["tree_policy"] != "top1_chain",
         "passed": (
             (top1_exact is not False)
-            and control_profile_output_equal
-            and reference_repeat_output_equal
-            and reference_profile_output_equal
-            and pairwise[0]["output_ids_equal"]
-            and (
-                not token_exact_required
-                or reference_control_output_equal
-                and pairwise[1]["output_ids_equal"]
-            )
+            and output_oracle["hard_output_relations_passed"]
             and (
                 not token_exact_required
                 or gold_output_equal is not False
@@ -2007,11 +2083,15 @@ def main(argv: list[str] | None = None) -> int:
                     "all_required_token_exact_checks_passed": all(
                         not record.get("token_exact_required", True)
                         or record["reference_output_ids_equal"]
-                        and record["target_only_tree_output_ids_equal"]
+                        and record[
+                            "original_dflash_reference_tree_output_ids_equal"
+                        ]
                         for record in correctness_records
                     ),
                     "observed_native_output_divergence": any(
-                        not record["reference_output_ids_equal"]
+                        not record[
+                            "original_dflash_reference_tree_output_ids_equal"
+                        ]
                         for record in correctness_records
                     ),
                     "gold_status": next(

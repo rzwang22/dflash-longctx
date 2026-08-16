@@ -23,6 +23,7 @@ from dflash.phase2c.stabilization import (
 from experiments.phase2c_online_tree import (
     _target_only_greedy,
     build_stabilization_artifacts,
+    evaluate_output_oracle,
     margin_frontier_csv_rows,
     parse_args,
 )
@@ -220,6 +221,61 @@ class Phase2C3DecisionTests(unittest.TestCase):
 
 
 class Phase2C3RunnerTests(unittest.TestCase):
+    def _output_oracle(self, **updates):
+        inputs = {
+            "token_exact_required": True,
+            "reference_tree_output_ids_equal": True,
+            "tree_control_repeat_output_ids_equal_reference": True,
+            "control_profile_output_ids_equal": True,
+            "reference_repeat_output_ids_equal": True,
+            "reference_profile_output_ids_equal": True,
+            "target_only_reference_output_ids_equal": True,
+            "target_only_tree_output_ids_equal": True,
+        }
+        inputs.update(updates)
+        return evaluate_output_oracle(**inputs)
+
+    def test_target_only_divergence_is_auxiliary_when_reference_matches_tree(
+        self,
+    ) -> None:
+        result = self._output_oracle(
+            target_only_reference_output_ids_equal=False,
+            target_only_tree_output_ids_equal=False,
+        )
+        self.assertTrue(result["hard_output_relations_passed"])
+        self.assertIsNone(result["hard_failure_class"])
+        self.assertEqual(
+            result["target_only_auxiliary_status"],
+            "target_only_reference_numerical_divergence",
+        )
+
+    def test_reference_tree_divergence_fails_token_exact_oracle(self) -> None:
+        result = self._output_oracle(reference_tree_output_ids_equal=False)
+        self.assertFalse(result["hard_output_relations_passed"])
+        self.assertEqual(
+            result["hard_failure_class"], "reference_tree_output_divergence"
+        )
+
+    def test_reference_repeat_or_profile_instability_fails(self) -> None:
+        for field in (
+            "reference_repeat_output_ids_equal",
+            "reference_profile_output_ids_equal",
+        ):
+            with self.subTest(field=field):
+                result = self._output_oracle(**{field: False})
+                self.assertFalse(result["hard_output_relations_passed"])
+                self.assertEqual(
+                    result["hard_failure_class"],
+                    "reference_control_profile_output_divergence",
+                )
+
+    def test_target_only_equality_remains_recorded(self) -> None:
+        result = self._output_oracle()
+        self.assertTrue(result["target_only_reference_output_ids_equal"])
+        self.assertTrue(result["target_only_tree_output_ids_equal"])
+        self.assertEqual(result["target_only_auxiliary_status"], "equal")
+        self.assertIsNone(result["target_only_auxiliary_warning"])
+
     def test_cli_defaults_and_overrides(self) -> None:
         default = _args()
         self.assertEqual(default.decision_stabilization, "off")
