@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-decision-stabilization-summary.schema.json",
+  "title": "Phase 2C.3 decision stabilization summary",
+  "type": "object",
+  "required": [
+    "schema_version", "sample_count", "round_count", "stabilization_modes",
+    "round_recheck_rate", "decision_divergence_rate", "output_divergence_rate",
+    "threshold_false_negative_rate", "canonical_recheck_cuda_elapsed_ms",
+    "kv_replacement_cuda_elapsed_ms", "stabilized_round_cuda_elapsed_ms",
+    "formal_end_to_end_cuda_elapsed_ms", "mean_accepted_draft_tokens",
+    "latency_per_returned_token_ms", "speedup_relative_to_original_dflash",
+    "speedup_relative_to_target_only", "speedup_unavailable_reason", "interpretation"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "sample_count": {"type": "integer", "minimum": 0},
+    "round_count": {"type": "integer", "minimum": 0},
+    "stabilization_modes": {"type": "array", "items": {"enum": ["off", "always", "margin", "shadow"]}},
+    "round_recheck_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "decision_divergence_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "output_divergence_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "threshold_false_negative_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+    "canonical_recheck_cuda_elapsed_ms": {"type": "object"},
+    "kv_replacement_cuda_elapsed_ms": {"type": "object"},
+    "stabilized_round_cuda_elapsed_ms": {"type": "object"},
+    "formal_end_to_end_cuda_elapsed_ms": {"type": "object"},
+    "mean_accepted_draft_tokens": {"type": ["number", "null"]},
+    "latency_per_returned_token_ms": {"type": ["number", "null"]},
+    "speedup_relative_to_original_dflash": {"type": ["number", "null"]},
+    "speedup_relative_to_target_only": {"type": ["number", "null"]},
+    "speedup_unavailable_reason": {"type": ["string", "null"]},
+    "interpretation": {"type": "object"}
+  }
+}

@@ -42,6 +42,14 @@ from dflash.phase2c.metrics import (
     distribution,
     summary_csv_rows,
 )
+from dflash.phase2c.stabilization import (
+    DECISION_STABILIZATION_MODES,
+    DEFAULT_MARGIN_THRESHOLDS,
+    decision_margin_frontier,
+    stabilization_summary_csv_rows,
+    summarize_decision_stabilization,
+    validate_decision_stabilization,
+)
 from experiments.phase0_smoke import TeeStream
 from experiments.phase1_observability import _atomic_write_jsonl, _call_generation
 from experiments.phase1b_longctx import (
@@ -153,6 +161,40 @@ OUTPUT_DIVERGENCE_CSV_FIELDS = (
     "exception_type",
     "exception_message",
 )
+STABILIZATION_SUMMARY_CSV_FIELDS = (
+    "stabilization_mode",
+    "decision_margin_threshold",
+    "sample_count",
+    "round_count",
+    "round_recheck_rate",
+    "decision_divergence_rate",
+    "output_divergence_rate",
+    "threshold_false_negative_rate",
+    "recheck_cuda_mean_ms",
+    "recheck_cuda_p50_ms",
+    "recheck_cuda_p90_ms",
+    "end_to_end_cuda_median_ms",
+    "mean_accepted_draft_tokens",
+    "latency_per_returned_token_ms",
+    "speedup_relative_to_original_dflash",
+    "speedup_relative_to_target_only",
+    "speedup_unavailable_reason",
+)
+MARGIN_FRONTIER_CSV_FIELDS = (
+    "threshold",
+    "eligible_round_count",
+    "divergent_round_count",
+    "triggered_round_count",
+    "captured_divergence_count",
+    "false_negative_count",
+    "trigger_rate",
+    "captured_divergence_rate",
+    "false_negative_rate",
+    "strictly_lossless_supported",
+    "estimated_recheck_cuda_mean_ms",
+    "estimated_recheck_cuda_p50_ms",
+    "estimated_recheck_cuda_p90_ms",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -185,6 +227,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repeat for multiple fixed layerwise widths.",
     )
     parser.add_argument("--draft-top-k", type=int, default=16)
+    parser.add_argument(
+        "--decision-stabilization",
+        choices=DECISION_STABILIZATION_MODES,
+        default="off",
+    )
+    parser.add_argument("--decision-margin-threshold", type=float, default=0.1)
     parser.add_argument("--enable-gold-checks", action="store_true")
     parser.add_argument(
         "--gold-comparison-mode",
@@ -246,6 +294,8 @@ def tree_configurations(args: argparse.Namespace) -> list[dict[str, Any]]:
                     "beam_width": 1,
                     "draft_top_k": args.draft_top_k,
                     "configuration_id": "top1_chain-b16",
+                    "decision_stabilization": args.decision_stabilization,
+                    "decision_margin_threshold": args.decision_margin_threshold,
                 }
             )
             continue
@@ -258,6 +308,8 @@ def tree_configurations(args: argparse.Namespace) -> list[dict[str, Any]]:
                         "beam_width": width,
                         "draft_top_k": args.draft_top_k,
                         "configuration_id": f"layerwise_beam-b{budget}-w{width}",
+                        "decision_stabilization": args.decision_stabilization,
+                        "decision_margin_threshold": args.decision_margin_threshold,
                     }
                 )
     return configurations
@@ -282,6 +334,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "relative_error_epsilon": args.gold_relative_epsilon,
             "layer_localization_p99_error": args.gold_layer_threshold,
         }
+    )
+    args.decision_stabilization, args.decision_margin_threshold = (
+        validate_decision_stabilization(
+            args.decision_stabilization, args.decision_margin_threshold
+        )
     )
     if any(value not in SUPPORTED_NODE_BUDGETS for value in args.node_budgets):
         raise ValueError("node budgets must be chosen from 16,32,64,128")
@@ -313,11 +370,14 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
     return {
         **phase1b_configuration(args),
         "phase": "2C",
-        "phase_detail": "2C.2",
+        "phase_detail": "2C.3",
         "mode": "online_bounded_marginal_tree",
         "sample_id": args.sample_id,
         "tree_configurations": tree_configurations(args),
         "draft_top_k": args.draft_top_k,
+        "decision_stabilization": args.decision_stabilization,
+        "decision_margin_threshold": args.decision_margin_threshold,
+        "decision_margin_frontier_thresholds": list(DEFAULT_MARGIN_THRESHOLDS),
         "enable_gold_checks": args.enable_gold_checks,
         "gold_comparison_modes": list(args.gold_comparison_modes),
         "gold_layer_localization": args.gold_layer_localization,
@@ -349,6 +409,14 @@ def _new_manifest(
         "cache_position": "prefix_length + packed node index",
         "kv_compaction": "gather prefix plus root and accepted path at every target layer",
         "correction_bonus_persisted_in_current_round": False,
+        "decision_stabilization": {
+            "mode": args.decision_stabilization,
+            "margin_threshold": args.decision_margin_threshold,
+            "always_commit_source": "canonical_recheck",
+            "shadow_commit_source": "packed_native",
+            "canonical_query_length": 16,
+            "canonical_mask": "implicit causal matching original DFlash",
+        },
         "gold_validation": {
             "comparison_modes": list(args.gold_comparison_modes),
             "comparison_mode_backends": {
@@ -372,9 +440,13 @@ def _new_manifest(
         "formal_tree_latency": "online tree control path",
         "component_timing": "separate online tree profiling path",
         "control_profile_output_ids_must_match": True,
-        "reference_tree_output_ids_must_match": True,
+        "reference_tree_output_ids_must_match": args.decision_stabilization
+        in {"always", "margin"},
+        "top1_chain_output_ids_must_match_in_every_mode": True,
+        "native_layerwise_divergence_is_recorded_not_hidden_in_off_or_shadow": True,
         "gold_checks_excluded_from_performance": True,
         "divergence_diagnostics_excluded_from_performance": True,
+        "shadow_oracle_excluded_from_native_formal_timing": True,
         "repeats": args.timing_repeats,
         "warmup_runs": args.warmup_runs,
     }
@@ -396,6 +468,7 @@ def _tree_options(
     gold_checks: bool,
     args: argparse.Namespace | None = None,
     divergence_diagnostics: bool = False,
+    stabilization_override: str | None = None,
 ) -> dict[str, Any]:
     options = {
         "enable_online_tree": True,
@@ -406,6 +479,14 @@ def _tree_options(
         "enable_online_tree_profiling": profiling,
         "enable_online_tree_gold_checks": gold_checks,
         "enable_online_tree_divergence_diagnostics": divergence_diagnostics,
+        "decision_stabilization": (
+            stabilization_override
+            if stabilization_override is not None
+            else configuration.get("decision_stabilization", "off")
+        ),
+        "decision_margin_threshold": configuration.get(
+            "decision_margin_threshold", 0.1
+        ),
     }
     if gold_checks:
         if args is None:
@@ -448,8 +529,12 @@ def _target_only_greedy(
 
     return target.generate(
         input_ids=input_ids,
+        attention_mask=input_ids.new_ones(input_ids.shape),
         max_new_tokens=max_new_tokens,
         do_sample=False,
+        temperature=None,
+        top_p=None,
+        top_k=None,
         use_cache=True,
         eos_token_id=eos_token_id,
         pad_token_id=eos_token_id,
@@ -605,7 +690,12 @@ def _run_sample_configuration(
             return_diagnostics=False,
             enable_profiling=False,
             generation_options=_tree_options(
-                configuration, profiling=False, gold_checks=False
+                configuration,
+                profiling=False,
+                gold_checks=False,
+                stabilization_override=(
+                    "off" if args.decision_stabilization == "shadow" else None
+                ),
             ),
         )
         if formal_control_ids is None:
@@ -687,11 +777,19 @@ def _run_sample_configuration(
 
     # This third control runs only after the formal tree control/profile timing
     # paths, so it cannot warm or delay the measurements reported above.
+    target_only_start = torch_module.cuda.Event(enable_timing=True)
+    target_only_end = torch_module.cuda.Event(enable_timing=True)
+    target_only_start.record()
     target_only_ids = _target_only_greedy(
         target=target,
         input_ids=input_ids,
         max_new_tokens=args.max_new_tokens,
         eos_token_id=tokenizer.eos_token_id,
+    )
+    target_only_end.record()
+    target_only_end.synchronize()
+    target_only_cuda_elapsed_ms = float(
+        target_only_start.elapsed_time(target_only_end)
     )
 
     gold_logits = []
@@ -1171,18 +1269,30 @@ def _run_sample_configuration(
     }
     component_per_returned = {
         field: distribution(
-            (repeat["components"].get(field) or 0.0) / len(generated)
+            (
+                repeat["components"].get(field) / len(generated)
+                if repeat["components"].get(field) is not None
+                else None
+            )
             for repeat in profile_repeats
         )
         for field in component_fields
     }
     component_per_committed = {
         field: distribution(
-            (repeat["components"].get(field) or 0.0) / repeat["committed_token_count"]
+            (
+                repeat["components"].get(field) / repeat["committed_token_count"]
+                if repeat["components"].get(field) is not None
+                else None
+            )
             for repeat in profile_repeats
         )
         for field in component_fields
     }
+    token_exact_required = (
+        args.decision_stabilization in {"always", "margin"}
+        or configuration["tree_policy"] == "top1_chain"
+    )
     sample = {
         "schema_version": SCHEMA_VERSION,
         "task": workload["longbench_task"],
@@ -1223,6 +1333,12 @@ def _run_sample_configuration(
             / (statistics.median(cuda_values) / 1000.0),
             "all_repeat_output_ids_equal": reference_control_output_equal,
         },
+        "target_only": {
+            "formal_end_to_end": True,
+            "cuda_elapsed_ms": target_only_cuda_elapsed_ms,
+            "explicit_attention_mask": True,
+            "greedy_sampling_warnings_suppressed_without_sampling_change": True,
+        },
         "profiling": {
             "formal_end_to_end": False,
             "repeats": profile_repeats,
@@ -1243,6 +1359,7 @@ def _run_sample_configuration(
             "component_per_committed_token_ms": component_per_committed,
         },
         "correctness": {
+            "token_exact_required": token_exact_required,
             "reference_output_ids_equal": reference_control_output_equal,
             "control_profile_output_ids_equal": control_profile_output_equal,
             "target_only_reference_output_ids_equal": pairwise[0]["output_ids_equal"],
@@ -1268,17 +1385,29 @@ def _run_sample_configuration(
         "nominal_prompt_length": sample["nominal_prompt_length"],
         "configuration_id": sample["configuration_id"],
         **sample["correctness"],
+        "native_divergence_allowed_for_analysis": args.decision_stabilization
+        in {"off", "shadow"}
+        and configuration["tree_policy"] != "top1_chain",
         "passed": (
             (top1_exact is not False)
-            and reference_control_output_equal
             and control_profile_output_equal
             and reference_repeat_output_equal
             and reference_profile_output_equal
             and pairwise[0]["output_ids_equal"]
-            and pairwise[1]["output_ids_equal"]
-            and (gold_output_equal is not False)
+            and (
+                not token_exact_required
+                or reference_control_output_equal
+                and pairwise[1]["output_ids_equal"]
+            )
+            and (
+                not token_exact_required
+                or gold_output_equal is not False
+            )
             and (
                 not args.enable_gold_checks
+                or not token_exact_required
+                and args.decision_stabilization in {"off", "shadow"}
+                and gold_status != "fail_structural"
                 or gold_status
                 in {
                     "pass_exact",
@@ -1652,6 +1781,56 @@ def persist_divergence_artifacts(
     return payload
 
 
+def build_stabilization_artifacts(
+    rounds: list[dict[str, Any]], samples: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+    """Flatten dynamic diagnostics and build run-level stabilization aggregates."""
+
+    rows = []
+    for round_row in rounds:
+        stabilization = round_row.get("decision_stabilization")
+        if stabilization is None:
+            continue
+        rows.append(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "task": round_row["task"],
+                "sample_id": round_row["sample_id"],
+                "nominal_prompt_length": round_row["nominal_prompt_length"],
+                "configuration_id": round_row["configuration_id"],
+                "profiling_repeat": round_row["profiling_repeat"],
+                "round_index": round_row["round_index"],
+                "accepted_draft_token_count": round_row.get(
+                    "accepted_draft_token_count"
+                ),
+                "output_ids_equal_reference": round_row[
+                    "output_ids_equal_reference"
+                ],
+                **stabilization,
+            }
+        )
+    summary = summarize_decision_stabilization(rows, samples)
+    frontier = decision_margin_frontier(
+        [row for row in rows if row["profiling_repeat"] == 0]
+    )
+    return rows, summary, frontier
+
+
+def margin_frontier_csv_rows(frontier: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for record in frontier:
+        estimated = record["estimated_recheck_cuda_elapsed_ms"]
+        rows.append(
+            {
+                **record,
+                "estimated_recheck_cuda_mean_ms": estimated["mean"],
+                "estimated_recheck_cuda_p50_ms": estimated["median"],
+                "estimated_recheck_cuda_p90_ms": estimated["p90"],
+            }
+        )
+    return rows
+
+
 def _validate_schema(payload: Any, schema_name: str) -> None:
     from jsonschema import Draft202012Validator
 
@@ -1675,6 +1854,8 @@ def _validate_artifacts(
     output_divergence: dict[str, Any],
     round_differentials: list[dict[str, Any]],
     traversal_checks: list[dict[str, Any]],
+    stabilization_rounds: list[dict[str, Any]],
+    stabilization_summary: dict[str, Any],
 ) -> None:
     _validate_schema(manifest, "phase2c-manifest.schema.json")
     for sample in samples:
@@ -1698,6 +1879,11 @@ def _validate_artifacts(
         _validate_schema(row, "phase2c-round-differential.schema.json")
     for row in traversal_checks:
         _validate_schema(row, "phase2c-tree-traversal-check.schema.json")
+    for row in stabilization_rounds:
+        _validate_schema(row, "phase2c-decision-stabilization-round.schema.json")
+    _validate_schema(
+        stabilization_summary, "phase2c-decision-stabilization-summary.schema.json"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1726,6 +1912,14 @@ def main(argv: list[str] | None = None) -> int:
         "output_divergence_csv": output_dir / "output-divergence.csv",
         "round_differential": output_dir / "round-differential.jsonl",
         "tree_traversal_checks": output_dir / "tree-traversal-checks.jsonl",
+        "decision_stabilization_rounds": output_dir
+        / "decision-stabilization-rounds.jsonl",
+        "decision_stabilization_summary": output_dir
+        / "decision-stabilization-summary.json",
+        "decision_stabilization_summary_csv": output_dir
+        / "decision-stabilization-summary.csv",
+        "decision_margin_frontier_csv": output_dir / "decision-margin-frontier.csv",
+        "canonical_recheck_events": output_dir / "canonical-recheck-events.jsonl",
     }
     command = shlex.join([sys.executable, *sys.argv])
     environment = collect_environment(
@@ -1754,6 +1948,9 @@ def main(argv: list[str] | None = None) -> int:
         "records": [],
     }
     summary = aggregate_tree_results(samples, rounds)
+    stabilization_rounds: list[dict[str, Any]] = []
+    stabilization_summary = summarize_decision_stabilization([], [])
+    margin_frontier: list[dict[str, Any]] = []
     correctness = {
         "schema_version": SCHEMA_VERSION,
         "status": "started",
@@ -1806,6 +2003,16 @@ def main(argv: list[str] | None = None) -> int:
                     "status": "ok",
                     "all_checks_passed": all(
                         record["passed"] for record in correctness_records
+                    ),
+                    "all_required_token_exact_checks_passed": all(
+                        not record.get("token_exact_required", True)
+                        or record["reference_output_ids_equal"]
+                        and record["target_only_tree_output_ids_equal"]
+                        for record in correctness_records
+                    ),
+                    "observed_native_output_divergence": any(
+                        not record["reference_output_ids_equal"]
+                        for record in correctness_records
                     ),
                     "gold_status": next(
                         (
@@ -1929,6 +2136,35 @@ def main(argv: list[str] | None = None) -> int:
                     round_differentials=round_differentials,
                     traversal_checks=traversal_checks,
                 )
+                (
+                    stabilization_rounds,
+                    stabilization_summary,
+                    margin_frontier,
+                ) = build_stabilization_artifacts(rounds, samples)
+                _atomic_write_jsonl(
+                    paths["decision_stabilization_rounds"], stabilization_rounds
+                )
+                write_json(
+                    paths["decision_stabilization_summary"], stabilization_summary
+                )
+                _write_csv(
+                    paths["decision_stabilization_summary_csv"],
+                    stabilization_summary_csv_rows(stabilization_summary),
+                    STABILIZATION_SUMMARY_CSV_FIELDS,
+                )
+                _write_csv(
+                    paths["decision_margin_frontier_csv"],
+                    margin_frontier_csv_rows(margin_frontier),
+                    MARGIN_FRONTIER_CSV_FIELDS,
+                )
+                _atomic_write_jsonl(
+                    paths["canonical_recheck_events"],
+                    [
+                        row
+                        for row in stabilization_rounds
+                        if row["recheck_triggered"]
+                    ],
+                )
                 if exit_code == 0:
                     _validate_artifacts(
                         manifest,
@@ -1944,6 +2180,8 @@ def main(argv: list[str] | None = None) -> int:
                         output_divergence,
                         round_differentials,
                         traversal_checks,
+                        stabilization_rounds,
+                        stabilization_summary,
                     )
             except Exception:  # noqa: BLE001
                 traceback.print_exc()

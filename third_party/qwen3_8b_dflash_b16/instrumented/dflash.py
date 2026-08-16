@@ -59,6 +59,12 @@ from .phase2c_online import (
     tree_position_tensors,
     validate_online_tree_options,
 )
+from .phase2c_stabilization import (
+    canonical_selected_path_decision,
+    should_recheck,
+    stabilization_commit_source,
+    validate_decision_stabilization,
+)
 from .utils import build_target_layer_ids, extract_context_feature, sample
 
 
@@ -399,6 +405,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         online_tree_gold_record_all_nodes: bool = False,
         online_tree_gold_thresholds: dict[str, float] | None = None,
         enable_online_tree_divergence_diagnostics: bool = False,
+        decision_stabilization: str = "off",
+        decision_margin_threshold: float = 0.1,
     ):
         """Generate with the pinned behavior; diagnostics are strictly opt-in."""
 
@@ -435,6 +443,11 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         )
         if online_tree_gold_max_rounds < 1:
             raise ValueError("online_tree_gold_max_rounds must be positive")
+        configured_stabilization, configured_margin_threshold = (
+            validate_decision_stabilization(
+                decision_stabilization, decision_margin_threshold
+            )
+        )
         if online_tree_gold_layer_localization and not enable_online_tree_gold_checks:
             raise ValueError("gold layer localization requires gold checks")
         if enable_online_tree_divergence_diagnostics and not (
@@ -486,6 +499,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 gold_record_all_nodes=online_tree_gold_record_all_nodes,
                 gold_thresholds=configured_gold_thresholds,
                 enable_divergence_diagnostics=enable_online_tree_divergence_diagnostics,
+                decision_stabilization=configured_stabilization,
+                decision_margin_threshold=configured_margin_threshold,
             )
         if not any(
             (
@@ -1360,6 +1375,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "all_dense_layers_equal_expected": bool(dense_lengths)
             and all(length == expected_next for length in dense_lengths),
         }
+        canonical_source = (
+            compaction.get("committed_cache_source") == "canonical_recheck"
+        )
         sibling_nodes_discarded = (
             compaction["discarded_tree_node_count"] >= 0
             and expected_compacted < compaction["temporary_layer_lengths"][0]
@@ -1370,13 +1388,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             int(value)
             for value in compaction["committed_node_indices"].detach().cpu().tolist()
         ]
-        expected_gather = [
-            *range(next_root_index - len(committed_indices)),
-            *(
-                next_root_index - len(committed_indices) + index
-                for index in committed_indices
-            ),
-        ]
+        expected_gather = (
+            list(range(next_root_index))
+            if canonical_source
+            else [
+                *range(next_root_index - len(committed_indices)),
+                *(
+                    next_root_index - len(committed_indices) + index
+                    for index in committed_indices
+                ),
+            ]
+        )
         actual_gather = [
             int(value) for value in compaction["gather_indices"].detach().cpu().tolist()
         ]
@@ -1476,7 +1498,11 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             ),
             "layers": layer_records,
             "provenance": {
-                "compacted_source": "path-aware gathered packed-tree cache",
+                "compacted_source": (
+                    "canonical linear selected-path cache crop"
+                    if canonical_source
+                    else "path-aware gathered packed-tree cache"
+                ),
                 "dense_source": "full committed token sequence recomputation",
                 "configured_attention_implementation": getattr(
                     target.config, "_attn_implementation", None
@@ -1761,6 +1787,116 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "cache_after_comparable_summary": cache_after_summary,
         }
 
+    def _phase2c_canonical_selected_path_recheck(
+        self,
+        *,
+        target,
+        prefix_cache,
+        tree,
+        native_traversal,
+        context_length_before,
+        block_size,
+    ):
+        """Recheck the native-selected path with the original linear block shape."""
+
+        native_indices = native_traversal["accepted_node_indices"]
+        native_tokens = tree["token_ids"].index_select(0, native_indices)
+        linear_ids = torch.full(
+            (1, block_size),
+            self.mask_token_id,
+            dtype=torch.long,
+            device=tree["token_ids"].device,
+        )
+        linear_ids[0, 0] = tree["token_ids"][0]
+        if int(native_tokens.shape[0]):
+            linear_ids[0, 1 : 1 + int(native_tokens.shape[0])] = native_tokens
+        positions = torch.arange(
+            context_length_before,
+            context_length_before + block_size,
+            dtype=torch.long,
+            device=linear_ids.device,
+        ).unsqueeze(0)
+        canonical_output = target(
+            linear_ids,
+            position_ids=positions,
+            past_key_values=prefix_cache,
+            use_cache=True,
+            output_hidden_states=True,
+        )
+        canonical_argmax = torch.argmax(canonical_output.logits[0], dim=-1)
+        decision = canonical_selected_path_decision(
+            selected_draft_token_ids=native_tokens.detach().cpu().tolist(),
+            canonical_parent_argmax_token_ids=canonical_argmax.detach().cpu().tolist(),
+            native_next_root_token_id=int(
+                native_traversal["next_root_token_id"].item()
+            ),
+            native_next_root_is_bonus=bool(
+                native_traversal["next_root_is_bonus"].item()
+            ),
+        )
+        accepted_count = int(decision["accepted_draft_token_count"])
+        accepted_indices = native_indices[:accepted_count]
+        committed_node_indices = torch.cat(
+            [
+                torch.zeros(
+                    1,
+                    dtype=torch.long,
+                    device=tree["token_ids"].device,
+                ),
+                accepted_indices,
+            ]
+        )
+        committed_tokens = tree["token_ids"].index_select(
+            0, committed_node_indices
+        )
+        temporary_lengths = dynamic_cache_lengths(canonical_output.past_key_values)
+        expected_length = context_length_before + 1 + accepted_count
+        hidden_all = extract_context_feature(
+            canonical_output.hidden_states, self.target_layer_ids
+        )
+        target_hidden = hidden_all[:, : 1 + accepted_count, :]
+        compaction = {
+            "committed_cache_source": "canonical_recheck",
+            "prefix_length": context_length_before,
+            "temporary_layer_lengths": temporary_lengths,
+            "compacted_layer_lengths": None,
+            "expected_compacted_length": expected_length,
+            "committed_node_indices": committed_node_indices,
+            "gather_indices": torch.arange(
+                expected_length, dtype=torch.long, device=linear_ids.device
+            ),
+            "discarded_tree_node_count": max(
+                0, int(tree["actual_total_node_count"]) - 1 - accepted_count
+            ),
+            "discarded_canonical_tail_count": block_size - 1 - accepted_count,
+            "correction_or_bonus_written": False,
+            "canonical_linear_query_length": block_size,
+            "canonical_cache_length": expected_length,
+        }
+        return {
+            **decision,
+            "accepted_node_indices": accepted_indices,
+            "committed_node_indices": committed_node_indices,
+            "committed_tokens": committed_tokens,
+            "committed_token_count": int(committed_tokens.shape[0]),
+            "past_key_values": canonical_output.past_key_values,
+            "target_hidden": target_hidden,
+            "compaction": compaction,
+            "canonical_parent_argmax_token_ids": canonical_argmax[
+                : int(native_tokens.shape[0]) + 1
+            ],
+            "next_root_token_tensor": canonical_argmax[accepted_count],
+            "next_root_is_bonus_tensor": torch.tensor(
+                decision["next_root_is_bonus"],
+                dtype=torch.bool,
+                device=linear_ids.device,
+            ),
+            "input_token_ids": linear_ids,
+            "query_length": block_size,
+            "round_entry_kv_length": context_length_before,
+            "effective_kv_length": context_length_before + block_size,
+        }
+
     @torch.inference_mode()
     def _spec_generate_online_tree(
         self,
@@ -1783,6 +1919,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         gold_record_all_nodes: bool,
         gold_thresholds: dict[str, float],
         enable_divergence_diagnostics: bool,
+        decision_stabilization: str,
+        decision_margin_threshold: float,
     ):
         """Run opt-in online marginal-tree drafting with packed target verification."""
 
@@ -1938,6 +2076,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         if enable_gold_checks and round_index < gold_max_rounds
                         else None
                     )
+                    snapshot_pair = None
+                    stabilization_prefix_cache = None
+                    if decision_stabilization != "off":
+                        snapshot_pair = timer.start()
+                        with nvtx_range(
+                            torch, "phase2c.stabilization_cache_snapshot", enable_profiling
+                        ):
+                            stabilization_prefix_cache = clone_dynamic_cache(
+                                past_key_values_target
+                            )
+                        timer.stop(snapshot_pair)
                     record_divergence_round = (
                         enable_divergence_diagnostics and round_index < gold_max_rounds
                     )
@@ -1959,6 +2108,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             output_hidden_states=True,
                         )
                     timer.stop(verify_pair)
+                    packed_temporary_layer_lengths = dynamic_cache_lengths(
+                        past_key_values_target
+                    )
 
                     traverse_pair = timer.start()
                     with nvtx_range(torch, "phase2c.traverse", enable_profiling):
@@ -1966,8 +2118,10 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             torch, tree=tree, target_logits=packed_output.logits
                         )
                     timer.stop(traverse_pair)
-                    accepted_draft_tokens = traversal["accepted_draft_token_count"]
-                    committed_node_indices = torch.cat(
+                    native_accepted_draft_tokens = traversal[
+                        "accepted_draft_token_count"
+                    ]
+                    native_committed_node_indices = torch.cat(
                         [
                             torch.zeros(
                                 1,
@@ -1977,43 +2131,174 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             traversal["accepted_node_indices"],
                         ]
                     )
-                    committed_tokens = tree["token_ids"].index_select(
-                        0, committed_node_indices
+                    native_committed_tokens = tree["token_ids"].index_select(
+                        0, native_committed_node_indices
                     )
-                    committed_token_count = int(committed_tokens.shape[0])
+                    native_path_decision_indices = torch.cat(
+                        [
+                            torch.zeros(
+                                1,
+                                dtype=torch.long,
+                                device=tree["token_ids"].device,
+                            ),
+                            traversal["accepted_node_indices"],
+                        ]
+                    )
+                    path_margins_tensor = None
+                    path_margins = None
+                    minimum_path_margin = None
+                    if return_diagnostics or decision_stabilization == "margin":
+                        path_logits = packed_output.logits[0].index_select(
+                            0, native_path_decision_indices
+                        )
+                        path_top2 = torch.topk(path_logits.float(), k=2, dim=-1).values
+                        path_margins_tensor = path_top2[:, 0] - path_top2[:, 1]
+                        path_margins = [
+                            float(value)
+                            for value in path_margins_tensor.detach().cpu().tolist()
+                        ]
+                        minimum_path_margin = min(path_margins)
+
+                    recheck_triggered = should_recheck(
+                        decision_stabilization,
+                        minimum_path_margin,
+                        decision_margin_threshold,
+                    )
+                    trigger_reason = (
+                        "mode_always"
+                        if decision_stabilization == "always"
+                        else "shadow_oracle"
+                        if decision_stabilization == "shadow"
+                        else "minimum_path_margin_at_or_below_threshold"
+                        if recheck_triggered
+                        else "minimum_path_margin_above_threshold"
+                        if decision_stabilization == "margin"
+                        else "disabled"
+                    )
+                    canonical_pair = None
+                    canonical = None
+                    if recheck_triggered:
+                        canonical_pair = timer.start()
+                        with nvtx_range(
+                            torch, "phase2c.canonical_recheck", enable_profiling
+                        ):
+                            canonical = self._phase2c_canonical_selected_path_recheck(
+                                target=target,
+                                prefix_cache=stabilization_prefix_cache,
+                                tree=tree,
+                                native_traversal=traversal,
+                                context_length_before=context_length_before,
+                                block_size=block_size,
+                            )
+                        timer.stop(canonical_pair)
+
+                    selected_commit_source = stabilization_commit_source(
+                        decision_stabilization, recheck_triggered
+                    )
+                    use_canonical_commit = bool(
+                        canonical is not None
+                        and selected_commit_source == "canonical_recheck"
+                    )
+                    compact_pair = None
+                    kv_replacement_pair = None
+                    if use_canonical_commit:
+                        kv_replacement_pair = timer.start()
+                        with nvtx_range(
+                            torch, "phase2c.canonical_kv_commit", enable_profiling
+                        ):
+                            canonical["past_key_values"].crop(
+                                canonical["compaction"]["expected_compacted_length"]
+                            )
+                            compacted_lengths = dynamic_cache_lengths(
+                                canonical["past_key_values"]
+                            )
+                            if not compacted_lengths or any(
+                                length
+                                != canonical["compaction"][
+                                    "expected_compacted_length"
+                                ]
+                                for length in compacted_lengths
+                            ):
+                                raise RuntimeError(
+                                    "canonical recheck cache crop produced a wrong length"
+                                )
+                            canonical["compaction"][
+                                "compacted_layer_lengths"
+                            ] = compacted_lengths
+                            past_key_values_target = canonical["past_key_values"]
+                            compaction = canonical["compaction"]
+                            committed_node_indices = canonical[
+                                "committed_node_indices"
+                            ]
+                            committed_tokens = canonical["committed_tokens"]
+                            committed_token_count = canonical[
+                                "committed_token_count"
+                            ]
+                            accepted_draft_tokens = canonical[
+                                "accepted_draft_token_count"
+                            ]
+                            next_root_token_id = canonical["next_root_token_id"]
+                            next_root_is_bonus = canonical["next_root_is_bonus"]
+                            target_hidden = canonical["target_hidden"]
+                        timer.stop(kv_replacement_pair)
+                    else:
+                        committed_node_indices = native_committed_node_indices
+                        committed_tokens = native_committed_tokens
+                        committed_token_count = int(committed_tokens.shape[0])
+                        accepted_draft_tokens = native_accepted_draft_tokens
+                        next_root_token_id = traversal["next_root_token_id"]
+                        next_root_is_bonus = traversal["next_root_is_bonus"]
+                        compact_pair = timer.start()
+                        with nvtx_range(torch, "phase2c.kv_compact", enable_profiling):
+                            compaction = compact_dynamic_cache(
+                                torch,
+                                cache=past_key_values_target,
+                                prefix_length=context_length_before,
+                                actual_tree_node_count=tree["actual_total_node_count"],
+                                accepted_node_indices=traversal[
+                                    "accepted_node_indices"
+                                ],
+                            )
+                            compaction["committed_cache_source"] = "packed_native"
+                        timer.stop(compact_pair)
+
                     output_ids[:, start : start + committed_token_count] = (
                         committed_tokens.unsqueeze(0)
                     )
-                    output_ids[:, start + committed_token_count] = traversal[
-                        "next_root_token_id"
-                    ]
-
-                    compact_pair = timer.start()
-                    with nvtx_range(torch, "phase2c.kv_compact", enable_profiling):
-                        compaction = compact_dynamic_cache(
-                            torch,
-                            cache=past_key_values_target,
-                            prefix_length=context_length_before,
-                            actual_tree_node_count=tree["actual_total_node_count"],
-                            accepted_node_indices=traversal["accepted_node_indices"],
-                        )
-                    timer.stop(compact_pair)
+                    output_ids[:, start + committed_token_count] = next_root_token_id
+                    effective_traversal = traversal
+                    if use_canonical_commit:
+                        effective_traversal = {
+                            **traversal,
+                            "accepted_node_indices": canonical[
+                                "accepted_node_indices"
+                            ],
+                            "accepted_draft_token_count": accepted_draft_tokens,
+                            "next_root_token_id": canonical[
+                                "next_root_token_tensor"
+                            ],
+                            "next_root_is_bonus": canonical[
+                                "next_root_is_bonus_tensor"
+                            ],
+                            "terminal_parent_index": committed_node_indices[-1],
+                        }
                     timer.stop(total_verification_pair)
 
                     start += committed_token_count
-                    target_hidden_all = extract_context_feature(
-                        packed_output.hidden_states, self.target_layer_ids
-                    )
-                    target_hidden = target_hidden_all.index_select(
-                        1, committed_node_indices
-                    )
+                    if not use_canonical_commit:
+                        target_hidden_all = extract_context_feature(
+                            packed_output.hidden_states, self.target_layer_ids
+                        )
+                        target_hidden = target_hidden_all.index_select(
+                            1, committed_node_indices
+                        )
                     if past_key_values_target.get_seq_length() != start:
                         raise RuntimeError(
                             "Phase 2C compacted target cache length does not equal "
                             "context_length_after"
                         )
 
-                    if record_divergence_round:
+                    if record_divergence_round and not use_canonical_commit:
                         divergence_cache_after = self._phase2c_cache_comparable_summary(
                             past_key_values_target
                         )
@@ -2025,7 +2310,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                                 semantic_positions=semantic_positions,
                                 cache_positions=cache_positions,
                                 packed_logits=packed_output.logits,
-                                traversal=traversal,
+                                traversal=effective_traversal,
                                 compaction=compaction,
                                 context_length_before=context_length_before,
                                 context_length_after=start,
@@ -2036,8 +2321,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                                 cache_after_summary=divergence_cache_after,
                             )
                         )
+                    if record_divergence_round:
                         expected_round_root_token_id = int(
-                            traversal["next_root_token_id"].item()
+                            effective_traversal["next_root_token_id"].item()
                         )
                         expected_round_root_position = start
 
@@ -2053,21 +2339,23 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             context_length_before=context_length_before,
                             comparison_modes=gold_comparison_modes,
                             thresholds=gold_thresholds,
-                            verifier_node_indices=committed_node_indices,
+                            verifier_node_indices=native_committed_node_indices,
                             verifier_next_root_token_id=traversal["next_root_token_id"],
-                            packed_temporary_layer_lengths=compaction[
-                                "temporary_layer_lengths"
-                            ],
+                            packed_temporary_layer_lengths=packed_temporary_layer_lengths,
                             record_all_nodes=gold_record_all_nodes,
                             layer_localization=gold_layer_localization,
                         )
                         for record in packed_gold.pop("records"):
                             record["round_index"] = round_index
+                            record["decision_stabilization"] = decision_stabilization
+                            record["canonical_commit_replaced_native"] = (
+                                use_canonical_commit
+                            )
                             packed_gold_records.append(record)
                         for record in packed_gold.pop("layer_localization_records"):
                             record["round_index"] = round_index
                             gold_layer_localization_records.append(record)
-                        if packed_gold["all_checks_passed"]:
+                        if packed_gold["all_checks_passed"] or use_canonical_commit:
                             try:
                                 kv_gold = self._phase2c_kv_gold_check(
                                     target=target,
@@ -2140,7 +2428,16 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             }
                         kv_gold["round_index"] = round_index
                         kv_gold_records.append(kv_gold)
-                        if packed_gold["status"] in {
+                        if use_canonical_commit and kv_gold["status"] in {
+                            "pass_exact",
+                            "pass_semantic_with_numerical_variation",
+                        }:
+                            current_gold_status = kv_gold["status"]
+                            failure_class = None
+                            packed_gold["native_packed_divergence_corrected"] = not packed_gold[
+                                "all_checks_passed"
+                            ]
+                        elif packed_gold["status"] in {
                             "fail_structural",
                             "fail_semantic",
                         }:
@@ -2233,6 +2530,127 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 accepted_lengths.append(accepted_draft_tokens)
                 cache_commit_lengths.append(committed_token_count)
                 if return_diagnostics:
+                    native_path_token_ids = [
+                        int(value)
+                        for value in native_committed_tokens.detach().cpu().tolist()
+                    ]
+                    canonical_available = canonical is not None
+                    native_canonical_equal = (
+                        not canonical["decision_changed"]
+                        if canonical_available
+                        else None
+                    )
+                    false_negative = (
+                        bool(
+                            canonical["decision_changed"]
+                            and minimum_path_margin is not None
+                            and minimum_path_margin > decision_margin_threshold
+                        )
+                        if canonical_available
+                        and decision_stabilization == "shadow"
+                        else None
+                    )
+                    stabilization_record = {
+                        "stabilization_mode": decision_stabilization,
+                        "decision_margin_threshold": decision_margin_threshold,
+                        "recheck_triggered": recheck_triggered,
+                        "trigger_reason": trigger_reason,
+                        "minimum_path_margin": minimum_path_margin,
+                        "verifier_margins": path_margins,
+                        "native_canonical_decision_equal": native_canonical_equal,
+                        "native_selected_path_token_ids": native_path_token_ids,
+                        "canonical_accepted_path_token_ids": (
+                            [
+                                int(value)
+                                for value in canonical["committed_tokens"]
+                                .detach()
+                                .cpu()
+                                .tolist()
+                            ]
+                            if canonical_available
+                            else None
+                        ),
+                        "native_accepted_depth": native_accepted_draft_tokens,
+                        "canonical_accepted_depth": (
+                            canonical["accepted_draft_token_count"]
+                            if canonical_available
+                            else None
+                        ),
+                        "first_corrected_depth": (
+                            canonical["first_corrected_depth"]
+                            if canonical_available
+                            else None
+                        ),
+                        "first_corrected_native_margin": (
+                            path_margins[
+                                canonical["first_corrected_depth"] - 1
+                            ]
+                            if canonical_available
+                            and canonical["first_corrected_depth"] is not None
+                            and path_margins is not None
+                            else None
+                        ),
+                        "native_next_root_token_id": int(
+                            traversal["next_root_token_id"].item()
+                        ),
+                        "native_next_root_kind": (
+                            "bonus"
+                            if bool(traversal["next_root_is_bonus"].item())
+                            else "correction"
+                        ),
+                        "canonical_next_root_token_id": (
+                            canonical["next_root_token_id"]
+                            if canonical_available
+                            else None
+                        ),
+                        "canonical_next_root_kind": (
+                            canonical["next_root_kind"]
+                            if canonical_available
+                            else None
+                        ),
+                        "corrected_decision_count": (
+                            1
+                            if canonical_available and canonical["decision_changed"]
+                            else 0
+                            if canonical_available
+                            else None
+                        ),
+                        "false_negative": false_negative,
+                        "recheck_input_shape": (
+                            [int(value) for value in canonical["input_token_ids"].shape]
+                            if canonical_available
+                            else None
+                        ),
+                        "recheck_query_length": (
+                            canonical["query_length"] if canonical_available else None
+                        ),
+                        "recheck_round_entry_kv_length": (
+                            canonical["round_entry_kv_length"]
+                            if canonical_available
+                            else None
+                        ),
+                        "recheck_effective_kv_length": (
+                            canonical["effective_kv_length"]
+                            if canonical_available
+                            else None
+                        ),
+                        "canonical_cache_length": (
+                            canonical["compaction"]["canonical_cache_length"]
+                            if canonical_available
+                            else None
+                        ),
+                        "canonical_cache_committed": (
+                            use_canonical_commit if canonical_available else None
+                        ),
+                        "committed_cache_source": compaction[
+                            "committed_cache_source"
+                        ],
+                        "unavailable_reason": (
+                            None
+                            if canonical_available
+                            else "canonical_recheck_not_triggered"
+                        ),
+                    }
                     round_record = {
                         "schema_version": "1.0",
                         **accounting,
@@ -2257,11 +2675,14 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             "actual_cuda_kernel": None,
                         },
                         "cache_compaction": compaction,
-                        "gold_check_status": (current_gold_status),
+                        "decision_stabilization": stabilization_record,
+                        "gold_check_status": current_gold_status,
                         "output_ids_equal_reference": None,
                         "offline_comparison_status": "not_requested",
                         "_top1_matches_sampling": top1_matches_sampling,
-                        "_next_root_is_bonus": traversal["next_root_is_bonus"],
+                        "_next_root_is_bonus": effective_traversal[
+                            "next_root_is_bonus"
+                        ],
                         "timing": {},
                     }
                     rounds.append(round_record)
@@ -2275,6 +2696,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             "verify": verify_pair,
                             "traverse": traverse_pair,
                             "kv_compact": compact_pair,
+                            "stabilization_cache_snapshot": snapshot_pair,
+                            "canonical_recheck": canonical_pair,
+                            "kv_replacement": kv_replacement_pair,
                             "total_draft": total_draft_pair,
                             "total_verification": total_verification_pair,
                             "round": round_pair,
@@ -2308,10 +2732,14 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "verification_cuda_elapsed_ms": 0.0,
             "traversal_cuda_elapsed_ms": 0.0,
             "kv_compaction_cuda_elapsed_ms": 0.0,
+            "stabilization_cache_snapshot_cuda_elapsed_ms": 0.0,
+            "canonical_recheck_cuda_elapsed_ms": 0.0,
+            "kv_replacement_cuda_elapsed_ms": 0.0,
             "total_draft_cuda_elapsed_ms": 0.0,
             "total_verification_cuda_elapsed_ms": 0.0,
             "round_cuda_elapsed_ms": 0.0,
         }
+        component_observed = {field: 0 for field in component_totals}
         pair_to_field = {
             "draft": "draft_hidden_logits_cuda_elapsed_ms",
             "topk": "topk_cuda_elapsed_ms",
@@ -2320,6 +2748,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "verify": "verification_cuda_elapsed_ms",
             "traverse": "traversal_cuda_elapsed_ms",
             "kv_compact": "kv_compaction_cuda_elapsed_ms",
+            "stabilization_cache_snapshot": "stabilization_cache_snapshot_cuda_elapsed_ms",
+            "canonical_recheck": "canonical_recheck_cuda_elapsed_ms",
+            "kv_replacement": "kv_replacement_cuda_elapsed_ms",
             "total_draft": "total_draft_cuda_elapsed_ms",
             "total_verification": "total_verification_cuda_elapsed_ms",
             "round": "round_cuda_elapsed_ms",
@@ -2342,9 +2773,16 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             )
             record["conservation"]["target_emission_partition"] = True
             for pair_name, field in pair_to_field.items():
-                value = timer.values(timing[pair_name])["cuda_elapsed_ms"]
+                pair = timing[pair_name]
+                value = (
+                    timer.values(pair)["cuda_elapsed_ms"]
+                    if pair is not None
+                    else None
+                )
                 record["timing"][field] = value
-                component_totals[field] += value or 0.0
+                if value is not None:
+                    component_totals[field] += value
+                    component_observed[field] += 1
             round_ms = record["timing"]["round_cuda_elapsed_ms"]
             record["timing"]["draft_over_round_ratio"] = (
                 record["timing"]["total_draft_cuda_elapsed_ms"] / round_ms
@@ -2355,6 +2793,74 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 record["timing"]["total_verification_cuda_elapsed_ms"] / round_ms
                 if round_ms
                 else None
+            )
+            canonical_ms = record["timing"][
+                "canonical_recheck_cuda_elapsed_ms"
+            ]
+            snapshot_ms = record["timing"][
+                "stabilization_cache_snapshot_cuda_elapsed_ms"
+            ]
+            replacement_ms = record["timing"]["kv_replacement_cuda_elapsed_ms"]
+            stabilized_round_ms = (
+                None
+                if record["decision_stabilization"]["stabilization_mode"]
+                == "shadow"
+                else round_ms
+            )
+            record["timing"]["stabilized_round_cuda_elapsed_ms"] = (
+                stabilized_round_ms
+            )
+            record["timing"]["diagnostic_round_cuda_elapsed_ms"] = round_ms
+            record["timing"]["recheck_over_round_ratio"] = (
+                (canonical_ms + (snapshot_ms or 0.0) + (replacement_ms or 0.0))
+                / round_ms
+                if canonical_ms is not None and round_ms
+                else None
+            )
+            total_recheck_overhead_ms = (
+                canonical_ms + (snapshot_ms or 0.0) + (replacement_ms or 0.0)
+                if canonical_ms is not None
+                else None
+            )
+            record["timing"]["total_recheck_overhead_cuda_elapsed_ms"] = (
+                total_recheck_overhead_ms
+            )
+            record["timing"]["unavailable_reasons"] = {
+                "canonical_recheck_cuda_elapsed_ms": (
+                    None
+                    if canonical_ms is not None
+                    else "canonical_recheck_not_triggered"
+                ),
+                "kv_replacement_cuda_elapsed_ms": (
+                    None
+                    if replacement_ms is not None
+                    else "canonical_kv_not_committed"
+                ),
+            }
+            stabilization = record["decision_stabilization"]
+            stabilization.update(
+                {
+                    "packed_verification_cuda_elapsed_ms": record["timing"][
+                        "verification_cuda_elapsed_ms"
+                    ],
+                    "canonical_recheck_cuda_elapsed_ms": canonical_ms,
+                    "kv_replacement_cuda_elapsed_ms": replacement_ms,
+                    "total_recheck_overhead_cuda_elapsed_ms": (
+                        total_recheck_overhead_ms
+                    ),
+                    "stabilized_round_cuda_elapsed_ms": stabilized_round_ms,
+                    "stabilized_round_unavailable_reason": (
+                        "shadow_oracle_is_not_an_online_stabilized_timing"
+                        if stabilized_round_ms is None
+                        else None
+                    ),
+                    "diagnostic_round_cuda_elapsed_ms": round_ms,
+                    "recheck_over_round_ratio": record["timing"][
+                        "recheck_over_round_ratio"
+                    ],
+                    "generated_token_count": record["returned_token_delta"],
+                    "committed_token_count": record["committed_token_count"],
+                }
             )
             record["tree_metadata"] = tensor_tree_metadata(record["tree_metadata"])
             compaction = record["cache_compaction"]
@@ -2382,6 +2888,11 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 "requested_node_budget": node_budget,
                 "beam_width": beam_width,
                 "draft_top_k": draft_top_k,
+                "decision_stabilization": decision_stabilization,
+                "decision_margin_threshold": decision_margin_threshold,
+                "canonical_recheck_scope": "native-selected root-to-terminal path",
+                "canonical_recheck_query_length": block_size,
+                "canonical_attention_mask": "implicit causal, matching original DFlash",
                 "maximum_draft_depth": 15,
                 "target_information_used_for_tree_construction": False,
                 "full_vocabulary_logits_saved": False,
@@ -2429,13 +2940,20 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     "phase2c.verify",
                     "phase2c.traverse",
                     "phase2c.kv_compact",
+                    "phase2c.stabilization_cache_snapshot",
+                    "phase2c.canonical_recheck",
+                    "phase2c.canonical_kv_commit",
                     "phase2c.round",
                 ],
                 "explicit_cuda_synchronize_count": 1 if enable_profiling else 0,
                 "prefill": timer.values(prefill_pair),
                 "total": timer.values(total_pair),
                 "components": {
-                    field: value if enable_profiling else None
+                    field: (
+                        value
+                        if enable_profiling and component_observed[field]
+                        else None
+                    )
                     for field, value in component_totals.items()
                 },
                 "memory": gpu_memory_snapshot(torch, target.device)

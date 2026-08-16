@@ -231,6 +231,10 @@ def _loaded_source_record(draft: Any, manifest: dict[str, Any]) -> dict[str, Any
         dependency_symbols["phase2c_online.py"] = "build_online_tree_tensors"
     if "phase2c_gold.py" in manifest["effective_custom_code_sha256"]:
         dependency_symbols["phase2c_gold.py"] = "classify_comparison_matrix"
+    if "phase2c_stabilization.py" in manifest["effective_custom_code_sha256"]:
+        dependency_symbols["phase2c_stabilization.py"] = (
+            "validate_decision_stabilization"
+        )
     loaded_dependencies = {}
     for filename, symbol_name in dependency_symbols.items():
         symbol = unwrapped_spec_generate.__globals__.get(symbol_name)

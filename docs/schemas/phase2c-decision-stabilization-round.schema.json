@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-decision-stabilization-round.schema.json",
+  "title": "Phase 2C.3 decision stabilization round",
+  "type": "object",
+  "required": [
+    "schema_version", "task", "sample_id", "nominal_prompt_length",
+    "configuration_id", "profiling_repeat", "round_index",
+    "stabilization_mode", "decision_margin_threshold", "recheck_triggered",
+    "trigger_reason", "minimum_path_margin", "native_canonical_decision_equal",
+    "native_selected_path_token_ids", "canonical_accepted_path_token_ids",
+    "native_accepted_depth", "canonical_accepted_depth", "first_corrected_depth",
+    "native_next_root_token_id", "canonical_next_root_token_id",
+    "committed_cache_source", "canonical_recheck_cuda_elapsed_ms",
+    "kv_replacement_cuda_elapsed_ms", "stabilized_round_cuda_elapsed_ms",
+    "unavailable_reason"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "sample_id": {"type": "string", "minLength": 1},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "configuration_id": {"type": "string", "minLength": 1},
+    "profiling_repeat": {"type": "integer", "minimum": 0},
+    "round_index": {"type": "integer", "minimum": 0},
+    "stabilization_mode": {"enum": ["off", "always", "margin", "shadow"]},
+    "decision_margin_threshold": {"type": "number", "minimum": 0},
+    "recheck_triggered": {"type": "boolean"},
+    "minimum_path_margin": {"type": ["number", "null"]},
+    "native_canonical_decision_equal": {"type": ["boolean", "null"]},
+    "native_selected_path_token_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1},
+    "canonical_accepted_path_token_ids": {"type": ["array", "null"], "items": {"type": "integer"}},
+    "native_accepted_depth": {"type": "integer", "minimum": 0, "maximum": 15},
+    "canonical_accepted_depth": {"type": ["integer", "null"], "minimum": 0, "maximum": 15},
+    "first_corrected_depth": {"type": ["integer", "null"], "minimum": 1, "maximum": 16},
+    "committed_cache_source": {"enum": ["packed_native", "canonical_recheck"]},
+    "canonical_recheck_cuda_elapsed_ms": {"type": ["number", "null"], "minimum": 0},
+    "kv_replacement_cuda_elapsed_ms": {"type": ["number", "null"], "minimum": 0},
+    "stabilized_round_cuda_elapsed_ms": {"type": ["number", "null"], "minimum": 0},
+    "unavailable_reason": {"type": ["string", "null"]}
+  }
+}
