@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-output-divergence.schema.json",
+  "title": "Phase 2C.2 output divergence inventory",
+  "type": "object",
+  "required": ["schema_version", "status", "records"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["not_run", "pass", "failed"]},
+    "records": {"type": "array", "items": {"$ref": "#/$defs/record"}}
+  },
+  "$defs": {
+    "nullableNonnegativeInteger": {"type": ["integer", "null"], "minimum": 0},
+    "pairwiseComparison": {
+      "type": "object",
+      "required": [
+        "left_name", "right_name", "output_ids_equal",
+        "left_returned_token_count", "right_returned_token_count",
+        "longest_common_prefix_length", "first_divergent_generated_token_offset",
+        "first_divergent_absolute_sequence_position", "left_token_id",
+        "right_token_id", "left_output_ids", "right_output_ids",
+        "left_output_sha256", "right_output_sha256"
+      ],
+      "properties": {
+        "left_name": {"type": "string", "minLength": 1},
+        "right_name": {"type": "string", "minLength": 1},
+        "output_ids_equal": {"type": "boolean"},
+        "left_returned_token_count": {"type": "integer", "minimum": 0},
+        "right_returned_token_count": {"type": "integer", "minimum": 0},
+        "longest_common_prefix_length": {"type": "integer", "minimum": 0},
+        "first_divergent_generated_token_offset": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+        "first_divergent_absolute_sequence_position": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+        "left_token_id": {"type": ["integer", "null"]},
+        "right_token_id": {"type": ["integer", "null"]},
+        "left_output_ids": {"type": "array", "items": {"type": "integer"}},
+        "right_output_ids": {"type": "array", "items": {"type": "integer"}},
+        "left_output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "right_output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "left_token_text": {"type": ["string", "null"]},
+        "right_token_text": {"type": ["string", "null"]}
+      }
+    },
+    "classification": {
+      "type": "object",
+      "required": ["status", "failure_class", "evidence_complete"],
+      "properties": {
+        "status": {"enum": ["pass", "failed", "inconclusive"]},
+        "failure_class": {"type": ["string", "null"]},
+        "evidence_complete": {"type": "boolean"}
+      }
+    },
+    "record": {
+      "type": "object",
+      "required": [
+        "schema_version", "status", "task", "sample_id",
+        "nominal_prompt_length", "actual_prompt_length", "configuration_id", "pairwise_comparisons",
+        "reference_output_ids", "tree_control_output_ids",
+        "target_only_output_ids", "reference_returned_token_count",
+        "tree_returned_token_count", "longest_common_prefix_length",
+        "first_divergent_generated_token_offset",
+        "first_divergent_absolute_sequence_position", "reference_token_id",
+        "reference_token_text", "tree_token_id", "tree_token_text",
+        "divergent_tree_round_index", "divergent_token_kind",
+        "divergent_round_context_length_before", "divergent_round_context_length_after",
+        "divergent_round_persistent_kv_length_before", "divergent_round_persistent_kv_length_after",
+        "diagnostic_output_ids_equal_formal_control", "tree_control_repeat_output_ids_equal_reference", "reference_repeat_output_ids_equal",
+        "reference_profile_output_ids_equal", "round_differential_status",
+        "tree_traversal_status", "first_divergent_tree_traversal_status", "diagnostic_capture_round_limit", "classification",
+        "exception", "uncompleted_checks"
+      ],
+      "properties": {
+        "schema_version": {"const": "1.0"},
+        "status": {"enum": ["pass", "failed"]},
+        "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+        "sample_id": {"type": "string", "minLength": 1},
+        "nominal_prompt_length": {"type": "integer", "minimum": 1},
+        "actual_prompt_length": {"type": "integer", "minimum": 1},
+        "configuration_id": {"type": "string", "minLength": 1},
+        "pairwise_comparisons": {
+          "type": "array", "minItems": 3, "maxItems": 3,
+          "items": {"$ref": "#/$defs/pairwiseComparison"}
+        },
+        "reference_output_ids": {"type": "array", "items": {"type": "integer"}},
+        "tree_control_output_ids": {"type": "array", "items": {"type": "integer"}},
+        "target_only_output_ids": {"type": "array", "items": {"type": "integer"}},
+        "reference_returned_token_count": {"type": "integer", "minimum": 0},
+        "tree_returned_token_count": {"type": "integer", "minimum": 0},
+        "longest_common_prefix_length": {"type": "integer", "minimum": 0},
+        "first_divergent_generated_token_offset": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+        "first_divergent_absolute_sequence_position": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+        "reference_token_id": {"type": ["integer", "null"]},
+        "reference_token_text": {"type": ["string", "null"]},
+        "tree_token_id": {"type": ["integer", "null"]},
+        "tree_token_text": {"type": ["string", "null"]},
+        "divergent_tree_round_index": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+        "divergent_token_kind": {"type": ["string", "null"]},
+        "divergent_round_context_length_before": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+        "divergent_round_context_length_after": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+        "divergent_round_persistent_kv_length_before": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+        "divergent_round_persistent_kv_length_after": {"$ref": "#/$defs/nullableNonnegativeInteger"},
+        "diagnostic_output_ids_equal_formal_control": {"type": ["boolean", "null"]},
+        "tree_control_repeat_output_ids_equal_reference": {"type": "boolean"},
+        "reference_repeat_output_ids_equal": {"type": "boolean"},
+        "reference_profile_output_ids_equal": {"type": "boolean"},
+        "round_differential_status": {"enum": ["available", "not_applicable_reference_tree_outputs_equal", "unavailable"]},
+        "tree_traversal_status": {"enum": ["available", "not_applicable_no_tree_verification_round"]},
+        "first_divergent_tree_traversal_status": {"enum": ["available", "outside_diagnostic_capture_limit", "not_applicable_reference_tree_outputs_equal"]},
+        "diagnostic_capture_round_limit": {"type": "integer", "minimum": 1},
+        "classification": {"$ref": "#/$defs/classification"},
+        "exception": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object", "required": ["type", "message"],
+              "properties": {
+                "type": {"type": "string", "minLength": 1},
+                "message": {"type": "string", "minLength": 1}
+              }
+            }
+          ]
+        },
+        "uncompleted_checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["check", "reason"],
+            "properties": {
+              "check": {"type": "string", "minLength": 1},
+              "reason": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    }
+  }
+}

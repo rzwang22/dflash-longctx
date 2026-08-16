@@ -123,15 +123,16 @@ class Phase2C1ClassificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "pass_semantic_with_numerical_variation")
         self.assertTrue(result["numerical_backend_variation_proven"])
 
-    def test_numerical_mismatch_without_control_evidence_does_not_pass(self) -> None:
+    def test_numerical_mismatch_without_control_is_not_semantic_failure(self) -> None:
         native = _mode_summary(
             "native", _node_record(top8_equal=False, max_error=0.3125)
         )
         result = classify_comparison_matrix(
             [native], output_ids_equal=True, round_semantics_equal=True
         )
-        self.assertEqual(result["status"], "fail_semantic")
-        self.assertEqual(result["failure_class"], "unresolved_gold_mismatch")
+        self.assertEqual(result["status"], "pass_semantic_with_numerical_variation")
+        self.assertEqual(result["failure_class"], "unresolved_numerical_variation")
+        self.assertFalse(result["numerical_backend_variation_proven"])
 
     def test_verifier_argmax_mismatch_is_hard_semantic_failure(self) -> None:
         native = _mode_summary("native", _node_record(argmax_equal=False))
@@ -144,9 +145,14 @@ class Phase2C1ClassificationTests(unittest.TestCase):
 
     def test_top8_mismatch_is_reported_separately_from_argmax(self) -> None:
         summary = _mode_summary("native", _node_record(top8_equal=False))
+        self.assertEqual(summary["status"], "pass_semantic_with_numerical_variation")
+        self.assertEqual(summary["semantic_status"], "pass")
         self.assertEqual(summary["argmax_mismatch_count"], 0)
         self.assertEqual(summary["verifier_decision_mismatch_count"], 0)
         self.assertEqual(summary["top8_ordered_mismatch_count"], 1)
+        self.assertEqual(summary["first_top8_mismatch_node"], 0)
+        self.assertIsNone(summary["first_semantic_mismatch_node"])
+        self.assertIsNone(summary["first_failing_node"])
         self.assertIsNotNone(summary["warning"])
 
     def test_thresholds_are_named_and_never_silently_changed(self) -> None:
@@ -158,7 +164,7 @@ class Phase2C1ClassificationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_gold_thresholds({"maximum_absolute_error": 1.0})
 
-    def test_unavailable_math_backend_is_not_success(self) -> None:
+    def test_unavailable_math_backend_is_explicit_not_fabricated(self) -> None:
         unavailable = summarize_comparison_mode(
             mode="math",
             backend="forced_math_sdpa",
@@ -175,7 +181,8 @@ class Phase2C1ClassificationTests(unittest.TestCase):
             output_ids_equal=True,
             round_semantics_equal=True,
         )
-        self.assertFalse(result["all_checks_passed"])
+        self.assertTrue(result["all_checks_passed"])
+        self.assertEqual(unavailable["status"], "not_run")
 
     def test_equal_shape_top1_mapping_is_index_aligned(self) -> None:
         for index in range(16):

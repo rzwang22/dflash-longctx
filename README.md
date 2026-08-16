@@ -1,9 +1,10 @@
 # DFlash: Block Diffusion for Flash Speculative Decoding
 
-Phase 2C online bounded-tree verification and the Phase 2C.1 packed-tree gold
-diagnostics are documented in
+Phase 2C online bounded-tree verification, Phase 2C.1 packed-tree gold
+diagnostics, and Phase 2C.2 layerwise correctness are documented in
 [`docs/phase2c-online-bounded-tree.md`](docs/phase2c-online-bounded-tree.md) and
-[`docs/phase2c1-gold-validation.md`](docs/phase2c1-gold-validation.md).
+[`docs/phase2c1-gold-validation.md`](docs/phase2c1-gold-validation.md), and
+[`docs/phase2c2-layerwise-correctness.md`](docs/phase2c2-layerwise-correctness.md).
 [**Paper**](https://arxiv.org/abs/2602.06036) | [**Blog**](https://z-lab.ai/projects/dflash/) | [**Models**](https://huggingface.co/collections/z-lab/dflash)
 
 **DFlash** is a lightweight **block diffusion** model designed for speculative decoding. It enables efficient and high-quality parallel drafting.

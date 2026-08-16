@@ -398,6 +398,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         online_tree_gold_max_rounds: int = 1,
         online_tree_gold_record_all_nodes: bool = False,
         online_tree_gold_thresholds: dict[str, float] | None = None,
+        enable_online_tree_divergence_diagnostics: bool = False,
     ):
         """Generate with the pinned behavior; diagnostics are strictly opt-in."""
 
@@ -436,6 +437,12 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             raise ValueError("online_tree_gold_max_rounds must be positive")
         if online_tree_gold_layer_localization and not enable_online_tree_gold_checks:
             raise ValueError("gold layer localization requires gold checks")
+        if enable_online_tree_divergence_diagnostics and not (
+            enable_online_tree and return_diagnostics
+        ):
+            raise ValueError(
+                "tree divergence diagnostics require online tree diagnostics"
+            )
         validate_online_tree_options(
             enabled=enable_online_tree,
             policy=online_tree_policy,
@@ -478,6 +485,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 gold_max_rounds=online_tree_gold_max_rounds,
                 gold_record_all_nodes=online_tree_gold_record_all_nodes,
                 gold_thresholds=configured_gold_thresholds,
+                enable_divergence_diagnostics=enable_online_tree_divergence_diagnostics,
             )
         if not any(
             (
@@ -1478,6 +1486,281 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         }
         return result
 
+    @staticmethod
+    def _phase2c_cache_comparable_summary(cache):
+        def tensor_summary(tensor):
+            flattened = tensor.reshape(-1)
+            sample_count = min(16, int(flattened.numel()))
+            if sample_count == 0:
+                return {
+                    "dtype": str(tensor.dtype).removeprefix("torch."),
+                    "numel": 0,
+                    "sample_indices": [],
+                    "sample_values": [],
+                    "sample_sum": 0.0,
+                }
+            indices = torch.linspace(
+                0,
+                max(0, int(flattened.numel()) - 1),
+                steps=sample_count,
+                dtype=torch.long,
+                device=tensor.device,
+            )
+            values = flattened.index_select(0, indices).float().detach().cpu().tolist()
+            return {
+                "dtype": str(tensor.dtype).removeprefix("torch."),
+                "numel": int(flattened.numel()),
+                "sample_indices": [int(value) for value in indices.cpu().tolist()],
+                "sample_values": [float(value) for value in values],
+                "sample_sum": float(sum(values)),
+            }
+
+        records = []
+        for layer_index, layer in enumerate(cache.layers):
+            records.append(
+                {
+                    "layer_index": layer_index,
+                    "sequence_length": int(layer.get_seq_length()),
+                    "key_shape": [int(value) for value in layer.keys.shape],
+                    "value_shape": [int(value) for value in layer.values.shape],
+                    "key_comparable_sample": tensor_summary(layer.keys),
+                    "value_comparable_sample": tensor_summary(layer.values),
+                }
+            )
+        return records
+
+    def _phase2c_tree_traversal_record(
+        self,
+        *,
+        round_index,
+        tree,
+        tree_mask,
+        semantic_positions,
+        cache_positions,
+        packed_logits,
+        traversal,
+        compaction,
+        context_length_before,
+        context_length_after,
+        output_ids,
+        expected_round_root_token_id,
+        expected_round_root_position,
+        cache_before_summary,
+        cache_after_summary,
+    ):
+        metadata = tensor_tree_metadata(tree)
+        nodes = metadata["nodes"]
+        children = {index: [] for index in range(len(nodes))}
+        for node in nodes[1:]:
+            children[node["parent_index"]].append(node["node_index"])
+        top8 = torch.topk(packed_logits[0].float(), k=8, dim=-1).indices
+        top2_values = torch.topk(packed_logits[0].float(), k=2, dim=-1).values
+        target_tokens = traversal["target_greedy_token_ids"]
+        accepted = [
+            int(value)
+            for value in traversal["accepted_node_indices"].detach().cpu().tolist()
+        ]
+        committed = [0, *accepted]
+        terminal_parent = int(traversal["terminal_parent_index"].item())
+        node_records = []
+        for node in nodes:
+            index = node["node_index"]
+            argmax_token = int(target_tokens[index].item())
+            matching_children = [
+                child
+                for child in children[index]
+                if int(tree["token_ids"][child].item()) == argmax_token
+            ]
+            selected_child = matching_children[0] if matching_children else None
+            node_records.append(
+                {
+                    **node,
+                    "children_indices": children[index],
+                    "semantic_position": int(semantic_positions[0, index].item()),
+                    "packed_storage_position": int(cache_positions[index].item()),
+                    "target_logits_row_index": index,
+                    "target_argmax_token_id": argmax_token,
+                    "target_top8_token_ids": [
+                        int(value) for value in top8[index].detach().cpu().tolist()
+                    ],
+                    "target_top1_top2_margin": float(
+                        (top2_values[index, 0] - top2_values[index, 1]).item()
+                    ),
+                    "selected_child_index": selected_child,
+                    "selected_child_token_id": (
+                        int(tree["token_ids"][selected_child].item())
+                        if selected_child is not None
+                        else None
+                    ),
+                    "on_accepted_path": index in committed,
+                }
+            )
+        expected_visibility = build_tree_attention_visibility(
+            [node["parent_index"] for node in nodes],
+            prefix_length=context_length_before,
+        )
+        actual_visibility = (tree_mask[0, 0] == 0).detach().cpu().tolist()
+        mask_issues = validate_visibility_matrix(actual_visibility, expected_visibility)
+        transition_checks = []
+        parent = 0
+        for child in accepted:
+            transition_checks.append(
+                {
+                    "parent_index": parent,
+                    "child_index": child,
+                    "parent_argmax_token_id": int(target_tokens[parent].item()),
+                    "child_token_id": int(tree["token_ids"][child].item()),
+                    "parent_relationship_valid": int(
+                        tree["parent_indices"][child].item()
+                    )
+                    == parent,
+                    "parent_logit_predicts_child": int(target_tokens[parent].item())
+                    == int(tree["token_ids"][child].item()),
+                }
+            )
+            parent = child
+        next_root = int(traversal["next_root_token_id"].item())
+        next_root_position = context_length_after
+        expected_gather = [
+            *range(context_length_before),
+            *(context_length_before + index for index in committed),
+        ]
+        sibling_tokens_unique = all(
+            len({nodes[child]["token_id"] for child in node_children})
+            == len(node_children)
+            for node_children in children.values()
+        )
+        checks = {
+            "root_excluded_from_accepted_draft_count": 0 not in accepted,
+            "accepted_count_matches_path": len(accepted)
+            == int(traversal["accepted_draft_token_count"]),
+            "accepted_path_prefix_closed": all(
+                row["parent_relationship_valid"] for row in transition_checks
+            ),
+            "parent_logits_predict_each_child": all(
+                row["parent_logit_predicts_child"] for row in transition_checks
+            ),
+            "terminal_parent_matches_path": terminal_parent == parent,
+            "correction_or_bonus_uses_terminal_parent_logits": next_root
+            == int(target_tokens[terminal_parent].item()),
+            "correction_or_bonus_kind_matches_terminal_children": bool(
+                traversal["next_root_is_bonus"].item()
+            )
+            == (not children[terminal_parent]),
+            "duplicate_sibling_tokens_absent": sibling_tokens_unique,
+            "committed_nodes_are_root_plus_accepted_path": [
+                int(value)
+                for value in compaction["committed_node_indices"]
+                .detach()
+                .cpu()
+                .tolist()
+            ]
+            == committed,
+            "correction_or_bonus_not_in_current_kv": not compaction[
+                "correction_or_bonus_written"
+            ],
+            "kv_gather_discards_unaccepted_siblings": [
+                int(value)
+                for value in compaction["gather_indices"].detach().cpu().tolist()
+            ]
+            == expected_gather,
+            "next_root_matches_output_buffer": int(
+                output_ids[0, next_root_position].item()
+            )
+            == next_root,
+            "round_root_matches_previous_target": int(tree["token_ids"][0].item())
+            == int(expected_round_root_token_id),
+            "round_root_absolute_position_matches": context_length_before
+            == int(expected_round_root_position),
+            "round_root_appended_exactly_once": all(
+                row["sequence_length"] == context_length_before
+                for row in cache_before_summary
+            ),
+            "semantic_positions_follow_depth": semantic_positions[0]
+            .detach()
+            .cpu()
+            .tolist()
+            == [context_length_before + node["depth"] for node in nodes],
+            "packed_storage_positions_are_contiguous": cache_positions.detach()
+            .cpu()
+            .tolist()
+            == list(
+                range(
+                    context_length_before,
+                    context_length_before + tree["actual_total_node_count"],
+                )
+            ),
+        }
+        structural_names = {
+            "semantic_positions_follow_depth",
+            "packed_storage_positions_are_contiguous",
+        }
+        traversal_names = {
+            "root_excluded_from_accepted_draft_count",
+            "accepted_count_matches_path",
+            "accepted_path_prefix_closed",
+            "parent_logits_predict_each_child",
+            "terminal_parent_matches_path",
+            "correction_or_bonus_uses_terminal_parent_logits",
+            "correction_or_bonus_kind_matches_terminal_children",
+            "duplicate_sibling_tokens_absent",
+            "committed_nodes_are_root_plus_accepted_path",
+        }
+        kv_root_names = {
+            "correction_or_bonus_not_in_current_kv",
+            "kv_gather_discards_unaccepted_siblings",
+            "next_root_matches_output_buffer",
+            "round_root_matches_previous_target",
+            "round_root_absolute_position_matches",
+            "round_root_appended_exactly_once",
+        }
+        checks["structural_checks_passed"] = not mask_issues and all(
+            checks[name] for name in structural_names
+        )
+        checks["traversal_checks_passed"] = all(
+            checks[name] for name in traversal_names
+        )
+        checks["kv_root_transition_checks_passed"] = all(
+            checks[name] for name in kv_root_names
+        )
+        checks["all_checks_passed"] = all(checks.values()) and not mask_issues
+        return {
+            "schema_version": "1.0",
+            "round_index": int(round_index),
+            "status": "pass" if checks["all_checks_passed"] else "fail",
+            "root_token_id": int(tree["token_ids"][0].item()),
+            "nodes": node_records,
+            "accepted_path_node_indices": accepted,
+            "accepted_depth": len(accepted),
+            "terminal_parent_index": terminal_parent,
+            "correction_or_bonus_token_id": next_root,
+            "correction_or_bonus_kind": (
+                "bonus"
+                if bool(traversal["next_root_is_bonus"].item())
+                else "correction"
+            ),
+            "committed_node_indices": committed,
+            "kv_gather_indices": [
+                int(value)
+                for value in compaction["gather_indices"].detach().cpu().tolist()
+            ],
+            "next_round_root_token_id": next_root,
+            "next_round_root_absolute_position": next_root_position,
+            "context_length_before": int(context_length_before),
+            "context_length_after": int(context_length_after),
+            "persistent_kv_length_before": int(context_length_before),
+            "persistent_kv_length_after": int(context_length_after),
+            "transition_checks": transition_checks,
+            "structural_mask_issues": mask_issues,
+            "allowed_attention_positions_by_node": [
+                [index for index, visible in enumerate(row) if visible]
+                for row in actual_visibility
+            ],
+            "checks": checks,
+            "cache_before_comparable_summary": cache_before_summary,
+            "cache_after_comparable_summary": cache_after_summary,
+        }
+
     @torch.inference_mode()
     def _spec_generate_online_tree(
         self,
@@ -1499,6 +1782,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         gold_max_rounds: int,
         gold_record_all_nodes: bool,
         gold_thresholds: dict[str, float],
+        enable_divergence_diagnostics: bool,
     ):
         """Run opt-in online marginal-tree drafting with packed target verification."""
 
@@ -1546,6 +1830,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         kv_gold_records = []
         gold_layer_localization_records = []
         gold_round_results = []
+        tree_traversal_checks = []
 
         with nvtx_range(torch, "phase2c.total", enable_profiling):
             prefill_pair = timer.start()
@@ -1571,6 +1856,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             start = num_input_tokens
             round_index = 0
             returned_tokens_before = min(1, max_new_tokens)
+            expected_round_root_token_id = int(output_ids[0, start].item())
+            expected_round_root_position = start
             while start < max_length:
                 context_length_before = int(start)
                 if past_key_values_target.get_seq_length() != context_length_before:
@@ -1651,6 +1938,14 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         if enable_gold_checks and round_index < gold_max_rounds
                         else None
                     )
+                    record_divergence_round = (
+                        enable_divergence_diagnostics and round_index < gold_max_rounds
+                    )
+                    divergence_cache_before = (
+                        self._phase2c_cache_comparable_summary(past_key_values_target)
+                        if record_divergence_round
+                        else None
+                    )
                     total_verification_pair = timer.start()
                     verify_pair = timer.start()
                     with nvtx_range(torch, "phase2c.verify", enable_profiling):
@@ -1717,6 +2012,34 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             "Phase 2C compacted target cache length does not equal "
                             "context_length_after"
                         )
+
+                    if record_divergence_round:
+                        divergence_cache_after = self._phase2c_cache_comparable_summary(
+                            past_key_values_target
+                        )
+                        tree_traversal_checks.append(
+                            self._phase2c_tree_traversal_record(
+                                round_index=round_index,
+                                tree=tree,
+                                tree_mask=tree_mask,
+                                semantic_positions=semantic_positions,
+                                cache_positions=cache_positions,
+                                packed_logits=packed_output.logits,
+                                traversal=traversal,
+                                compaction=compaction,
+                                context_length_before=context_length_before,
+                                context_length_after=start,
+                                output_ids=output_ids,
+                                expected_round_root_token_id=expected_round_root_token_id,
+                                expected_round_root_position=expected_round_root_position,
+                                cache_before_summary=divergence_cache_before,
+                                cache_after_summary=divergence_cache_after,
+                            )
+                        )
+                        expected_round_root_token_id = int(
+                            traversal["next_root_token_id"].item()
+                        )
+                        expected_round_root_position = start
 
                     if gold_prefix_cache is not None:
                         packed_gold = self._phase2c_packed_logits_gold_check(
@@ -2073,6 +2396,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 "kv_compaction_gold_checks": kv_gold_records,
                 "gold_layer_localization": gold_layer_localization_records,
                 "gold_round_results": gold_round_results,
+                "tree_traversal_checks": tree_traversal_checks,
                 "gold_overall_status": (
                     "not_run"
                     if not gold_round_results

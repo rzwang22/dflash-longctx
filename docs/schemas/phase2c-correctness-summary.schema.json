@@ -6,12 +6,23 @@
   "required": ["schema_version", "status", "all_checks_passed", "records", "error"],
   "properties": {
     "schema_version": {"const": "1.0"},
-    "status": {"enum": ["started", "ok", "error"]},
+    "status": {"enum": ["started", "ok", "failed", "error"]},
     "all_checks_passed": {"type": "boolean"},
     "gold_status": {"enum": ["not_run", "pass_exact", "pass_semantic_with_numerical_variation", "fail_semantic", "fail_structural"]},
     "failure_class": {"type": ["string", "null"]},
     "completed_checks": {"type": "array", "items": {"type": "string"}},
     "uncompleted_checks": {"type": "array", "items": {"type": "string"}},
+    "uncompleted_check_details": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["check", "reason"],
+        "properties": {
+          "check": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    },
     "records": {
       "type": "array",
       "items": {

@@ -6,7 +6,7 @@
   "required": ["schema_version", "status", "configuration", "workload", "phase2c", "measurement_policy", "interpretation", "artifacts", "error"],
   "properties": {
     "schema_version": {"const": "1.0"},
-    "status": {"enum": ["started", "ok", "error"]},
+    "status": {"enum": ["started", "ok", "failed", "error"]},
     "configuration": {
       "type": "object",
       "required": ["phase", "mode", "batch_size", "temperature", "block_size", "tree_configurations"],

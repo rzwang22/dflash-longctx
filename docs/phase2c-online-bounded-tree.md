@@ -191,6 +191,10 @@ gold-kv-checks.jsonl
 gold-layer-localization.jsonl
 gold-comparison-summary.json
 gold-comparison-summary.csv
+output-divergence.json
+output-divergence.csv
+round-differential.jsonl
+tree-traversal-checks.jsonl
 ```
 
 The three gold JSONL files are empty when gold checks are disabled. New JSON and

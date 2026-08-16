@@ -9,7 +9,24 @@
     "status": {"enum": ["not_run", "ok", "error"]},
     "logit_record_count": {"type": "integer", "minimum": 0},
     "kv_record_count": {"type": "integer", "minimum": 0},
-    "groups": {"type": "array"},
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "status": {"enum": ["not_run", "pass_exact", "pass_semantic_with_numerical_variation", "fail_semantic", "fail_structural"]},
+          "semantic_status": {"enum": ["not_run", "pass", "fail"]},
+          "first_numerical_threshold_exceeding_depth": {"type": ["integer", "null"], "minimum": 0},
+          "first_numerical_threshold_exceeding_node": {"type": ["integer", "null"], "minimum": 0},
+          "first_top8_mismatch_depth": {"type": ["integer", "null"], "minimum": 0},
+          "first_top8_mismatch_node": {"type": ["integer", "null"], "minimum": 0},
+          "first_semantic_mismatch_depth": {"type": ["integer", "null"], "minimum": 0},
+          "first_semantic_mismatch_node": {"type": ["integer", "null"], "minimum": 0},
+          "first_structural_mismatch_depth": {"type": ["integer", "null"], "minimum": 0},
+          "first_structural_mismatch_node": {"type": ["integer", "null"], "minimum": 0}
+        }
+      }
+    },
     "interpretation": {"type": "object"}
   }
 }

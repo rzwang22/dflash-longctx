@@ -43,6 +43,9 @@ SCHEMAS = (
     "phase2c-gold-kv-check.schema.json",
     "phase2c-gold-layer-localization.schema.json",
     "phase2c-gold-comparison-summary.schema.json",
+    "phase2c-output-divergence.schema.json",
+    "phase2c-round-differential.schema.json",
+    "phase2c-tree-traversal-check.schema.json",
 )
 
 

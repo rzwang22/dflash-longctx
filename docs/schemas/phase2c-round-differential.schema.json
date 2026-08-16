@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-round-differential.schema.json",
+  "title": "Phase 2C.2 absolute-token round differential",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "generated_token_offset", "absolute_sequence_position", "predivergence_committed_prefix_token_exact", "predivergence_prefix_sha256", "reference_round_entry_persistent_kv_length", "tree_round_entry_persistent_kv_length", "round_entry_persistent_kv_same_semantic_prefix", "absolute_position_semantic_prefix_token_exact", "reference", "tree", "round_indices_equal", "absolute_token_lockstep_used"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "sample_id": {"type": "string", "minLength": 1},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "configuration_id": {"type": "string", "minLength": 1},
+    "generated_token_offset": {"type": "integer", "minimum": 0},
+    "absolute_sequence_position": {"type": "integer", "minimum": 0},
+    "predivergence_committed_prefix_token_exact": {"const": true},
+    "predivergence_prefix_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reference_round_entry_persistent_kv_length": {"type": ["integer", "null"], "minimum": 0},
+    "tree_round_entry_persistent_kv_length": {"type": ["integer", "null"], "minimum": 0},
+    "round_entry_persistent_kv_same_semantic_prefix": {"type": "boolean"},
+    "absolute_position_semantic_prefix_token_exact": {"const": true},
+    "reference": {"$ref": "#/$defs/producer"},
+    "tree": {"$ref": "#/$defs/producer"},
+    "round_indices_equal": {"type": "boolean"},
+    "absolute_token_lockstep_used": {"const": true}
+  },
+  "$defs": {
+    "producer": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["round_index", "root_generated_offset", "token_kind", "token_offset_within_round", "round"],
+          "properties": {
+            "round_index": {"type": "integer", "minimum": 0},
+            "root_generated_offset": {"type": "integer", "minimum": 0},
+            "token_kind": {"enum": ["root", "accepted_draft", "correction", "bonus", "correction_or_bonus"]},
+            "token_offset_within_round": {"type": "integer", "minimum": 0},
+            "round": {"type": "object"}
+          }
+        }
+      ]
+    }
+  }
+}

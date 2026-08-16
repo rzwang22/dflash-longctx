@@ -25,6 +25,11 @@ from dflash.phase2c.core import (
     SUPPORTED_NODE_BUDGETS,
     TIE_BREAKING_RULE,
 )
+from dflash.phase2c.divergence import (
+    build_round_differential,
+    classify_layerwise_divergence,
+    output_pair_comparison,
+)
 from dflash.phase2c.gold import (
     DEFAULT_GOLD_THRESHOLDS,
     GOLD_COMPARISON_MODES,
@@ -109,11 +114,44 @@ GOLD_COMPARISON_CSV_FIELDS = (
     "p99_absolute_error",
     "first_failing_depth",
     "first_failing_node",
+    "first_numerical_threshold_exceeding_depth",
+    "first_numerical_threshold_exceeding_node",
+    "first_top8_mismatch_depth",
+    "first_top8_mismatch_node",
+    "first_semantic_mismatch_depth",
+    "first_semantic_mismatch_node",
+    "first_structural_mismatch_depth",
+    "first_structural_mismatch_node",
     "structural_status",
     "semantic_status",
     "numerical_status",
     "warning",
     "reason",
+)
+OUTPUT_DIVERGENCE_CSV_FIELDS = (
+    "task",
+    "sample_id",
+    "nominal_prompt_length",
+    "configuration_id",
+    "status",
+    "reference_returned_token_count",
+    "tree_returned_token_count",
+    "longest_common_prefix_length",
+    "first_divergent_generated_token_offset",
+    "first_divergent_absolute_sequence_position",
+    "reference_token_id",
+    "reference_token_text",
+    "tree_token_id",
+    "tree_token_text",
+    "divergent_tree_round_index",
+    "divergent_token_kind",
+    "divergent_round_context_length_before",
+    "divergent_round_context_length_after",
+    "divergent_round_persistent_kv_length_before",
+    "divergent_round_persistent_kv_length_after",
+    "failure_class",
+    "exception_type",
+    "exception_message",
 )
 
 
@@ -275,6 +313,7 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
     return {
         **phase1b_configuration(args),
         "phase": "2C",
+        "phase_detail": "2C.2",
         "mode": "online_bounded_marginal_tree",
         "sample_id": args.sample_id,
         "tree_configurations": tree_configurations(args),
@@ -329,11 +368,13 @@ def _new_manifest(
     }
     manifest["measurement_policy"] = {
         "reference_control": "original DFlash default spec_generate",
+        "target_only_control": "target model generate with greedy temperature-zero decoding",
         "formal_tree_latency": "online tree control path",
         "component_timing": "separate online tree profiling path",
         "control_profile_output_ids_must_match": True,
         "reference_tree_output_ids_must_match": True,
         "gold_checks_excluded_from_performance": True,
+        "divergence_diagnostics_excluded_from_performance": True,
         "repeats": args.timing_repeats,
         "warmup_runs": args.warmup_runs,
     }
@@ -342,6 +383,8 @@ def _new_manifest(
         "speedup_claim_requires_h100_results": True,
         "offline_coverage_is_not_assumed_equal_to_online_acceptance": True,
         "unmatched_offline_online_rounds_are_not_mismatches": True,
+        "round_differentials_use_absolute_generated_token_offsets": True,
+        "target_only_is_measured_not_assumed_authoritative": True,
     }
     return manifest
 
@@ -352,6 +395,7 @@ def _tree_options(
     profiling: bool,
     gold_checks: bool,
     args: argparse.Namespace | None = None,
+    divergence_diagnostics: bool = False,
 ) -> dict[str, Any]:
     options = {
         "enable_online_tree": True,
@@ -361,6 +405,7 @@ def _tree_options(
         "online_tree_draft_top_k": configuration["draft_top_k"],
         "enable_online_tree_profiling": profiling,
         "enable_online_tree_gold_checks": gold_checks,
+        "enable_online_tree_divergence_diagnostics": divergence_diagnostics,
     }
     if gold_checks:
         if args is None:
@@ -374,12 +419,49 @@ def _tree_options(
                 "online_tree_gold_thresholds": args.gold_thresholds,
             }
         )
+    elif divergence_diagnostics and args is not None:
+        # Reuse the bounded gold-round knob for the otherwise expensive
+        # cache/mask/traversal capture. No gold forward is enabled here.
+        options["online_tree_gold_max_rounds"] = args.gold_max_rounds
     return options
 
 
 def _require_equal(torch_module: Any, left: Any, right: Any, *, label: str) -> None:
+    """Legacy assertion helper; Phase 2C.2 output paths persist before raising."""
+
     if not bool(torch_module.equal(left, right)):
         raise RuntimeError(f"Phase 2C output token mismatch: {label}")
+
+
+class Phase2CCorrectnessFailure(RuntimeError):
+    """Expected non-zero outcome after complete diagnostics were persisted."""
+
+
+def _tensor_token_ids(tensor: Any, *, prompt_length: int) -> list[int]:
+    return [int(value) for value in tensor[0, prompt_length:].detach().cpu().tolist()]
+
+
+def _target_only_greedy(
+    *, target: Any, input_ids: Any, max_new_tokens: int, eos_token_id: int
+) -> Any:
+    """Generate a third, target-only greedy reference without draft involvement."""
+
+    return target.generate(
+        input_ids=input_ids,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        use_cache=True,
+        eos_token_id=eos_token_id,
+        pad_token_id=eos_token_id,
+    )
+
+
+def _decoded_token(tokenizer: Any, token_id: int | None) -> str | None:
+    return (
+        None
+        if token_id is None
+        else tokenizer.decode([int(token_id)], skip_special_tokens=False)
+    )
 
 
 def _token_ids_sha256(values: list[int]) -> str:
@@ -489,6 +571,9 @@ def _run_sample_configuration(
     list[dict[str, Any]],
     list[dict[str, Any]],
     list[dict[str, Any]],
+    dict[str, Any],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
 ]:
     input_ids = torch_module.tensor(
         [workload["input_ids"]], dtype=torch_module.long, device=args.device
@@ -497,6 +582,15 @@ def _run_sample_configuration(
     profile_repeats = []
     round_rows = []
     profile_reference = None
+    formal_control_ids = None
+    reference_control_output_equal = True
+    control_profile_output_equal = True
+    reference_repeat_output_equal = all(
+        row.get("output_ids_equal_reference", True) for row in reference_control_repeats
+    )
+    reference_profile_output_equal = all(
+        row.get("output_ids_equal_reference", True) for row in reference_profile_repeats
+    )
     reference_by_root = _reference_round_map(
         reference_diagnostics, prompt_length=int(input_ids.shape[1])
     )
@@ -514,11 +608,10 @@ def _run_sample_configuration(
                 configuration, profiling=False, gold_checks=False
             ),
         )
-        _require_equal(
-            torch_module,
-            reference_ids,
-            control_ids,
-            label=f"reference/control {configuration['configuration_id']}",
+        if formal_control_ids is None:
+            formal_control_ids = control_ids
+        reference_control_output_equal = reference_control_output_equal and bool(
+            torch_module.equal(reference_ids, control_ids)
         )
         profile_ids, diagnostics, profile_timing, _ = _call_generation(
             torch_module=torch_module,
@@ -533,18 +626,15 @@ def _run_sample_configuration(
                 configuration, profiling=True, gold_checks=False
             ),
         )
-        _require_equal(
-            torch_module,
-            control_ids,
-            profile_ids,
-            label=f"control/profile {configuration['configuration_id']}",
+        current_control_profile_equal = bool(
+            torch_module.equal(control_ids, profile_ids)
+        )
+        control_profile_output_equal = (
+            control_profile_output_equal and current_control_profile_equal
         )
         if profile_reference is not None:
-            _require_equal(
-                torch_module,
-                profile_reference,
-                profile_ids,
-                label=f"profile repeat {configuration['configuration_id']}",
+            control_profile_output_equal = control_profile_output_equal and bool(
+                torch_module.equal(profile_reference, profile_ids)
             )
         profile_reference = profile_ids
         control_repeats.append({"repeat": repeat, **control_timing})
@@ -570,7 +660,9 @@ def _run_sample_configuration(
                     "actual_prompt_length": workload["actual_prompt_length"],
                     "configuration_id": configuration["configuration_id"],
                     "profiling_repeat": repeat,
-                    "output_ids_equal_reference": True,
+                    "output_ids_equal_reference": bool(
+                        torch_module.equal(reference_ids, profile_ids)
+                    ),
                     "gold_check_status": "not_run",
                 }
             )
@@ -593,6 +685,15 @@ def _run_sample_configuration(
             )
             round_rows.append(current)
 
+    # This third control runs only after the formal tree control/profile timing
+    # paths, so it cannot warm or delay the measurements reported above.
+    target_only_ids = _target_only_greedy(
+        target=target,
+        input_ids=input_ids,
+        max_new_tokens=args.max_new_tokens,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+
     gold_logits = []
     gold_kv = []
     gold_layers = []
@@ -601,6 +702,10 @@ def _run_sample_configuration(
     gold_failure_class = None
     gold_completed_checks: list[str] = []
     gold_uncompleted_checks: list[str] = []
+    gold_uncompleted_check_details: list[dict[str, str]] = []
+    divergence_rounds: list[dict[str, Any]] = []
+    traversal_checks: list[dict[str, Any]] = []
+    diagnostic_tree_ids = None
     if args.enable_gold_checks:
         gold_ids, gold_diagnostics, _, _ = _call_generation(
             torch_module=torch_module,
@@ -612,9 +717,16 @@ def _run_sample_configuration(
             return_diagnostics=True,
             enable_profiling=False,
             generation_options=_tree_options(
-                configuration, profiling=False, gold_checks=True, args=args
+                configuration,
+                profiling=False,
+                gold_checks=True,
+                args=args,
+                divergence_diagnostics=True,
             ),
         )
+        diagnostic_tree_ids = gold_ids
+        divergence_rounds = gold_diagnostics["rounds"]
+        traversal_checks = gold_diagnostics["phase2c"]["tree_traversal_checks"]
         gold_output_equal = bool(torch_module.equal(reference_ids, gold_ids))
         common = {
             "task": workload["longbench_task"],
@@ -654,12 +766,46 @@ def _run_sample_configuration(
         gold_uncompleted_checks = sorted(
             {check for row in gold_round_results for check in row["uncompleted_checks"]}
         )
+        gold_uncompleted_check_details = [
+            {
+                "check": check,
+                "reason": row["kv"].get("reason") or "gold_check_not_completed",
+            }
+            for row in gold_round_results
+            for check in row["uncompleted_checks"]
+        ]
         gold_status_by_round = {
             int(row["round_index"]): row["status"] for row in gold_round_results
         }
         for row in round_rows:
             if row["round_index"] in gold_status_by_round:
                 row["gold_check_status"] = gold_status_by_round[row["round_index"]]
+
+    output_diagnostic_required = not (
+        reference_control_output_equal
+        and bool(torch_module.equal(target_only_ids, reference_ids))
+        and bool(torch_module.equal(target_only_ids, formal_control_ids))
+    )
+    if output_diagnostic_required and diagnostic_tree_ids is None:
+        diagnostic_tree_ids, diagnostic_diagnostics, _, _ = _call_generation(
+            torch_module=torch_module,
+            draft=draft,
+            target=target,
+            input_ids=input_ids,
+            max_new_tokens=args.max_new_tokens,
+            stop_token_ids=[tokenizer.eos_token_id],
+            return_diagnostics=True,
+            enable_profiling=False,
+            generation_options=_tree_options(
+                configuration,
+                profiling=False,
+                gold_checks=False,
+                args=args,
+                divergence_diagnostics=True,
+            ),
+        )
+        divergence_rounds = diagnostic_diagnostics["rounds"]
+        traversal_checks = diagnostic_diagnostics["phase2c"]["tree_traversal_checks"]
 
     top1_exact = None
     top1_errors: list[str] = []
@@ -674,10 +820,339 @@ def _run_sample_configuration(
             gold_failure_class = "top1_round_semantics_mismatch"
             gold_completed_checks.append("top1_round_equivalence")
 
-    generated = [
-        int(value)
-        for value in reference_ids[0, int(input_ids.shape[1]) :].detach().cpu().tolist()
+    prompt_length = int(input_ids.shape[1])
+    reference_generated = _tensor_token_ids(reference_ids, prompt_length=prompt_length)
+    control_generated = _tensor_token_ids(
+        formal_control_ids, prompt_length=prompt_length
+    )
+    target_only_generated = _tensor_token_ids(
+        target_only_ids, prompt_length=prompt_length
+    )
+    pairwise = [
+        output_pair_comparison(
+            left_name="target_only",
+            left_ids=target_only_generated,
+            right_name="original_dflash_reference",
+            right_ids=reference_generated,
+            prompt_length=prompt_length,
+        ),
+        output_pair_comparison(
+            left_name="target_only",
+            left_ids=target_only_generated,
+            right_name="layerwise_tree_control",
+            right_ids=control_generated,
+            prompt_length=prompt_length,
+        ),
+        output_pair_comparison(
+            left_name="original_dflash_reference",
+            left_ids=reference_generated,
+            right_name="layerwise_tree_control",
+            right_ids=control_generated,
+            prompt_length=prompt_length,
+        ),
     ]
+    reference_tree = pairwise[-1]
+    for comparison in pairwise:
+        comparison["left_token_text"] = _decoded_token(
+            tokenizer, comparison["left_token_id"]
+        )
+        comparison["right_token_text"] = _decoded_token(
+            tokenizer, comparison["right_token_id"]
+        )
+    round_differential = build_round_differential(
+        comparison=reference_tree,
+        prompt_length=prompt_length,
+        reference_rounds=reference_diagnostics["rounds"],
+        tree_rounds=divergence_rounds,
+    )
+    divergent_tree_round_index = (
+        round_differential["tree"]["round_index"]
+        if round_differential and round_differential["tree"]
+        else None
+    )
+    relevant_traversal = next(
+        (
+            row
+            for row in traversal_checks
+            if row["round_index"] == divergent_tree_round_index
+        ),
+        None,
+    )
+    native_mismatches = sum(
+        1
+        for row in gold_logits
+        if row["round_index"] == divergent_tree_round_index
+        and row["comparison_mode"] == "native"
+        and row.get("verifier_decision_relevant")
+        and row.get("argmax_equal") is False
+    )
+    math_rows = [
+        row
+        for row in gold_logits
+        if row["round_index"] == divergent_tree_round_index
+        and row["comparison_mode"] == "math"
+        and row.get("availability") == "available"
+    ]
+    math_mismatches = sum(
+        1
+        for row in math_rows
+        if row.get("verifier_decision_relevant") and row.get("argmax_equal") is False
+    )
+    relevant_kv = next(
+        (row for row in gold_kv if row["round_index"] == divergent_tree_round_index),
+        None,
+    )
+    divergence_classification = classify_layerwise_divergence(
+        output_ids_equal=reference_tree["output_ids_equal"],
+        traversal_checks_passed=(
+            relevant_traversal["checks"]["traversal_checks_passed"]
+            if relevant_traversal
+            else None
+        ),
+        structural_checks_passed=(
+            relevant_traversal["checks"]["structural_checks_passed"]
+            if relevant_traversal
+            else None
+        ),
+        native_verifier_mismatch_count=(
+            native_mismatches if args.enable_gold_checks else None
+        ),
+        math_verifier_mismatch_count=(math_mismatches if math_rows else None),
+        kv_root_transition_checks_passed=(
+            relevant_traversal["checks"]["kv_root_transition_checks_passed"]
+            if relevant_traversal
+            else None
+        ),
+        kv_next_token_argmax_equal=(
+            relevant_kv.get("argmax_equal") if relevant_kv else None
+        ),
+        divergence_begins_at_round_root=(
+            bool(
+                round_differential
+                and round_differential["tree"]
+                and round_differential["tree"]["token_kind"] == "root"
+            )
+            if round_differential
+            else None
+        ),
+    )
+    if reference_tree["output_ids_equal"] and not pairwise[0]["output_ids_equal"]:
+        divergence_classification = {
+            "status": "inconclusive",
+            "failure_class": "target_only_reference_output_divergence",
+            "evidence_complete": False,
+        }
+    elif reference_tree["output_ids_equal"] and not control_profile_output_equal:
+        divergence_classification = {
+            "status": "failed",
+            "failure_class": "control_profile_output_divergence",
+            "evidence_complete": True,
+        }
+    elif reference_tree["output_ids_equal"] and not reference_control_output_equal:
+        divergence_classification = {
+            "status": "failed",
+            "failure_class": "tree_control_repeat_output_divergence",
+            "evidence_complete": True,
+        }
+    elif reference_tree["output_ids_equal"] and not (
+        reference_repeat_output_equal and reference_profile_output_equal
+    ):
+        divergence_classification = {
+            "status": "failed",
+            "failure_class": "reference_control_profile_output_divergence",
+            "evidence_complete": True,
+        }
+    all_output_relations_equal = (
+        all(row["output_ids_equal"] for row in pairwise)
+        and reference_control_output_equal
+        and control_profile_output_equal
+        and reference_repeat_output_equal
+        and reference_profile_output_equal
+    )
+    if all_output_relations_equal:
+        mismatch_message = None
+    elif not reference_tree["output_ids_equal"]:
+        mismatch_message = (
+            "Phase 2C output token mismatch: "
+            f"reference/control {configuration['configuration_id']}"
+        )
+    elif not (reference_repeat_output_equal and reference_profile_output_equal):
+        mismatch_message = (
+            "Phase 2C original-reference repeat/profile output mismatch: "
+            f"{configuration['configuration_id']}"
+        )
+    elif not reference_control_output_equal:
+        mismatch_message = (
+            "Phase 2C tree control repeat output mismatch: "
+            f"{configuration['configuration_id']}"
+        )
+    elif not control_profile_output_equal:
+        mismatch_message = (
+            "Phase 2C tree control/profile output mismatch: "
+            f"{configuration['configuration_id']}"
+        )
+    else:
+        mismatch_message = (
+            "Phase 2C target-only/reference/tree comparison mismatch: "
+            f"{configuration['configuration_id']}"
+        )
+    uncompleted_divergence_checks = []
+    if not reference_tree["output_ids_equal"] and not args.enable_gold_checks:
+        uncompleted_divergence_checks.append(
+            {
+                "check": "packed_dense_native_math_and_kv_gold",
+                "reason": "gold_checks_not_enabled",
+            }
+        )
+    if not reference_tree["output_ids_equal"] and relevant_traversal is None:
+        uncompleted_divergence_checks.append(
+            {
+                "check": "first_divergent_round_tree_traversal",
+                "reason": (
+                    "first divergent round is outside --gold-max-rounds capture "
+                    f"limit {args.gold_max_rounds}"
+                ),
+            }
+        )
+    if not pairwise[0]["output_ids_equal"]:
+        uncompleted_divergence_checks.append(
+            {
+                "check": "target_only_precision_attribution",
+                "reason": (
+                    "target-only is an observed third control without DFlash round "
+                    "state and is not assumed authoritative"
+                ),
+            }
+        )
+    divergence_record = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "pass" if all_output_relations_equal else "failed",
+        "task": workload["longbench_task"],
+        "sample_id": workload["sample_id"],
+        "nominal_prompt_length": workload["nominal_prompt_length"],
+        "actual_prompt_length": workload["actual_prompt_length"],
+        "configuration_id": configuration["configuration_id"],
+        "pairwise_comparisons": pairwise,
+        "reference_output_ids": reference_generated,
+        "tree_control_output_ids": control_generated,
+        "target_only_output_ids": target_only_generated,
+        "reference_returned_token_count": len(reference_generated),
+        "tree_returned_token_count": len(control_generated),
+        "longest_common_prefix_length": reference_tree["longest_common_prefix_length"],
+        "first_divergent_generated_token_offset": reference_tree[
+            "first_divergent_generated_token_offset"
+        ],
+        "first_divergent_absolute_sequence_position": reference_tree[
+            "first_divergent_absolute_sequence_position"
+        ],
+        "reference_token_id": reference_tree["left_token_id"],
+        "reference_token_text": reference_tree["left_token_text"],
+        "tree_token_id": reference_tree["right_token_id"],
+        "tree_token_text": reference_tree["right_token_text"],
+        "divergent_tree_round_index": divergent_tree_round_index,
+        "divergent_token_kind": (
+            round_differential["tree"]["token_kind"]
+            if round_differential and round_differential["tree"]
+            else None
+        ),
+        "divergent_round_context_length_before": (
+            relevant_traversal["context_length_before"] if relevant_traversal else None
+        ),
+        "divergent_round_context_length_after": (
+            relevant_traversal["context_length_after"] if relevant_traversal else None
+        ),
+        "divergent_round_persistent_kv_length_before": (
+            relevant_traversal["persistent_kv_length_before"]
+            if relevant_traversal
+            else None
+        ),
+        "divergent_round_persistent_kv_length_after": (
+            relevant_traversal["persistent_kv_length_after"]
+            if relevant_traversal
+            else None
+        ),
+        "diagnostic_output_ids_equal_formal_control": (
+            bool(torch_module.equal(diagnostic_tree_ids, formal_control_ids))
+            if diagnostic_tree_ids is not None
+            else None
+        ),
+        "tree_control_repeat_output_ids_equal_reference": (
+            reference_control_output_equal
+        ),
+        "reference_repeat_output_ids_equal": reference_repeat_output_equal,
+        "reference_profile_output_ids_equal": reference_profile_output_equal,
+        "round_differential_status": (
+            "available"
+            if round_differential is not None
+            else "not_applicable_reference_tree_outputs_equal"
+            if reference_tree["output_ids_equal"]
+            else "unavailable"
+        ),
+        "tree_traversal_status": (
+            "available"
+            if traversal_checks
+            else "not_applicable_no_tree_verification_round"
+        ),
+        "first_divergent_tree_traversal_status": (
+            "available"
+            if relevant_traversal is not None
+            else "outside_diagnostic_capture_limit"
+            if not reference_tree["output_ids_equal"]
+            else "not_applicable_reference_tree_outputs_equal"
+        ),
+        "diagnostic_capture_round_limit": args.gold_max_rounds,
+        "classification": divergence_classification,
+        "exception": (
+            None
+            if mismatch_message is None
+            else {
+                "type": "Phase2CCorrectnessFailure",
+                "message": mismatch_message,
+            }
+        ),
+        "uncompleted_checks": uncompleted_divergence_checks,
+    }
+    if round_differential is not None:
+        round_differential.update(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "task": workload["longbench_task"],
+                "sample_id": workload["sample_id"],
+                "nominal_prompt_length": workload["nominal_prompt_length"],
+                "configuration_id": configuration["configuration_id"],
+            }
+        )
+    for row in traversal_checks:
+        row.update(
+            {
+                "task": workload["longbench_task"],
+                "sample_id": workload["sample_id"],
+                "nominal_prompt_length": workload["nominal_prompt_length"],
+                "configuration_id": configuration["configuration_id"],
+                "is_first_divergent_round": row["round_index"]
+                == divergent_tree_round_index,
+            }
+        )
+    gold_completed_checks = sorted(
+        set(
+            gold_completed_checks
+            + ["absolute_token_output_comparison", "target_only_three_way_comparison"]
+            + (["tree_traversal"] if traversal_checks else [])
+        )
+    )
+    if not reference_tree["output_ids_equal"] and not args.enable_gold_checks:
+        gold_uncompleted_checks = sorted(
+            set(
+                gold_uncompleted_checks
+                + ["packed_dense_native_math_gold", "kv_compaction_gold"]
+            )
+        )
+        gold_uncompleted_check_details = [
+            {"check": check, "reason": "gold_checks_not_enabled"}
+            for check in gold_uncompleted_checks
+        ]
+
+    generated = reference_generated
     cuda_values = [record["cuda_elapsed_ms"] for record in control_repeats]
     profile_memory = [
         record
@@ -746,7 +1221,7 @@ def _run_sample_configuration(
             / len(generated),
             "generated_tokens_per_second": len(generated)
             / (statistics.median(cuda_values) / 1000.0),
-            "all_repeat_output_ids_equal": True,
+            "all_repeat_output_ids_equal": reference_control_output_equal,
         },
         "profiling": {
             "formal_end_to_end": False,
@@ -762,19 +1237,26 @@ def _run_sample_configuration(
                 (record["peak_reserved_bytes"] for record in profile_memory),
                 default=0,
             ),
-            "control_profile_output_ids_equal": True,
+            "control_profile_output_ids_equal": control_profile_output_equal,
             "component_cuda_elapsed_ms": component_distributions,
             "component_per_returned_token_ms": component_per_returned,
             "component_per_committed_token_ms": component_per_committed,
         },
         "correctness": {
-            "reference_output_ids_equal": True,
-            "control_profile_output_ids_equal": True,
+            "reference_output_ids_equal": reference_control_output_equal,
+            "control_profile_output_ids_equal": control_profile_output_equal,
+            "target_only_reference_output_ids_equal": pairwise[0]["output_ids_equal"],
+            "target_only_tree_output_ids_equal": pairwise[1]["output_ids_equal"],
+            "divergence_classification": divergence_classification,
+            "output_divergence_failure_class": divergence_classification[
+                "failure_class"
+            ],
             "gold_output_ids_equal": gold_output_equal,
             "gold_status": gold_status,
             "gold_failure_class": gold_failure_class,
             "gold_completed_checks": gold_completed_checks,
             "gold_uncompleted_checks": gold_uncompleted_checks,
+            "gold_uncompleted_check_details": gold_uncompleted_check_details,
             "top1_round_exact_equal": top1_exact,
             "top1_round_exact_errors": top1_errors,
         },
@@ -788,6 +1270,12 @@ def _run_sample_configuration(
         **sample["correctness"],
         "passed": (
             (top1_exact is not False)
+            and reference_control_output_equal
+            and control_profile_output_equal
+            and reference_repeat_output_equal
+            and reference_profile_output_equal
+            and pairwise[0]["output_ids_equal"]
+            and pairwise[1]["output_ids_equal"]
             and (gold_output_equal is not False)
             and (
                 not args.enable_gold_checks
@@ -799,7 +1287,17 @@ def _run_sample_configuration(
             )
         ),
     }
-    return sample, round_rows, correctness, gold_logits, gold_kv, gold_layers
+    return (
+        sample,
+        round_rows,
+        correctness,
+        gold_logits,
+        gold_kv,
+        gold_layers,
+        divergence_record,
+        [round_differential] if round_differential is not None else [],
+        traversal_checks,
+    )
 
 
 def _load_reference_and_run(
@@ -813,6 +1311,9 @@ def _load_reference_and_run(
     gold_logits: list[dict[str, Any]],
     gold_kv: list[dict[str, Any]],
     gold_layers: list[dict[str, Any]],
+    divergences: list[dict[str, Any]],
+    round_differentials: list[dict[str, Any]],
+    traversal_checks: list[dict[str, Any]],
     paths: dict[str, Path],
 ) -> None:
     torch_module, tokenizer, target, draft, workloads = _load_inputs(
@@ -863,10 +1364,15 @@ def _load_reference_and_run(
                 return_diagnostics=False,
                 enable_profiling=False,
             )
-            _require_equal(
-                torch_module, reference_ids, current_ids, label="reference repeat"
+            reference_repeats.append(
+                {
+                    "repeat": repeat,
+                    "output_ids_equal_reference": bool(
+                        torch_module.equal(reference_ids, current_ids)
+                    ),
+                    **timing,
+                }
             )
-            reference_repeats.append({"repeat": repeat, **timing})
             profile_ids, profile_diagnostics, profile_timing, _ = _call_generation(
                 torch_module=torch_module,
                 draft=draft,
@@ -877,15 +1383,12 @@ def _load_reference_and_run(
                 return_diagnostics=True,
                 enable_profiling=True,
             )
-            _require_equal(
-                torch_module,
-                reference_ids,
-                profile_ids,
-                label="reference control/profile",
-            )
             reference_profile_repeats.append(
                 {
                     "repeat": repeat,
+                    "output_ids_equal_reference": bool(
+                        torch_module.equal(reference_ids, profile_ids)
+                    ),
                     "cuda_elapsed_ms": profile_timing["cuda_elapsed_ms"],
                     "verification_cuda_elapsed_ms": sum(
                         float(row["timing"]["verification_cuda_elapsed_ms"] or 0.0)
@@ -920,6 +1423,9 @@ def _load_reference_and_run(
                 current_logits,
                 current_kv,
                 current_layers,
+                current_divergence,
+                current_round_differentials,
+                current_traversal_checks,
             ) = result
             samples.append(sample)
             rounds.extend(current_rounds)
@@ -927,6 +1433,22 @@ def _load_reference_and_run(
             gold_logits.extend(current_logits)
             gold_kv.extend(current_kv)
             gold_layers.extend(current_layers)
+            divergences.append(current_divergence)
+            round_differentials.extend(current_round_differentials)
+            traversal_checks.extend(current_traversal_checks)
+            persisted_divergence = persist_divergence_artifacts(
+                paths=paths,
+                divergences=divergences,
+                round_differentials=round_differentials,
+                traversal_checks=traversal_checks,
+            )
+            _validate_schema(
+                persisted_divergence, "phase2c-output-divergence.schema.json"
+            )
+            for row in current_round_differentials:
+                _validate_schema(row, "phase2c-round-differential.schema.json")
+            for row in current_traversal_checks:
+                _validate_schema(row, "phase2c-tree-traversal-check.schema.json")
             if args.enable_gold_checks:
                 persist_gold_artifacts(
                     paths=paths,
@@ -938,23 +1460,31 @@ def _load_reference_and_run(
                     paths["correctness_summary"],
                     {
                         "schema_version": SCHEMA_VERSION,
-                        "status": "running" if correctness["passed"] else "error",
+                        "status": "running" if correctness["passed"] else "failed",
                         "gold_status": correctness["gold_status"],
-                        "failure_class": correctness["gold_failure_class"],
+                        "failure_class": (
+                            correctness["output_divergence_failure_class"]
+                            or correctness["gold_failure_class"]
+                        ),
                         "all_checks_passed": all(
                             row["passed"] for row in correctness_records
                         ),
                         "completed_checks": correctness["gold_completed_checks"],
                         "uncompleted_checks": correctness["gold_uncompleted_checks"],
+                        "uncompleted_check_details": correctness[
+                            "gold_uncompleted_check_details"
+                        ],
                         "records": correctness_records,
                         "error": None,
                     },
                 )
             if not correctness["passed"]:
-                raise RuntimeError(
-                    "Phase 2C.1 gold validation failed after diagnostic artifacts "
-                    f"were persisted: status={correctness['gold_status']} "
-                    f"failure_class={correctness['gold_failure_class']}"
+                raise Phase2CCorrectnessFailure(
+                    "Phase 2C.2 correctness validation failed after diagnostic "
+                    "artifacts were persisted: "
+                    f"gold_status={correctness['gold_status']} "
+                    "failure_class="
+                    f"{correctness['output_divergence_failure_class'] or correctness['gold_failure_class']}"
                 )
     manifest["status"] = "ok"
 
@@ -1084,6 +1614,44 @@ def persist_gold_artifacts(
     return summary
 
 
+def persist_divergence_artifacts(
+    *,
+    paths: dict[str, Path],
+    divergences: list[dict[str, Any]],
+    round_differentials: list[dict[str, Any]],
+    traversal_checks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "status": (
+            "failed"
+            if any(row["status"] == "failed" for row in divergences)
+            else "pass"
+            if divergences
+            else "not_run"
+        ),
+        "records": divergences,
+    }
+    write_json(paths["output_divergence"], payload)
+    csv_rows = [
+        {
+            **row,
+            "failure_class": row["classification"]["failure_class"],
+            "exception_type": (row.get("exception") or {}).get("type"),
+            "exception_message": (row.get("exception") or {}).get("message"),
+        }
+        for row in divergences
+    ]
+    _write_csv(
+        paths["output_divergence_csv"],
+        csv_rows,
+        OUTPUT_DIVERGENCE_CSV_FIELDS,
+    )
+    _atomic_write_jsonl(paths["round_differential"], round_differentials)
+    _atomic_write_jsonl(paths["tree_traversal_checks"], traversal_checks)
+    return payload
+
+
 def _validate_schema(payload: Any, schema_name: str) -> None:
     from jsonschema import Draft202012Validator
 
@@ -1104,6 +1672,9 @@ def _validate_artifacts(
     gold_kv: list[dict[str, Any]],
     gold_layers: list[dict[str, Any]],
     gold_comparison_summary: dict[str, Any],
+    output_divergence: dict[str, Any],
+    round_differentials: list[dict[str, Any]],
+    traversal_checks: list[dict[str, Any]],
 ) -> None:
     _validate_schema(manifest, "phase2c-manifest.schema.json")
     for sample in samples:
@@ -1122,6 +1693,11 @@ def _validate_artifacts(
     _validate_schema(
         gold_comparison_summary, "phase2c-gold-comparison-summary.schema.json"
     )
+    _validate_schema(output_divergence, "phase2c-output-divergence.schema.json")
+    for row in round_differentials:
+        _validate_schema(row, "phase2c-round-differential.schema.json")
+    for row in traversal_checks:
+        _validate_schema(row, "phase2c-tree-traversal-check.schema.json")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1146,6 +1722,10 @@ def main(argv: list[str] | None = None) -> int:
         "gold_layer_localization": output_dir / "gold-layer-localization.jsonl",
         "gold_comparison_summary": output_dir / "gold-comparison-summary.json",
         "gold_comparison_summary_csv": output_dir / "gold-comparison-summary.csv",
+        "output_divergence": output_dir / "output-divergence.json",
+        "output_divergence_csv": output_dir / "output-divergence.csv",
+        "round_differential": output_dir / "round-differential.jsonl",
+        "tree_traversal_checks": output_dir / "tree-traversal-checks.jsonl",
     }
     command = shlex.join([sys.executable, *sys.argv])
     environment = collect_environment(
@@ -1164,7 +1744,15 @@ def main(argv: list[str] | None = None) -> int:
     gold_logits: list[dict[str, Any]] = []
     gold_kv: list[dict[str, Any]] = []
     gold_layers: list[dict[str, Any]] = []
+    divergences: list[dict[str, Any]] = []
+    round_differentials: list[dict[str, Any]] = []
+    traversal_checks: list[dict[str, Any]] = []
     gold_comparison_summary = build_gold_comparison_summary(gold_logits, gold_kv)
+    output_divergence = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "not_run",
+        "records": [],
+    }
     summary = aggregate_tree_results(samples, rounds)
     correctness = {
         "schema_version": SCHEMA_VERSION,
@@ -1174,6 +1762,7 @@ def main(argv: list[str] | None = None) -> int:
         "failure_class": None,
         "completed_checks": [],
         "uncompleted_checks": [],
+        "uncompleted_check_details": [],
         "records": correctness_records,
         "error": None,
     }
@@ -1206,6 +1795,9 @@ def main(argv: list[str] | None = None) -> int:
                 gold_logits=gold_logits,
                 gold_kv=gold_kv,
                 gold_layers=gold_layers,
+                divergences=divergences,
+                round_differentials=round_differentials,
+                traversal_checks=traversal_checks,
                 paths=paths,
             )
             summary = aggregate_tree_results(samples, rounds)
@@ -1225,9 +1817,11 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     "failure_class": next(
                         (
-                            record["gold_failure_class"]
+                            record["output_divergence_failure_class"]
+                            or record["gold_failure_class"]
                             for record in reversed(correctness_records)
-                            if record["gold_failure_class"] is not None
+                            if record["output_divergence_failure_class"] is not None
+                            or record["gold_failure_class"] is not None
                         ),
                         None,
                     ),
@@ -1245,6 +1839,11 @@ def main(argv: list[str] | None = None) -> int:
                             for check in record["gold_uncompleted_checks"]
                         }
                     ),
+                    "uncompleted_check_details": [
+                        detail
+                        for record in correctness_records
+                        for detail in record.get("gold_uncompleted_check_details", [])
+                    ],
                     "error": None,
                 }
             )
@@ -1259,6 +1858,24 @@ def main(argv: list[str] | None = None) -> int:
             manifest["error"] = provenance["error"] = correctness["error"] = error
             exit_code = 130
             traceback.print_exc()
+        except Phase2CCorrectnessFailure as exc:
+            error = {"type": type(exc).__name__, "message": str(exc)}
+            manifest["status"] = provenance["status"] = correctness["status"] = "failed"
+            manifest["error"] = provenance["error"] = correctness["error"] = error
+            if correctness_records:
+                last = correctness_records[-1]
+                correctness["gold_status"] = last["gold_status"]
+                correctness["failure_class"] = (
+                    last["output_divergence_failure_class"]
+                    or last["gold_failure_class"]
+                )
+                correctness["completed_checks"] = last["gold_completed_checks"]
+                correctness["uncompleted_checks"] = last["gold_uncompleted_checks"]
+                correctness["uncompleted_check_details"] = last.get(
+                    "gold_uncompleted_check_details", []
+                )
+            print(f"FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+            traceback.print_exc()
         except Exception as exc:  # noqa: BLE001 - preserve partial evidence.
             error = {"type": type(exc).__name__, "message": str(exc)}
             manifest["status"] = provenance["status"] = correctness["status"] = "error"
@@ -1269,10 +1886,14 @@ def main(argv: list[str] | None = None) -> int:
                 correctness["failure_class"] = last["gold_failure_class"]
                 correctness["completed_checks"] = last["gold_completed_checks"]
                 correctness["uncompleted_checks"] = last["gold_uncompleted_checks"]
+                correctness["uncompleted_check_details"] = last.get(
+                    "gold_uncompleted_check_details", []
+                )
             print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
             traceback.print_exc()
         finally:
             try:
+                summary = aggregate_tree_results(samples, rounds)
                 inventory = manifest.get("workload", {}).get("inventory") or {
                     "schema_version": SCHEMA_VERSION,
                     "status": "error",
@@ -1302,6 +1923,12 @@ def main(argv: list[str] | None = None) -> int:
                     gold_kv=gold_kv,
                     gold_layers=gold_layers,
                 )
+                output_divergence = persist_divergence_artifacts(
+                    paths=paths,
+                    divergences=divergences,
+                    round_differentials=round_differentials,
+                    traversal_checks=traversal_checks,
+                )
                 if exit_code == 0:
                     _validate_artifacts(
                         manifest,
@@ -1314,6 +1941,9 @@ def main(argv: list[str] | None = None) -> int:
                         gold_kv,
                         gold_layers,
                         gold_comparison_summary,
+                        output_divergence,
+                        round_differentials,
+                        traversal_checks,
                     )
             except Exception:  # noqa: BLE001
                 traceback.print_exc()

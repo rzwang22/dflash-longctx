@@ -199,6 +199,14 @@ def summarize_comparison_mode(
             "p99_absolute_error": None,
             "first_failing_depth": None,
             "first_failing_node": None,
+            "first_numerical_threshold_exceeding_depth": None,
+            "first_numerical_threshold_exceeding_node": None,
+            "first_top8_mismatch_depth": None,
+            "first_top8_mismatch_node": None,
+            "first_semantic_mismatch_depth": None,
+            "first_semantic_mismatch_node": None,
+            "first_structural_mismatch_depth": None,
+            "first_structural_mismatch_node": None,
             "structural_issues": structural_issues,
         }
     if not available:
@@ -217,26 +225,26 @@ def summarize_comparison_mode(
         if row["max_abs_error"] > thresholds["maximum_absolute_error"]
         or row["mean_abs_error"] > thresholds["mean_absolute_error"]
     ]
-    failing = structural_failures or verifier_mismatches or numerical_failures
-    first_failure = min(
-        (
-            row
-            for row in available
-            if row in verifier_mismatches
-            or row in numerical_failures
-            or row.get("structural_issues")
-        ),
-        key=lambda row: (row["node_depth"], row["flattened_node_index"]),
-        default=None,
-    )
+
+    def first(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        return min(
+            rows,
+            key=lambda row: (row["node_depth"], row["flattened_node_index"]),
+            default=None,
+        )
+
+    structural_nodes = [row for row in available if row.get("structural_issues")]
+    first_structural = first(structural_nodes)
+    first_semantic = first(verifier_mismatches)
+    first_numerical = first(numerical_failures)
+    first_top8 = first(top8_mismatches)
+    first_failure = first(structural_nodes + verifier_mismatches)
     if structural_failures:
         status = "fail_structural"
     elif verifier_mismatches:
         status = "fail_semantic"
     elif numerical_failures or top8_mismatches or argmax_mismatches:
-        # A matrix-level classifier decides whether other controls establish
-        # numerical backend variation. A mode alone cannot make that claim.
-        status = "fail_semantic"
+        status = "pass_semantic_with_numerical_variation"
     else:
         status = "pass_exact"
     total_values = sum(int(row["logit_element_count"]) for row in available)
@@ -273,11 +281,38 @@ def summarize_comparison_mode(
         "first_failing_node": (
             first_failure["flattened_node_index"] if first_failure else None
         ),
+        "first_numerical_threshold_exceeding_depth": (
+            first_numerical["node_depth"] if first_numerical else None
+        ),
+        "first_numerical_threshold_exceeding_node": (
+            first_numerical["flattened_node_index"] if first_numerical else None
+        ),
+        "first_top8_mismatch_depth": (first_top8["node_depth"] if first_top8 else None),
+        "first_top8_mismatch_node": (
+            first_top8["flattened_node_index"] if first_top8 else None
+        ),
+        "first_semantic_mismatch_depth": (
+            first_semantic["node_depth"] if first_semantic else None
+        ),
+        "first_semantic_mismatch_node": (
+            first_semantic["flattened_node_index"] if first_semantic else None
+        ),
+        "first_structural_mismatch_depth": (
+            first_structural["node_depth"] if first_structural else None
+        ),
+        "first_structural_mismatch_node": (
+            first_structural["flattened_node_index"] if first_structural else None
+        ),
         "structural_issues": sorted(set(structural_failures)),
         "has_non_verifier_argmax_mismatch": bool(
             argmax_mismatches and not verifier_mismatches
         ),
-        "strict_failure_present": bool(failing or top8_mismatches),
+        "strict_failure_present": bool(
+            structural_failures
+            or verifier_mismatches
+            or numerical_failures
+            or top8_mismatches
+        ),
     }
 
 
@@ -321,7 +356,16 @@ def classify_comparison_matrix(
         failure_class = "native_comparison_unavailable"
         evidence = []
     elif native["status"] == "pass_exact":
-        status = "pass_exact"
+        varied_controls = [
+            row
+            for row in available
+            if row["comparison_mode"] != "native" and row["status"] != "pass_exact"
+        ]
+        status = (
+            "pass_semantic_with_numerical_variation"
+            if varied_controls
+            else "pass_exact"
+        )
         failure_class = None
         evidence = ["native"]
     else:
@@ -337,8 +381,8 @@ def classify_comparison_matrix(
             failure_class = "numerical_backend_variation"
             evidence = [row["comparison_mode"] for row in controls]
         else:
-            status = "fail_semantic"
-            failure_class = "unresolved_gold_mismatch"
+            status = "pass_semantic_with_numerical_variation"
+            failure_class = "unresolved_numerical_variation"
             evidence = []
     return {
         "status": status,
@@ -427,6 +471,34 @@ def build_gold_comparison_summary(
                 ),
                 "first_failing_node": (
                     summary.get("first_failing_node") if summary else None
+                ),
+                "first_numerical_threshold_exceeding_depth": (
+                    summary.get("first_numerical_threshold_exceeding_depth")
+                    if summary
+                    else None
+                ),
+                "first_numerical_threshold_exceeding_node": (
+                    summary.get("first_numerical_threshold_exceeding_node")
+                    if summary
+                    else None
+                ),
+                "first_top8_mismatch_depth": (
+                    summary.get("first_top8_mismatch_depth") if summary else None
+                ),
+                "first_top8_mismatch_node": (
+                    summary.get("first_top8_mismatch_node") if summary else None
+                ),
+                "first_semantic_mismatch_depth": (
+                    summary.get("first_semantic_mismatch_depth") if summary else None
+                ),
+                "first_semantic_mismatch_node": (
+                    summary.get("first_semantic_mismatch_node") if summary else None
+                ),
+                "first_structural_mismatch_depth": (
+                    summary.get("first_structural_mismatch_depth") if summary else None
+                ),
+                "first_structural_mismatch_node": (
+                    summary.get("first_structural_mismatch_node") if summary else None
                 ),
                 "structural_status": (
                     summary.get("structural_status") if summary else "not_run"

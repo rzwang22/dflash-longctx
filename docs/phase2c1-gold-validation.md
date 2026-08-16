@@ -70,11 +70,13 @@ Statuses are:
 - `pass_exact`: structural checks, strict numerical thresholds, argmax, and
   ordered Top-8 all agree.
 - `pass_semantic_with_numerical_variation`: all structural and actual verifier
-  decisions agree, final/round semantics agree, native differs, and at least one
-  equal-shape/same-mask/math control passes exactly.
+  decisions agree and final/round semantics agree, while numerical thresholds,
+  a non-verifier row, or ordered Top-8 differs. Exact equal-shape/same-mask/math
+  evidence is still required before the cause is labeled
+  `numerical_backend_variation`; otherwise provenance says
+  `unresolved_numerical_variation`.
 - `fail_semantic`: verifier decision, accepted/correction/bonus, next-step, or
-  output IDs disagree; unresolved native mismatch without control evidence also
-  stops rather than being relabeled numerical variation.
+  output IDs disagree.
 - `fail_structural`: mask, position, query/logit alignment, cache length, gather,
   or retained path is invalid.
 - `not_run`: an unavailable mode or a check gated by a prior failure.
