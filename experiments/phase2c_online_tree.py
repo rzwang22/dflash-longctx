@@ -42,6 +42,10 @@ from dflash.phase2c.metrics import (
     distribution,
     summary_csv_rows,
 )
+from dflash.phase2c.reference_state import (
+    compare_reference_tree_checkpoints,
+    verifier_evidence_by_prefix,
+)
 from dflash.phase2c.stabilization import (
     DECISION_STABILIZATION_MODES,
     DEFAULT_MARGIN_THRESHOLDS,
@@ -195,6 +199,32 @@ MARGIN_FRONTIER_CSV_FIELDS = (
     "estimated_recheck_cuda_p50_ms",
     "estimated_recheck_cuda_p90_ms",
 )
+REFERENCE_STATE_CSV_FIELDS = (
+    "task",
+    "sample_id",
+    "nominal_prompt_length",
+    "actual_prompt_length",
+    "configuration_id",
+    "generated_prefix_length",
+    "comparison_status",
+    "semantic_prefix_token_exact",
+    "reference_round_index",
+    "tree_round_index",
+    "target_kv_structural_equal",
+    "target_kv_numerically_equal",
+    "target_kv_maximum_sample_abs_error",
+    "target_hidden_structural_equal",
+    "target_hidden_numerically_equal",
+    "target_hidden_max_abs_error",
+    "draft_top1_candidates_equal",
+    "draft_topk_candidates_equal",
+    "semantic_probe_argmax_equal",
+    "semantic_probe_top8_ordered_equal",
+    "local_packed_verifier_decision_flip",
+    "commit_transition_semantics_equal",
+    "mere_numerical_variation_only",
+    "semantic_consequence_observed",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -266,6 +296,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--phase2b-capture-dir", action="append", type=Path, default=[])
     parser.add_argument("--phase2b1-analysis-dir", type=Path, default=None)
+    parser.add_argument(
+        "--enable-reference-state-diagnostics",
+        action="store_true",
+        help=(
+            "Run diagnostic-only Original-DFlash/tree state checkpoint replays "
+            "outside formal timing."
+        ),
+    )
     parser.set_defaults(output_dir=Path("outputs/phase2c-online-tree"))
     return parser
 
@@ -362,7 +400,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise ValueError("--gold-layer-localization requires --enable-gold-checks")
     if args.gold_record_all_nodes and not args.enable_gold_checks:
         raise ValueError("--gold-record-all-nodes requires --enable-gold-checks")
-    tree_configurations(args)
+    configurations = tree_configurations(args)
+    if args.enable_reference_state_diagnostics:
+        if args.decision_stabilization != "shadow":
+            raise ValueError(
+                "Phase 2C.4 reference-state diagnostics require shadow mode"
+            )
+        if not args.enable_gold_checks:
+            raise ValueError(
+                "Phase 2C.4 reference-state diagnostics require gold checks"
+            )
+        required_modes = {"native", "same_mask", "math"}
+        missing_modes = required_modes - set(args.gold_comparison_modes)
+        if missing_modes:
+            raise ValueError(
+                "Phase 2C.4 requires gold comparison modes native, same_mask, "
+                f"and math; missing {sorted(missing_modes)}"
+            )
+        if any(config["tree_policy"] != "layerwise_beam" for config in configurations):
+            raise ValueError(
+                "Phase 2C.4 reference-state diagnostics require layerwise_beam"
+            )
     return args
 
 
@@ -370,7 +428,9 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
     return {
         **phase1b_configuration(args),
         "phase": "2C",
-        "phase_detail": "2C.3",
+        "phase_detail": (
+            "2C.4" if args.enable_reference_state_diagnostics else "2C.3"
+        ),
         "mode": "online_bounded_marginal_tree",
         "sample_id": args.sample_id,
         "tree_configurations": tree_configurations(args),
@@ -384,6 +444,9 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "gold_max_rounds": args.gold_max_rounds,
         "gold_record_all_nodes": args.gold_record_all_nodes,
         "gold_thresholds": args.gold_thresholds,
+        "enable_reference_state_diagnostics": (
+            args.enable_reference_state_diagnostics
+        ),
         "phase2b_capture_dirs": [str(path) for path in args.phase2b_capture_dir],
         "phase2b1_analysis_dir": (
             str(args.phase2b1_analysis_dir) if args.phase2b1_analysis_dir else None
@@ -446,6 +509,7 @@ def _new_manifest(
         "native_layerwise_divergence_is_recorded_not_hidden_in_off_or_shadow": True,
         "gold_checks_excluded_from_performance": True,
         "divergence_diagnostics_excluded_from_performance": True,
+        "reference_state_diagnostics_excluded_from_performance": True,
         "shadow_oracle_excluded_from_native_formal_timing": True,
         "repeats": args.timing_repeats,
         "warmup_runs": args.warmup_runs,
@@ -457,6 +521,9 @@ def _new_manifest(
         "unmatched_offline_online_rounds_are_not_mismatches": True,
         "round_differentials_use_absolute_generated_token_offsets": True,
         "target_only_is_measured_not_assumed_authoritative": True,
+        "reference_state_alignment": "absolute_generated_token_prefix",
+        "reference_tree_round_indices_assumed_equal": False,
+        "reference_state_full_float32_kv_cpu_copy_created": False,
     }
     return manifest
 
@@ -469,6 +536,7 @@ def _tree_options(
     args: argparse.Namespace | None = None,
     divergence_diagnostics: bool = False,
     stabilization_override: str | None = None,
+    reference_state_prefixes: list[int] | None = None,
 ) -> dict[str, Any]:
     options = {
         "enable_online_tree": True,
@@ -504,6 +572,13 @@ def _tree_options(
         # Reuse the bounded gold-round knob for the otherwise expensive
         # cache/mask/traversal capture. No gold forward is enabled here.
         options["online_tree_gold_max_rounds"] = args.gold_max_rounds
+    if reference_state_prefixes is not None:
+        options.update(
+            {
+                "enable_reference_state_diagnostics": True,
+                "reference_state_generated_prefixes": reference_state_prefixes,
+            }
+        )
     return options
 
 
@@ -640,6 +715,131 @@ def _top1_round_exact(
     return not errors, errors
 
 
+def _run_reference_state_differential(
+    args: argparse.Namespace,
+    *,
+    torch_module: Any,
+    draft: Any,
+    target: Any,
+    input_ids: Any,
+    tokenizer: Any,
+    workload: dict[str, Any],
+    configuration: dict[str, Any],
+    reference_ids: Any,
+    reference_diagnostics: dict[str, Any],
+    tree_ids: Any,
+    first_output_divergent_offset: int | None,
+    gold_logits: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not args.enable_reference_state_diagnostics:
+        return {"rows": [], "layer_rows": [], "summary": None}
+
+    prompt_length = int(input_ids.shape[1])
+    maximum_prefix = (
+        int(first_output_divergent_offset)
+        if first_output_divergent_offset is not None
+        else min(
+            int(reference_ids.shape[1]) - prompt_length,
+            int(tree_ids.shape[1]) - prompt_length,
+        )
+    )
+    requested_prefixes = list(range(maximum_prefix + 1))
+    tree_state_ids, tree_state_diagnostics, _, _ = _call_generation(
+        torch_module=torch_module,
+        draft=draft,
+        target=target,
+        input_ids=input_ids,
+        max_new_tokens=args.max_new_tokens,
+        stop_token_ids=[tokenizer.eos_token_id],
+        return_diagnostics=True,
+        enable_profiling=False,
+        generation_options=_tree_options(
+            configuration,
+            profiling=False,
+            gold_checks=False,
+            args=args,
+            reference_state_prefixes=requested_prefixes,
+        ),
+    )
+    reference_replay_stable = True
+    tree_replay_stable = bool(torch_module.equal(tree_state_ids, tree_ids))
+    tree_state_rounds = tree_state_diagnostics["rounds"]
+    tree_checkpoints = tree_state_diagnostics["reference_state"]["checkpoints"]
+    tree_checkpoint_by_prefix = {
+        int(row["generated_prefix_length"]): row for row in tree_checkpoints
+    }
+    for round_row in tree_state_rounds:
+        prefix = int(round_row["generated_root_offset"])
+        checkpoint = tree_checkpoint_by_prefix.get(prefix)
+        if checkpoint is not None:
+            stabilization = round_row.get("decision_stabilization") or {}
+            checkpoint["shadow_decision"] = {
+                "native_canonical_decision_equal": stabilization.get(
+                    "native_canonical_decision_equal"
+                ),
+                "native_selected_path_token_ids": stabilization.get(
+                    "native_selected_path_token_ids"
+                ),
+                "canonical_accepted_path_token_ids": stabilization.get(
+                    "canonical_accepted_path_token_ids"
+                ),
+                "native_next_root_token_id": stabilization.get(
+                    "native_next_root_token_id"
+                ),
+                "canonical_next_root_token_id": stabilization.get(
+                    "canonical_next_root_token_id"
+                ),
+                "minimum_path_margin": stabilization.get("minimum_path_margin"),
+            }
+    comparison = compare_reference_tree_checkpoints(
+        reference_checkpoints=reference_diagnostics["reference_state"][
+            "checkpoints"
+        ],
+        tree_checkpoints=tree_checkpoints,
+        first_output_divergent_offset=first_output_divergent_offset,
+        packed_verifier_evidence=verifier_evidence_by_prefix(
+            gold_records=gold_logits,
+            prompt_length=prompt_length,
+        ),
+    )
+    common = {
+        "schema_version": SCHEMA_VERSION,
+        "task": workload["longbench_task"],
+        "sample_id": workload["sample_id"],
+        "nominal_prompt_length": workload["nominal_prompt_length"],
+        "actual_prompt_length": workload["actual_prompt_length"],
+        "configuration_id": configuration["configuration_id"],
+    }
+    for row in comparison["rows"]:
+        row.update(common)
+    for row in comparison["layer_rows"]:
+        row.update(common)
+    comparison["summary"].update(
+        {
+            **common,
+            "status": "complete"
+            if reference_replay_stable and tree_replay_stable
+            else "inconclusive_replay_instability",
+            "reference_diagnostic_output_ids_equal_formal_reference": (
+                reference_replay_stable
+            ),
+            "tree_diagnostic_output_ids_equal_formal_tree": tree_replay_stable,
+            "diagnostic_runs_excluded_from_formal_timing": True,
+            "reference_execution_provenance": "actual_reference_checkpoint",
+            "tree_execution_provenance": "diagnostic_replay",
+            "full_float32_kv_cpu_copy_created": False,
+            "tensor_comparison_scope": "bounded_stable_samples",
+        }
+    )
+    if not (reference_replay_stable and tree_replay_stable):
+        comparison["summary"]["evidence_completeness"] = "partial"
+        comparison["summary"]["failure_classification"] = (
+            "unresolved_reference_state_divergence"
+        )
+        comparison["summary"]["affected_component"] = None
+    return comparison
+
+
 def _warmup(
     args: argparse.Namespace,
     *,
@@ -704,6 +904,7 @@ def _run_sample_configuration(
     dict[str, Any],
     list[dict[str, Any]],
     list[dict[str, Any]],
+    dict[str, Any],
 ]:
     input_ids = torch_module.tensor(
         [workload["input_ids"]], dtype=torch_module.long, device=args.device
@@ -1002,6 +1203,23 @@ def _run_sample_configuration(
         comparison["right_token_text"] = _decoded_token(
             tokenizer, comparison["right_token_id"]
         )
+    reference_state = _run_reference_state_differential(
+        args,
+        torch_module=torch_module,
+        draft=draft,
+        target=target,
+        input_ids=input_ids,
+        tokenizer=tokenizer,
+        workload=workload,
+        configuration=configuration,
+        reference_ids=reference_ids,
+        reference_diagnostics=reference_diagnostics,
+        tree_ids=formal_control_ids,
+        first_output_divergent_offset=reference_tree[
+            "first_divergent_generated_token_offset"
+        ],
+        gold_logits=gold_logits,
+    )
     round_differential = build_round_differential(
         comparison=reference_tree,
         prompt_length=prompt_length,
@@ -1502,6 +1720,7 @@ def _run_sample_configuration(
         divergence_record,
         [round_differential] if round_differential is not None else [],
         traversal_checks,
+        reference_state,
     )
 
 
@@ -1519,6 +1738,9 @@ def _load_reference_and_run(
     divergences: list[dict[str, Any]],
     round_differentials: list[dict[str, Any]],
     traversal_checks: list[dict[str, Any]],
+    reference_state_rows: list[dict[str, Any]],
+    reference_state_layer_rows: list[dict[str, Any]],
+    reference_state_cases: list[dict[str, Any]],
     paths: dict[str, Path],
 ) -> None:
     torch_module, tokenizer, target, draft, workloads = _load_inputs(
@@ -1555,6 +1777,16 @@ def _load_reference_and_run(
             stop_token_ids=[tokenizer.eos_token_id],
             return_diagnostics=True,
             enable_profiling=False,
+            generation_options=(
+                {
+                    "enable_reference_state_diagnostics": True,
+                    "reference_state_generated_prefixes": list(
+                        range(args.max_new_tokens + 1)
+                    ),
+                }
+                if args.enable_reference_state_diagnostics
+                else None
+            ),
         )
         reference_repeats = []
         reference_profile_repeats = []
@@ -1631,6 +1863,7 @@ def _load_reference_and_run(
                 current_divergence,
                 current_round_differentials,
                 current_traversal_checks,
+                current_reference_state,
             ) = result
             samples.append(sample)
             rounds.extend(current_rounds)
@@ -1641,6 +1874,19 @@ def _load_reference_and_run(
             divergences.append(current_divergence)
             round_differentials.extend(current_round_differentials)
             traversal_checks.extend(current_traversal_checks)
+            reference_state_rows.extend(current_reference_state["rows"])
+            reference_state_layer_rows.extend(
+                current_reference_state["layer_rows"]
+            )
+            if current_reference_state["summary"] is not None:
+                reference_state_cases.append(current_reference_state["summary"])
+            persist_reference_state_artifacts(
+                paths=paths,
+                rows=reference_state_rows,
+                layer_rows=reference_state_layer_rows,
+                cases=reference_state_cases,
+                enabled=args.enable_reference_state_diagnostics,
+            )
             persisted_divergence = persist_divergence_artifacts(
                 paths=paths,
                 divergences=divergences,
@@ -1857,6 +2103,96 @@ def persist_divergence_artifacts(
     return payload
 
 
+def persist_reference_state_artifacts(
+    *,
+    paths: dict[str, Path],
+    rows: list[dict[str, Any]],
+    layer_rows: list[dict[str, Any]],
+    cases: list[dict[str, Any]],
+    enabled: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    _atomic_write_jsonl(paths["reference_state_differential"], rows)
+    _atomic_write_jsonl(paths["reference_state_layer_differential"], layer_rows)
+    csv_rows = [
+        {
+            **row,
+            "target_kv_structural_equal": row["target_kv"].get(
+                "structural_equal"
+            ),
+            "target_kv_numerically_equal": row["target_kv"].get(
+                "numerically_equal"
+            ),
+            "target_kv_maximum_sample_abs_error": row["target_kv"].get(
+                "maximum_sample_abs_error"
+            ),
+            "target_hidden_structural_equal": row["target_hidden"].get(
+                "structural_equal"
+            ),
+            "target_hidden_numerically_equal": row["target_hidden"].get(
+                "numerically_equal"
+            ),
+            "target_hidden_max_abs_error": row["target_hidden"].get(
+                "max_abs_error"
+            ),
+            "draft_top1_candidates_equal": row["draft_state"].get(
+                "top1_candidates_equal"
+            ),
+            "draft_topk_candidates_equal": row["draft_state"].get(
+                "topk_candidates_equal"
+            ),
+            "semantic_probe_argmax_equal": row["semantic_probe"].get(
+                "argmax_equal"
+            ),
+            "semantic_probe_top8_ordered_equal": row["semantic_probe"].get(
+                "top8_ordered_equal"
+            ),
+        }
+        for row in rows
+    ]
+    _write_csv(
+        paths["reference_state_differential_csv"],
+        csv_rows,
+        REFERENCE_STATE_CSV_FIELDS,
+    )
+    summary = {
+        "schema_version": SCHEMA_VERSION,
+        "status": "complete" if enabled and cases else "not_run",
+        "case_count": len(cases),
+        "cases": cases,
+        "absolute_generated_prefix_alignment_used": True,
+        "round_index_alignment_assumed": False,
+        "formal_timing_contaminated": False,
+        "target_only_used_as_authoritative_oracle": False,
+    }
+    first = {
+        "schema_version": SCHEMA_VERSION,
+        "status": summary["status"],
+        "cases": [
+            {
+                key: case.get(key)
+                for key in (
+                    "task",
+                    "sample_id",
+                    "nominal_prompt_length",
+                    "actual_prompt_length",
+                    "configuration_id",
+                    "first_output_divergent_generated_token_offset",
+                    "first_state_divergent_aligned_prefix",
+                    "first_semantically_consequential_state_divergence",
+                    "affected_component",
+                    "reference_tree_round_mapping",
+                    "evidence_completeness",
+                    "failure_classification",
+                )
+            }
+            for case in cases
+        ],
+    }
+    write_json(paths["reference_state_summary"], summary)
+    write_json(paths["first_reference_state_divergence"], first)
+    return summary, first
+
+
 def build_stabilization_artifacts(
     rounds: list[dict[str, Any]], samples: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
@@ -1932,6 +2268,10 @@ def _validate_artifacts(
     traversal_checks: list[dict[str, Any]],
     stabilization_rounds: list[dict[str, Any]],
     stabilization_summary: dict[str, Any],
+    reference_state_rows: list[dict[str, Any]],
+    reference_state_layer_rows: list[dict[str, Any]],
+    reference_state_summary: dict[str, Any],
+    first_reference_state_divergence: dict[str, Any],
 ) -> None:
     _validate_schema(manifest, "phase2c-manifest.schema.json")
     for sample in samples:
@@ -1959,6 +2299,17 @@ def _validate_artifacts(
         _validate_schema(row, "phase2c-decision-stabilization-round.schema.json")
     _validate_schema(
         stabilization_summary, "phase2c-decision-stabilization-summary.schema.json"
+    )
+    for row in reference_state_rows:
+        _validate_schema(row, "phase2c-reference-state-differential.schema.json")
+    for row in reference_state_layer_rows:
+        _validate_schema(row, "phase2c-reference-state-layer.schema.json")
+    _validate_schema(
+        reference_state_summary, "phase2c-reference-state-summary.schema.json"
+    )
+    _validate_schema(
+        first_reference_state_divergence,
+        "phase2c-first-reference-state-divergence.schema.json",
     )
 
 
@@ -1996,6 +2347,15 @@ def main(argv: list[str] | None = None) -> int:
         / "decision-stabilization-summary.csv",
         "decision_margin_frontier_csv": output_dir / "decision-margin-frontier.csv",
         "canonical_recheck_events": output_dir / "canonical-recheck-events.jsonl",
+        "reference_state_differential": output_dir
+        / "reference-state-differential.jsonl",
+        "reference_state_differential_csv": output_dir
+        / "reference-state-differential.csv",
+        "reference_state_summary": output_dir / "reference-state-summary.json",
+        "first_reference_state_divergence": output_dir
+        / "first-reference-state-divergence.json",
+        "reference_state_layer_differential": output_dir
+        / "reference-state-layer-differential.jsonl",
     }
     command = shlex.join([sys.executable, *sys.argv])
     environment = collect_environment(
@@ -2017,6 +2377,9 @@ def main(argv: list[str] | None = None) -> int:
     divergences: list[dict[str, Any]] = []
     round_differentials: list[dict[str, Any]] = []
     traversal_checks: list[dict[str, Any]] = []
+    reference_state_rows: list[dict[str, Any]] = []
+    reference_state_layer_rows: list[dict[str, Any]] = []
+    reference_state_cases: list[dict[str, Any]] = []
     gold_comparison_summary = build_gold_comparison_summary(gold_logits, gold_kv)
     output_divergence = {
         "schema_version": SCHEMA_VERSION,
@@ -2071,6 +2434,9 @@ def main(argv: list[str] | None = None) -> int:
                 divergences=divergences,
                 round_differentials=round_differentials,
                 traversal_checks=traversal_checks,
+                reference_state_rows=reference_state_rows,
+                reference_state_layer_rows=reference_state_layer_rows,
+                reference_state_cases=reference_state_cases,
                 paths=paths,
             )
             summary = aggregate_tree_results(samples, rounds)
@@ -2245,6 +2611,16 @@ def main(argv: list[str] | None = None) -> int:
                         if row["recheck_triggered"]
                     ],
                 )
+                (
+                    reference_state_summary,
+                    first_reference_state_divergence,
+                ) = persist_reference_state_artifacts(
+                    paths=paths,
+                    rows=reference_state_rows,
+                    layer_rows=reference_state_layer_rows,
+                    cases=reference_state_cases,
+                    enabled=args.enable_reference_state_diagnostics,
+                )
                 if exit_code == 0:
                     _validate_artifacts(
                         manifest,
@@ -2262,6 +2638,10 @@ def main(argv: list[str] | None = None) -> int:
                         traversal_checks,
                         stabilization_rounds,
                         stabilization_summary,
+                        reference_state_rows,
+                        reference_state_layer_rows,
+                        reference_state_summary,
+                        first_reference_state_divergence,
                     )
             except Exception:  # noqa: BLE001
                 traceback.print_exc()

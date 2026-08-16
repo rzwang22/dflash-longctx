@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-reference-state-layer.schema.json",
+  "title": "Phase 2C.4 layer-wise bounded state differential",
+  "type": "object",
+  "required": [
+    "schema_version", "task", "sample_id", "nominal_prompt_length",
+    "actual_prompt_length", "configuration_id", "generated_prefix_length",
+    "component", "layer_index", "status", "shape_equal",
+    "reference_sequence_length", "tree_sequence_length", "k", "v"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "sample_id": {"type": "string", "minLength": 1},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "actual_prompt_length": {"type": "integer", "minimum": 1},
+    "configuration_id": {"type": "string", "minLength": 1},
+    "generated_prefix_length": {"type": "integer", "minimum": 0},
+    "component": {"enum": ["persistent_target_kv", "draft_kv"]},
+    "layer_index": {"type": "integer", "minimum": 0},
+    "status": {"enum": ["available", "not_directly_comparable"]},
+    "shape_equal": {"type": "boolean"},
+    "reference_sequence_length": {"type": ["integer", "null"], "minimum": 0},
+    "tree_sequence_length": {"type": ["integer", "null"], "minimum": 0},
+    "k": {"type": "object"},
+    "v": {"type": "object"}
+  }
+}

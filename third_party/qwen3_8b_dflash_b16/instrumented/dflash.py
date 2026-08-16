@@ -1,3 +1,5 @@
+import hashlib
+import json
 import time
 from itertools import pairwise
 from typing import Callable, Optional
@@ -406,6 +408,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         online_tree_gold_record_all_nodes: bool = False,
         online_tree_gold_thresholds: dict[str, float] | None = None,
         enable_online_tree_divergence_diagnostics: bool = False,
+        enable_reference_state_diagnostics: bool = False,
+        reference_state_generated_prefixes: list[int] | None = None,
         decision_stabilization: str = "off",
         decision_margin_threshold: float = 0.1,
     ):
@@ -457,6 +461,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             raise ValueError(
                 "tree divergence diagnostics require online tree diagnostics"
             )
+        if enable_reference_state_diagnostics and (
+            not return_diagnostics or enable_profiling
+        ):
+            raise ValueError(
+                "reference-state diagnostics require an unprofiled diagnostic run"
+            )
+        configured_reference_state_prefixes = sorted(
+            {int(value) for value in (reference_state_generated_prefixes or [])}
+        )
+        if any(value < 0 for value in configured_reference_state_prefixes):
+            raise ValueError("reference-state generated prefixes cannot be negative")
         validate_online_tree_options(
             enabled=enable_online_tree,
             policy=online_tree_policy,
@@ -500,6 +515,12 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 gold_record_all_nodes=online_tree_gold_record_all_nodes,
                 gold_thresholds=configured_gold_thresholds,
                 enable_divergence_diagnostics=enable_online_tree_divergence_diagnostics,
+                enable_reference_state_diagnostics=(
+                    enable_reference_state_diagnostics
+                ),
+                reference_state_generated_prefixes=(
+                    configured_reference_state_prefixes
+                ),
                 decision_stabilization=configured_stabilization,
                 decision_margin_threshold=configured_margin_threshold,
             )
@@ -510,6 +531,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 enable_rank_diagnostics,
                 enable_verification_profiling,
                 enable_tree_capture,
+                enable_reference_state_diagnostics,
             )
         ):
             return self._spec_generate_reference(
@@ -533,6 +555,10 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             enable_verification_profiling=enable_verification_profiling,
             enable_tree_capture=enable_tree_capture,
             tree_top_k=tree_top_k,
+            enable_reference_state_diagnostics=enable_reference_state_diagnostics,
+            reference_state_generated_prefixes=(
+                configured_reference_state_prefixes
+            ),
         )
 
     @staticmethod
@@ -1514,45 +1540,188 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         return result
 
     @staticmethod
-    def _phase2c_cache_comparable_summary(cache):
-        def tensor_summary(tensor):
-            flattened = tensor.reshape(-1)
-            sample_indices = evenly_spaced_sample_indices(int(flattened.numel()))
-            if not sample_indices:
-                return {
-                    "dtype": str(tensor.dtype).removeprefix("torch."),
-                    "numel": 0,
-                    "sample_indices": [],
-                    "sample_values": [],
-                    "sample_sum": 0.0,
-                }
-            indices = torch.tensor(
-                sample_indices,
-                dtype=torch.long,
-                device=tensor.device,
-            )
-            values = flattened.index_select(0, indices).float().detach().cpu().tolist()
+    def _phase2c_tensor_comparable_summary(tensor):
+        numel = int(tensor.numel())
+        sample_indices = evenly_spaced_sample_indices(numel)
+        if not sample_indices:
             return {
                 "dtype": str(tensor.dtype).removeprefix("torch."),
-                "numel": int(flattened.numel()),
-                "sample_indices": [int(value) for value in indices.cpu().tolist()],
-                "sample_values": [float(value) for value in values],
-                "sample_sum": float(sum(values)),
+                "shape": [int(value) for value in tensor.shape],
+                "numel": 0,
+                "sample_indices": [],
+                "sample_values": [],
+                "sample_sum": 0.0,
             }
+        if tensor.ndim == 0:
+            sampled = tensor.unsqueeze(0)
+        else:
+            coordinates = [[] for _ in tensor.shape]
+            for flat_index in sample_indices:
+                remainder = flat_index
+                current = [0] * tensor.ndim
+                for dimension in range(tensor.ndim - 1, -1, -1):
+                    current[dimension] = remainder % int(tensor.shape[dimension])
+                    remainder //= int(tensor.shape[dimension])
+                for dimension, coordinate in enumerate(current):
+                    coordinates[dimension].append(coordinate)
+            sampled = tensor[
+                tuple(
+                    torch.tensor(
+                        dimension_coordinates,
+                        dtype=torch.long,
+                        device=tensor.device,
+                    )
+                    for dimension_coordinates in coordinates
+                )
+            ]
+        values = sampled.float().detach().cpu().tolist()
+        return {
+            "dtype": str(tensor.dtype).removeprefix("torch."),
+            "shape": [int(value) for value in tensor.shape],
+            "numel": numel,
+            "sample_indices": sample_indices,
+            "sample_values": [float(value) for value in values],
+            "sample_sum": float(sum(values)),
+        }
+
+    @classmethod
+    def _phase2c_cache_comparable_summary(cls, cache, sequence_length=None):
+        requested_length = (
+            None if sequence_length is None else int(sequence_length)
+        )
 
         records = []
         for layer_index, layer in enumerate(cache.layers):
+            actual_length = int(layer.get_seq_length())
+            if (
+                requested_length is not None
+                and not 0 <= requested_length <= actual_length
+            ):
+                raise RuntimeError(
+                    "reference-state checkpoint length is outside the cache"
+                )
+            key = (
+                layer.keys
+                if requested_length is None
+                else layer.keys[..., :requested_length, :]
+            )
+            value = (
+                layer.values
+                if requested_length is None
+                else layer.values[..., :requested_length, :]
+            )
             records.append(
                 {
                     "layer_index": layer_index,
-                    "sequence_length": int(layer.get_seq_length()),
-                    "key_shape": [int(value) for value in layer.keys.shape],
-                    "value_shape": [int(value) for value in layer.values.shape],
-                    "key_comparable_sample": tensor_summary(layer.keys),
-                    "value_comparable_sample": tensor_summary(layer.values),
+                    "sequence_length": int(key.shape[-2]),
+                    "actual_cache_sequence_length": actual_length,
+                    "key_shape": [int(item) for item in key.shape],
+                    "value_shape": [int(item) for item in value.shape],
+                    "key_comparable_sample": cls._phase2c_tensor_comparable_summary(
+                        key
+                    ),
+                    "value_comparable_sample": cls._phase2c_tensor_comparable_summary(
+                        value
+                    ),
                 }
             )
         return records
+
+    @staticmethod
+    def _phase2c_logits_comparable_summary(logits, top_k=8):
+        flattened = logits.float().reshape(-1)
+        count = min(int(top_k), int(flattened.numel()))
+        values, indices = torch.topk(flattened, k=count)
+        margin = (
+            float((values[0] - values[1]).item()) if count >= 2 else None
+        )
+        return {
+            "dtype": str(logits.dtype).removeprefix("torch."),
+            "shape": [int(value) for value in logits.shape],
+            "top_k": count,
+            "top_token_ids": [int(value) for value in indices.detach().cpu().tolist()],
+            "top_values": [float(value) for value in values.detach().cpu().tolist()],
+            "top1_token_id": int(indices[0].item()) if count else None,
+            "top1_top2_margin": margin,
+            "full_vocabulary_logits_saved": False,
+        }
+
+    @classmethod
+    def _phase2c_draft_logits_comparable_summary(cls, logits):
+        return {
+            "shape": [int(value) for value in logits.shape],
+            "positions": [
+                {
+                    "draft_position": index + 1,
+                    **cls._phase2c_logits_comparable_summary(logits[0, index]),
+                }
+                for index in range(int(logits.shape[1]))
+            ],
+        }
+
+    @classmethod
+    def _phase2c_update_reference_state_checkpoint(
+        cls,
+        records,
+        *,
+        execution_path,
+        provenance,
+        generated_prefix_length,
+        prompt_length,
+        output_ids,
+        target_cache=None,
+        target_hidden=None,
+        target_hidden_provenance=None,
+        semantic_probe_logits=None,
+        semantic_probe_provenance=None,
+        updates=None,
+    ):
+        prefix = int(generated_prefix_length)
+        absolute_length = int(prompt_length) + prefix
+        prefix_ids = [
+            int(value)
+            for value in output_ids[0, :absolute_length].detach().cpu().tolist()
+        ]
+        digest = hashlib.sha256(
+            json.dumps(prefix_ids, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        record = records.setdefault(
+            prefix,
+            {
+                "generated_prefix_length": prefix,
+                "absolute_sequence_prefix_length": absolute_length,
+                "execution_path": execution_path,
+                "checkpoint_provenance": provenance,
+                "semantic_prefix_token_ids_sha256": digest,
+                "semantic_prefix_tail_token_ids": prefix_ids[-16:],
+                "persistent_target_kv": None,
+                "target_hidden": None,
+                "target_hidden_provenance": "not_directly_comparable",
+                "semantic_probe": None,
+                "semantic_probe_provenance": "not_directly_comparable",
+                "draft_state": None,
+                "draft_state_provenance": "not_directly_comparable",
+                "round_entry": None,
+                "commit_transition": None,
+            },
+        )
+        if target_cache is not None:
+            record["persistent_target_kv"] = cls._phase2c_cache_comparable_summary(
+                target_cache, sequence_length=absolute_length
+            )
+        if target_hidden is not None:
+            record["target_hidden"] = cls._phase2c_tensor_comparable_summary(
+                target_hidden
+            )
+            record["target_hidden_provenance"] = target_hidden_provenance
+        if semantic_probe_logits is not None:
+            record["semantic_probe"] = cls._phase2c_logits_comparable_summary(
+                semantic_probe_logits
+            )
+            record["semantic_probe_provenance"] = semantic_probe_provenance
+        if updates:
+            record.update(updates)
+        return record
 
     def _phase2c_tree_traversal_record(
         self,
@@ -1918,6 +2087,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         gold_record_all_nodes: bool,
         gold_thresholds: dict[str, float],
         enable_divergence_diagnostics: bool,
+        enable_reference_state_diagnostics: bool,
+        reference_state_generated_prefixes: list[int],
         decision_stabilization: str,
         decision_margin_threshold: float,
     ):
@@ -1968,6 +2139,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         gold_layer_localization_records = []
         gold_round_results = []
         tree_traversal_checks = []
+        requested_state_prefixes = set(reference_state_generated_prefixes)
+        reference_state_checkpoints = {}
 
         with nvtx_range(torch, "phase2c.total", enable_profiling):
             prefill_pair = timer.start()
@@ -1989,6 +2162,20 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             target_hidden = extract_context_feature(
                 output.hidden_states, self.target_layer_ids
             )
+            if enable_reference_state_diagnostics and 0 in requested_state_prefixes:
+                self._phase2c_update_reference_state_checkpoint(
+                    reference_state_checkpoints,
+                    execution_path="layerwise_tree_shadow",
+                    provenance="diagnostic_replay",
+                    generated_prefix_length=0,
+                    prompt_length=num_input_tokens,
+                    output_ids=output_ids,
+                    target_cache=past_key_values_target,
+                    target_hidden=target_hidden,
+                    target_hidden_provenance="actual_tree_target_hidden_used_by_draft",
+                    semantic_probe_logits=output.logits[0, -1],
+                    semantic_probe_provenance="actual_tree_prefill_next_token_logits",
+                )
 
             start = num_input_tokens
             round_index = 0
@@ -2000,6 +2187,37 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 if past_key_values_target.get_seq_length() != context_length_before:
                     raise RuntimeError(
                         "Phase 2C target cache does not equal round prefix length"
+                    )
+                generated_prefix_before = context_length_before - num_input_tokens
+                if (
+                    enable_reference_state_diagnostics
+                    and generated_prefix_before in requested_state_prefixes
+                ):
+                    self._phase2c_update_reference_state_checkpoint(
+                        reference_state_checkpoints,
+                        execution_path="layerwise_tree_shadow",
+                        provenance="diagnostic_replay",
+                        generated_prefix_length=generated_prefix_before,
+                        prompt_length=num_input_tokens,
+                        output_ids=output_ids,
+                        target_cache=past_key_values_target,
+                        updates={
+                            "target_hidden_used_by_draft": (
+                                self._phase2c_tensor_comparable_summary(target_hidden)
+                            ),
+                            "target_hidden_used_by_draft_provenance": (
+                                "actual_tree_target_hidden_used_by_draft"
+                            ),
+                            "round_entry": {
+                                "round_index": round_index,
+                                "generated_root_offset": generated_prefix_before,
+                                "root_token_id": int(output_ids[0, start].item()),
+                                "persistent_target_kv_length": context_length_before,
+                                "draft_kv_layer_lengths_before": dynamic_cache_lengths(
+                                    past_key_values_draft
+                                ),
+                            }
+                        },
                     )
                 round_pair = timer.start()
                 with nvtx_range(torch, "phase2c.round", enable_profiling):
@@ -2033,6 +2251,46 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             torch, draft_logits, top_k=draft_top_k
                         )
                     timer.stop(topk_pair)
+                    if (
+                        enable_reference_state_diagnostics
+                        and generated_prefix_before in requested_state_prefixes
+                    ):
+                        checkpoint = reference_state_checkpoints[
+                            generated_prefix_before
+                        ]
+                        checkpoint["draft_state"] = {
+                            "cache": self._phase2c_cache_comparable_summary(
+                                past_key_values_draft
+                            ),
+                            "cache_layer_lengths": dynamic_cache_lengths(
+                                past_key_values_draft
+                            ),
+                            "logits": self._phase2c_draft_logits_comparable_summary(
+                                draft_logits
+                            ),
+                            "candidate_top1_token_ids": [
+                                int(value)
+                                for value in candidates["token_ids"][:, 0]
+                                .detach()
+                                .cpu()
+                                .tolist()
+                            ],
+                            "candidate_topk_token_ids": [
+                                [int(value) for value in row]
+                                for row in candidates["token_ids"]
+                                .detach()
+                                .cpu()
+                                .tolist()
+                            ],
+                            "candidate_tree_input": {
+                                "policy": tree_policy,
+                                "node_budget": node_budget,
+                                "beam_width": beam_width,
+                            },
+                        }
+                        checkpoint["draft_state_provenance"] = (
+                            "actual_tree_draft_round_entry"
+                        )
                     # This equivalence assertion is diagnostic-only.  Avoid the
                     # redundant argmax/comparison on the formal control path.
                     top1_matches_sampling = None
@@ -2053,6 +2311,41 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             beam_width=beam_width,
                         )
                     timer.stop(tree_build_pair)
+                    if (
+                        enable_reference_state_diagnostics
+                        and generated_prefix_before in requested_state_prefixes
+                    ):
+                        tree_input = reference_state_checkpoints[
+                            generated_prefix_before
+                        ]["draft_state"]["candidate_tree_input"]
+                        tree_input.update(
+                            {
+                                "actual_total_node_count": int(
+                                    tree["actual_total_node_count"]
+                                ),
+                                "flattened_token_ids": [
+                                    int(value)
+                                    for value in tree["token_ids"]
+                                    .detach()
+                                    .cpu()
+                                    .tolist()
+                                ],
+                                "parent_indices": [
+                                    int(value)
+                                    for value in tree["parent_indices"]
+                                    .detach()
+                                    .cpu()
+                                    .tolist()
+                                ],
+                                "depths": [
+                                    int(value)
+                                    for value in tree["depths"]
+                                    .detach()
+                                    .cpu()
+                                    .tolist()
+                                ],
+                            }
+                        )
 
                     mask_pair = timer.start()
                     with nvtx_range(torch, "phase2c.mask_build", enable_profiling):
@@ -2296,6 +2589,93 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             "Phase 2C compacted target cache length does not equal "
                             "context_length_after"
                         )
+                    if enable_reference_state_diagnostics:
+                        committed_node_list = [
+                            int(value)
+                            for value in committed_node_indices.detach().cpu().tolist()
+                        ]
+                        for committed_offset, node_index in enumerate(
+                            committed_node_list, start=1
+                        ):
+                            generated_prefix = (
+                                generated_prefix_before + committed_offset
+                            )
+                            if generated_prefix not in requested_state_prefixes:
+                                continue
+                            self._phase2c_update_reference_state_checkpoint(
+                                reference_state_checkpoints,
+                                execution_path="layerwise_tree_shadow",
+                                provenance="diagnostic_replay",
+                                generated_prefix_length=generated_prefix,
+                                prompt_length=num_input_tokens,
+                                output_ids=output_ids,
+                                target_cache=past_key_values_target,
+                                target_hidden=target_hidden[
+                                    :, committed_offset - 1 : committed_offset, :
+                                ],
+                                target_hidden_provenance=(
+                                    "actual_tree_committed_token_hidden"
+                                ),
+                                semantic_probe_logits=(
+                                    packed_output.logits[0, node_index]
+                                    if not use_canonical_commit
+                                    else None
+                                ),
+                                semantic_probe_provenance=(
+                                    "actual_packed_tree_verifier_logits"
+                                    if not use_canonical_commit
+                                    else None
+                                ),
+                                updates={
+                                    "tree_round_index": round_index,
+                                    "committed_token_kind": (
+                                        "root"
+                                        if committed_offset == 1
+                                        else "accepted_draft"
+                                    ),
+                                    "committed_token_id": int(
+                                        committed_tokens[committed_offset - 1].item()
+                                    ),
+                                    "packed_tree_node_index": node_index,
+                                },
+                            )
+                        generated_prefix_after = start - num_input_tokens
+                        if generated_prefix_after in requested_state_prefixes:
+                            checkpoint = reference_state_checkpoints[
+                                generated_prefix_after
+                            ]
+                            checkpoint["commit_transition"] = {
+                                "round_index": round_index,
+                                "generated_prefix_before": generated_prefix_before,
+                                "generated_prefix_after": generated_prefix_after,
+                                "accepted_draft_token_count": int(
+                                    accepted_draft_tokens
+                                ),
+                                "committed_token_ids": [
+                                    int(value)
+                                    for value in committed_tokens.detach()
+                                    .cpu()
+                                    .tolist()
+                                ],
+                                "next_root_token_id": int(
+                                    next_root_token_id.item()
+                                    if hasattr(next_root_token_id, "item")
+                                    else next_root_token_id
+                                ),
+                                "next_root_kind": (
+                                    "bonus"
+                                    if bool(
+                                        next_root_is_bonus.item()
+                                        if hasattr(next_root_is_bonus, "item")
+                                        else next_root_is_bonus
+                                    )
+                                    else "correction"
+                                ),
+                                "committed_cache_source": compaction.get(
+                                    "committed_cache_source"
+                                ),
+                                "persistent_target_kv_length_after": start,
+                            }
 
                     if record_divergence_round and not use_canonical_commit:
                         divergence_cache_after = self._phase2c_cache_comparable_summary(
@@ -2880,6 +3260,20 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "accepted_draft_token_lengths": accepted_lengths,
             "cache_commit_lengths": cache_commit_lengths,
             "stop_reason": final_stop_reason,
+            "reference_state": {
+                "enabled": enable_reference_state_diagnostics,
+                "execution_path": "layerwise_tree_shadow",
+                "checkpoint_provenance": "diagnostic_replay",
+                "replay_semantics": "native packed-tree verification and commit",
+                "requested_generated_prefixes": reference_state_generated_prefixes,
+                "checkpoints": [
+                    reference_state_checkpoints[prefix]
+                    for prefix in sorted(reference_state_checkpoints)
+                ],
+                "formal_timing_included": False,
+                "full_float32_kv_cpu_copy_created": False,
+                "tensor_comparison_scope": "bounded_stable_samples",
+            },
             "rounds": rounds,
             "phase2c": {
                 "enabled": True,
@@ -3098,6 +3492,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         enable_verification_profiling: bool,
         enable_tree_capture: bool,
         tree_top_k: int,
+        enable_reference_state_diagnostics: bool,
+        reference_state_generated_prefixes: list[int],
     ):
         """Run the same algorithm with optional accounting, events, and NVTX."""
 
@@ -3135,6 +3531,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         rank_events = []
         accepted_draft_lengths = []
         cache_commit_lengths = []
+        requested_state_prefixes = set(reference_state_generated_prefixes)
+        reference_state_checkpoints = {}
         total_pair = timer.start()
 
         with nvtx_range(torch, "dflash.total", enable_profiling):
@@ -3168,12 +3566,61 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             target_hidden = extract_context_feature(
                 output.hidden_states, self.target_layer_ids
             )
+            if enable_reference_state_diagnostics and 0 in requested_state_prefixes:
+                self._phase2c_update_reference_state_checkpoint(
+                    reference_state_checkpoints,
+                    execution_path="original_dflash_reference",
+                    provenance="actual_reference_checkpoint",
+                    generated_prefix_length=0,
+                    prompt_length=num_input_tokens,
+                    output_ids=output_ids,
+                    target_cache=past_key_values_target,
+                    target_hidden=target_hidden,
+                    target_hidden_provenance=(
+                        "actual_reference_target_hidden_used_by_draft"
+                    ),
+                    semantic_probe_logits=output.logits[0, -1],
+                    semantic_probe_provenance=(
+                        "actual_reference_prefill_next_token_logits"
+                    ),
+                )
 
             start = input_ids.shape[1]
             round_index = 0
             returned_tokens_before = min(1, max_new_tokens)
             while start < max_length:
                 context_length_before = int(start)
+                generated_prefix_before = context_length_before - num_input_tokens
+                if (
+                    enable_reference_state_diagnostics
+                    and generated_prefix_before in requested_state_prefixes
+                ):
+                    self._phase2c_update_reference_state_checkpoint(
+                        reference_state_checkpoints,
+                        execution_path="original_dflash_reference",
+                        provenance="actual_reference_checkpoint",
+                        generated_prefix_length=generated_prefix_before,
+                        prompt_length=num_input_tokens,
+                        output_ids=output_ids,
+                        target_cache=past_key_values_target,
+                        updates={
+                            "target_hidden_used_by_draft": (
+                                self._phase2c_tensor_comparable_summary(target_hidden)
+                            ),
+                            "target_hidden_used_by_draft_provenance": (
+                                "actual_reference_target_hidden_used_by_draft"
+                            ),
+                            "round_entry": {
+                                "round_index": round_index,
+                                "generated_root_offset": generated_prefix_before,
+                                "root_token_id": int(output_ids[0, start].item()),
+                                "persistent_target_kv_length": context_length_before,
+                                "draft_kv_layer_lengths_before": dynamic_cache_lengths(
+                                    past_key_values_draft
+                                ),
+                            }
+                        },
+                    )
                 attention_record_start = len(attention_records)
                 round_pair = timer.start()
                 with nvtx_range(torch, "dflash.round", enable_profiling):
@@ -3208,6 +3655,48 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         past_key_values_draft.crop(start)
                         block_output_ids[:, 1:] = sample(draft_logits)
                     timer.stop(draft_pair)
+                    if (
+                        enable_reference_state_diagnostics
+                        and generated_prefix_before in requested_state_prefixes
+                    ):
+                        checkpoint = reference_state_checkpoints[
+                            generated_prefix_before
+                        ]
+                        draft_summary = self._phase2c_draft_logits_comparable_summary(
+                            draft_logits
+                        )
+                        checkpoint["draft_state"] = {
+                            "cache": self._phase2c_cache_comparable_summary(
+                                past_key_values_draft
+                            ),
+                            "cache_layer_lengths": dynamic_cache_lengths(
+                                past_key_values_draft
+                            ),
+                            "logits": draft_summary,
+                            "candidate_top1_token_ids": [
+                                int(row["top1_token_id"])
+                                for row in draft_summary["positions"]
+                            ],
+                            "candidate_topk_token_ids": [
+                                [int(value) for value in row["top_token_ids"]]
+                                for row in draft_summary["positions"]
+                            ],
+                            "candidate_tree_input": {
+                                "status": (
+                                    "not_applicable_original_dflash_linear_proposal"
+                                ),
+                                "actual_proposed_token_ids": [
+                                    int(value)
+                                    for value in block_output_ids[0, 1:]
+                                    .detach()
+                                    .cpu()
+                                    .tolist()
+                                ],
+                            },
+                        }
+                        checkpoint["draft_state_provenance"] = (
+                            "actual_reference_draft_round_entry"
+                        )
 
                     verify_pair = timer.start()
                     with (
@@ -3278,6 +3767,83 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     commit_cpu_elapsed_ms = (
                         time.perf_counter() - commit_started_at
                     ) * 1000.0
+                    if enable_reference_state_diagnostics:
+                        committed_token_count = accepted_draft_tokens + 1
+                        for committed_offset in range(1, committed_token_count + 1):
+                            generated_prefix = (
+                                generated_prefix_before + committed_offset
+                            )
+                            if generated_prefix not in requested_state_prefixes:
+                                continue
+                            self._phase2c_update_reference_state_checkpoint(
+                                reference_state_checkpoints,
+                                execution_path="original_dflash_reference",
+                                provenance="actual_reference_checkpoint",
+                                generated_prefix_length=generated_prefix,
+                                prompt_length=num_input_tokens,
+                                output_ids=output_ids,
+                                target_cache=past_key_values_target,
+                                target_hidden=target_hidden[
+                                    :, committed_offset - 1 : committed_offset, :
+                                ],
+                                target_hidden_provenance=(
+                                    "actual_reference_committed_token_hidden"
+                                ),
+                                semantic_probe_logits=output.logits[
+                                    0, committed_offset - 1
+                                ],
+                                semantic_probe_provenance=(
+                                    "actual_original_dflash_linear_verifier_logits"
+                                ),
+                                updates={
+                                    "reference_round_index": round_index,
+                                    "committed_token_kind": (
+                                        "root"
+                                        if committed_offset == 1
+                                        else "accepted_draft"
+                                    ),
+                                    "committed_token_id": int(
+                                        block_output_ids[
+                                            0, committed_offset - 1
+                                        ].item()
+                                    ),
+                                    "linear_verifier_query_index": (
+                                        committed_offset - 1
+                                    ),
+                                },
+                            )
+                        generated_prefix_after = start - num_input_tokens
+                        if generated_prefix_after in requested_state_prefixes:
+                            checkpoint = reference_state_checkpoints[
+                                generated_prefix_after
+                            ]
+                            checkpoint["commit_transition"] = {
+                                "round_index": round_index,
+                                "generated_prefix_before": generated_prefix_before,
+                                "generated_prefix_after": generated_prefix_after,
+                                "accepted_draft_token_count": accepted_draft_tokens,
+                                "committed_token_ids": [
+                                    int(value)
+                                    for value in block_output_ids[
+                                        0, :committed_token_count
+                                    ]
+                                    .detach()
+                                    .cpu()
+                                    .tolist()
+                                ],
+                                "next_root_token_id": int(
+                                    posterior[0, accepted_draft_tokens].item()
+                                ),
+                                "next_root_kind": (
+                                    "bonus"
+                                    if accepted_draft_tokens == block_size - 1
+                                    else "correction"
+                                ),
+                                "committed_cache_source": (
+                                    "original_dflash_linear_verification_crop"
+                                ),
+                                "persistent_target_kv_length_after": start,
+                            }
                     accepted_draft_lengths.append(accepted_draft_tokens)
                     cache_commit_lengths.append(accepted_draft_tokens + 1)
                     stop_detected = stop_token_ids is not None and any(
@@ -3493,6 +4059,19 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "accepted_draft_token_lengths": accepted_draft_lengths,
             "cache_commit_lengths": cache_commit_lengths,
             "stop_reason": final_stop_reason,
+            "reference_state": {
+                "enabled": enable_reference_state_diagnostics,
+                "execution_path": "original_dflash_reference",
+                "checkpoint_provenance": "actual_reference_checkpoint",
+                "requested_generated_prefixes": reference_state_generated_prefixes,
+                "checkpoints": [
+                    reference_state_checkpoints[prefix]
+                    for prefix in sorted(reference_state_checkpoints)
+                ],
+                "formal_timing_included": False,
+                "full_float32_kv_cpu_copy_created": False,
+                "tensor_comparison_scope": "bounded_stable_samples",
+            },
             "rounds": rounds,
             "rank_diagnostics": {
                 "enabled": enable_rank_diagnostics,

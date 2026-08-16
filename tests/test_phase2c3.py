@@ -383,6 +383,11 @@ class Phase2C3RunnerTests(unittest.TestCase):
                 "decision-stabilization-summary.csv",
                 "decision-margin-frontier.csv",
                 "canonical-recheck-events.jsonl",
+                "reference-state-differential.jsonl",
+                "reference-state-differential.csv",
+                "reference-state-summary.json",
+                "first-reference-state-divergence.json",
+                "reference-state-layer-differential.jsonl",
             ):
                 self.assertTrue((output / name).is_file(), name)
 

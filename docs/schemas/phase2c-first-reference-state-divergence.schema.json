@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-first-reference-state-divergence.schema.json",
+  "title": "Phase 2C.4 first consequential state divergence inventory",
+  "type": "object",
+  "required": ["schema_version", "status", "cases"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["not_run", "complete"]},
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "task", "sample_id", "nominal_prompt_length", "actual_prompt_length",
+          "configuration_id", "first_output_divergent_generated_token_offset",
+          "first_state_divergent_aligned_prefix",
+          "first_semantically_consequential_state_divergence", "affected_component",
+          "reference_tree_round_mapping", "evidence_completeness",
+          "failure_classification"
+        ]
+      }
+    }
+  }
+}

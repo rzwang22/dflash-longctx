@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-reference-state-summary.schema.json",
+  "title": "Phase 2C.4 reference-state summary",
+  "type": "object",
+  "required": [
+    "schema_version", "status", "case_count", "cases",
+    "absolute_generated_prefix_alignment_used", "round_index_alignment_assumed",
+    "formal_timing_contaminated", "target_only_used_as_authoritative_oracle"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["not_run", "complete"]},
+    "case_count": {"type": "integer", "minimum": 0},
+    "cases": {"type": "array", "items": {"$ref": "#/$defs/case"}},
+    "absolute_generated_prefix_alignment_used": {"const": true},
+    "round_index_alignment_assumed": {"const": false},
+    "formal_timing_contaminated": {"const": false},
+    "target_only_used_as_authoritative_oracle": {"const": false}
+  },
+  "$defs": {
+    "case": {
+      "type": "object",
+      "required": [
+        "task", "sample_id", "nominal_prompt_length", "actual_prompt_length",
+        "configuration_id", "first_output_divergent_generated_token_offset",
+        "first_state_divergent_aligned_prefix",
+        "first_semantically_consequential_state_divergence", "affected_component",
+        "reference_tree_round_mapping", "evidence_completeness",
+        "failure_classification", "diagnostic_runs_excluded_from_formal_timing",
+        "reference_execution_provenance", "tree_execution_provenance",
+        "full_float32_kv_cpu_copy_created", "tensor_comparison_scope"
+      ],
+      "properties": {
+        "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+        "sample_id": {"type": "string", "minLength": 1},
+        "nominal_prompt_length": {"type": "integer", "minimum": 1},
+        "actual_prompt_length": {"type": "integer", "minimum": 1},
+        "configuration_id": {"type": "string", "minLength": 1},
+        "first_output_divergent_generated_token_offset": {"type": ["integer", "null"], "minimum": 0},
+        "first_state_divergent_aligned_prefix": {"type": ["integer", "null"], "minimum": 0},
+        "first_semantically_consequential_state_divergence": {"type": ["integer", "null"], "minimum": 0},
+        "affected_component": {"type": ["string", "null"]},
+        "reference_tree_round_mapping": {"type": ["object", "null"]},
+        "evidence_completeness": {"enum": ["complete", "partial"]},
+        "failure_classification": {"type": ["string", "null"]},
+        "diagnostic_runs_excluded_from_formal_timing": {"const": true},
+        "reference_execution_provenance": {"enum": ["actual_reference_checkpoint", "diagnostic_replay", "not_directly_comparable"]},
+        "tree_execution_provenance": {"enum": ["actual_tree_checkpoint", "diagnostic_replay", "not_directly_comparable"]},
+        "full_float32_kv_cpu_copy_created": {"const": false},
+        "tensor_comparison_scope": {"const": "bounded_stable_samples"}
+      }
+    }
+  }
+}
