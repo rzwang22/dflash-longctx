@@ -15,6 +15,27 @@ DECISION_STABILIZATION_MODES = ("off", "always", "margin", "shadow")
 DEFAULT_MARGIN_THRESHOLDS = (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0)
 
 
+def evenly_spaced_sample_indices(
+    numel: int, *, maximum_sample_count: int = 16
+) -> list[int]:
+    """Return bounded, endpoint-covering indices using integer arithmetic only."""
+
+    if numel < 0:
+        raise ValueError("tensor element count cannot be negative")
+    if maximum_sample_count < 1:
+        raise ValueError("maximum sample count must be positive")
+    sample_count = min(int(numel), int(maximum_sample_count))
+    if sample_count == 0:
+        return []
+    if sample_count == 1:
+        return [0]
+    last_index = int(numel) - 1
+    return [
+        (sample_index * last_index) // (sample_count - 1)
+        for sample_index in range(sample_count)
+    ]
+
+
 def validate_decision_stabilization(mode: str, threshold: float) -> tuple[str, float]:
     """Validate online decision-stabilization options before cache mutation."""
 

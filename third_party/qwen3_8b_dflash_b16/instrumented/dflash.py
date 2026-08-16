@@ -61,6 +61,7 @@ from .phase2c_online import (
 )
 from .phase2c_stabilization import (
     canonical_selected_path_decision,
+    evenly_spaced_sample_indices,
     should_recheck,
     stabilization_commit_source,
     validate_decision_stabilization,
@@ -1516,8 +1517,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
     def _phase2c_cache_comparable_summary(cache):
         def tensor_summary(tensor):
             flattened = tensor.reshape(-1)
-            sample_count = min(16, int(flattened.numel()))
-            if sample_count == 0:
+            sample_indices = evenly_spaced_sample_indices(int(flattened.numel()))
+            if not sample_indices:
                 return {
                     "dtype": str(tensor.dtype).removeprefix("torch."),
                     "numel": 0,
@@ -1525,10 +1526,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     "sample_values": [],
                     "sample_sum": 0.0,
                 }
-            indices = torch.linspace(
-                0,
-                max(0, int(flattened.numel()) - 1),
-                steps=sample_count,
+            indices = torch.tensor(
+                sample_indices,
                 dtype=torch.long,
                 device=tensor.device,
             )

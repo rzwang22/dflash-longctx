@@ -15,6 +15,7 @@ from dflash.phase2c.stabilization import (
     canonical_kv_commit_spec,
     canonical_selected_path_decision,
     decision_margin_frontier,
+    evenly_spaced_sample_indices,
     should_recheck,
     stabilization_commit_source,
     summarize_decision_stabilization,
@@ -110,6 +111,29 @@ def _sample(*, formal_ms: float = 10.0, reference_ms: float = 20.0):
 
 
 class Phase2C3DecisionTests(unittest.TestCase):
+    def test_integer_diagnostic_indices_cover_large_kv_boundaries(self) -> None:
+        for numel in (
+            1_000,
+            2**24,
+            2**24 + 1_024,
+            32_768 * 1_024,
+        ):
+            with self.subTest(numel=numel):
+                indices = evenly_spaced_sample_indices(numel)
+                self.assertEqual(len(indices), 16)
+                self.assertEqual(indices[0], 0)
+                self.assertEqual(indices[-1], numel - 1)
+                self.assertEqual(
+                    indices,
+                    [(index * (numel - 1)) // 15 for index in range(16)],
+                )
+                self.assertTrue(all(0 <= index < numel for index in indices))
+                self.assertEqual(indices, sorted(set(indices)))
+
+    def test_integer_diagnostic_indices_handle_empty_and_singleton(self) -> None:
+        self.assertEqual(evenly_spaced_sample_indices(0), [])
+        self.assertEqual(evenly_spaced_sample_indices(1), [0])
+
     def test_off_keeps_native_decision_without_recheck(self) -> None:
         self.assertFalse(should_recheck("off", 0.001, 0.1))
 
@@ -376,6 +400,13 @@ class Phase2C3RunnerTests(unittest.TestCase):
         self.assertIn('"committed_cache_source": "canonical_recheck"', source)
         self.assertIn("past_key_values_target = canonical", source)
         self.assertIn("phase2c.canonical_recheck", source)
+
+    def test_dynamic_source_uses_integer_diagnostic_indices(self) -> None:
+        source = (
+            REPO_ROOT / "third_party/qwen3_8b_dflash_b16/instrumented/dflash.py"
+        ).read_text()
+        self.assertIn("evenly_spaced_sample_indices", source)
+        self.assertNotIn("torch.linspace(", source)
 
     def test_lazy_import_does_not_load_torch_or_transformers(self) -> None:
         code = (
