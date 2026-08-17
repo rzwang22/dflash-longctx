@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d0-analysis-manifest.schema.json",
+  "title": "Phase 2D.0 analysis manifest",
+  "type": "object",
+  "required": [
+    "schema_version", "phase", "status", "mode", "baseline_commit_sha",
+    "command", "repository", "inputs",
+    "capture_preflight_completed_before_output_creation",
+    "input_capture_mutated", "configuration", "classification_priority",
+    "classification_rules", "target_information_usage", "signal_semantics",
+    "decision_rules", "decision", "framework_modules_loaded",
+    "formal_timing_contaminated", "instrumented_custom_code_modified",
+    "materialization_required", "event_count", "raw_round_count",
+    "artifacts", "forbidden_interpretations"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.0"},
+    "status": {"const": "ok"},
+    "mode": {"const": "cpu_only_offline_dependency_opportunity_characterization"},
+    "baseline_commit_sha": {"const": "1411c27e086cacd62425f329dcf7432cedd74654"},
+    "command": {"type": "string", "minLength": 1},
+    "repository": {"type": "object"},
+    "inputs": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "capture_preflight_completed_before_output_creation": {"const": true},
+    "input_capture_mutated": {"const": false},
+    "configuration": {"type": "object", "required": ["block_size", "draft_candidate_positions", "captured_top_k_minimum", "batch_size", "temperature", "score_semantics", "top_ms", "node_budgets", "survival_budget_cap", "policies", "root_included_in_node_budget"]},
+    "classification_priority": {"type": "array", "minItems": 8, "maxItems": 8},
+    "classification_rules": {"type": "object"},
+    "target_information_usage": {"type": "object"},
+    "signal_semantics": {"type": "object"},
+    "decision_rules": {"type": "object"},
+    "decision": {"enum": ["continue_dependency_refinement", "prioritize_candidate_generation", "prioritize_selector", "mixed_problem", "insufficient_evidence"]},
+    "framework_modules_loaded": {
+      "type": "object",
+      "required": ["torch", "transformers", "datasets"],
+      "properties": {"torch": {"const": false}, "transformers": {"const": false}, "datasets": {"const": false}}
+    },
+    "formal_timing_contaminated": {"const": false},
+    "instrumented_custom_code_modified": {"const": false},
+    "materialization_required": {"const": false},
+    "event_count": {"type": "integer", "minimum": 1},
+    "raw_round_count": {"type": "integer", "minimum": 1},
+    "artifacts": {"type": "array", "minItems": 13, "uniqueItems": true, "items": {"type": "string"}},
+    "forbidden_interpretations": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  }
+}

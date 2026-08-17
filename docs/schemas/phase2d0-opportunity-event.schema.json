@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d0-opportunity-event.schema.json",
+  "title": "Phase 2D.0 round/top-M/node-budget opportunity event",
+  "type": "object",
+  "required": [
+    "schema_version", "task", "sample_id", "nominal_prompt_length",
+    "generation_repeat", "round_index", "top_m", "node_budget",
+    "root_included_in_node_budget", "observed_target_horizon",
+    "baseline_accepted_draft_depth_a0", "critical_depth", "gap_class",
+    "classification_priority", "classification_eligible",
+    "candidate_availability_prefix", "first_unavailable_depth",
+    "target_candidate_ranks_top16", "target_membership_top_m",
+    "best_static_coverage_depth", "oracle_coverage_depth",
+    "oracle_minus_static_coverage", "oracle_required_nodes",
+    "best_static_required_nodes", "target_prefix_score_rank",
+    "target_prefix_score_rank_censored", "static_policy_coverage",
+    "deployable_features_by_position", "interpretation",
+    "actual_online_acceptance_derived", "latency_or_speedup_derived"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "sample_id": {"type": "string", "minLength": 1},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "generation_repeat": {"type": "integer", "minimum": 0},
+    "round_index": {"type": "integer", "minimum": 0},
+    "top_m": {"enum": [2, 4, 8, 16]},
+    "node_budget": {"type": "integer", "minimum": 16},
+    "root_included_in_node_budget": {"const": true},
+    "observed_target_horizon": {"type": "integer", "minimum": 0, "maximum": 15},
+    "baseline_accepted_draft_depth_a0": {"type": "integer", "minimum": 0, "maximum": 15},
+    "critical_depth": {"type": ["integer", "null"], "minimum": 1, "maximum": 15},
+    "gap_class": {
+      "enum": [
+        "right_censored_or_terminal",
+        "no_failure_within_observed_horizon",
+        "candidate_availability_failure",
+        "selection_failure",
+        "budget_failure",
+        "dependency_realization_opportunity",
+        "possible_dependency_opportunity",
+        "unresolved"
+      ]
+    },
+    "classification_priority": {"type": "integer", "minimum": 1, "maximum": 8},
+    "classification_eligible": {"type": "boolean"},
+    "candidate_availability_prefix": {"type": "integer", "minimum": 0, "maximum": 15},
+    "first_unavailable_depth": {"type": ["integer", "null"], "minimum": 1, "maximum": 15},
+    "first_unavailable_target_outside_top16": {"type": ["boolean", "null"]},
+    "first_unavailable_target_rank_lower_bound": {"type": ["integer", "null"], "minimum": 1},
+    "target_candidate_ranks_top16": {"type": "array", "maxItems": 15, "items": {"type": ["integer", "null"], "minimum": 1, "maximum": 16}},
+    "target_membership_top_m": {"type": "array", "maxItems": 15, "items": {"type": "boolean"}},
+    "best_static_coverage_depth": {"type": "integer", "minimum": 0, "maximum": 15},
+    "oracle_coverage_depth": {"type": "integer", "minimum": 0, "maximum": 15},
+    "oracle_minus_static_coverage": {"type": "integer", "minimum": 0},
+    "oracle_required_nodes": {"type": ["integer", "null"], "minimum": 2, "maximum": 16},
+    "best_static_required_nodes": {"type": ["integer", "null"], "minimum": 16},
+    "target_prefix_score_rank": {"type": ["integer", "null"], "minimum": 1},
+    "target_prefix_score_rank_lower_bound": {"type": ["integer", "null"], "minimum": 1},
+    "target_prefix_score_rank_censored": {"type": "boolean"},
+    "static_policy_coverage": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "deployable_features_by_position": {
+      "type": "array",
+      "minItems": 15,
+      "maxItems": 15,
+      "items": {"$ref": "#/$defs/features"}
+    },
+    "interpretation": {"const": "offline_verification_efficiency_proxy_only"},
+    "actual_online_acceptance_derived": {"const": false},
+    "latency_or_speedup_derived": {"const": false}
+  },
+  "$defs": {
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "position_index", "top1_log_probability",
+        "top1_top2_log_probability_margin", "top_m_probability_mass",
+        "top_m_renormalized_entropy", "adjacent_position_confidence_change",
+        "adjacent_position_confidence_change_unavailable_reason",
+        "static_beam_score", "static_beam_score_unavailable_reason",
+        "surviving_prefix_count", "tree_depth", "context_length", "top_m",
+        "node_budget"
+      ],
+      "properties": {
+        "position_index": {"type": "integer", "minimum": 1, "maximum": 15},
+        "top1_log_probability": {"type": "number"},
+        "top1_top2_log_probability_margin": {"type": "number"},
+        "top_m_probability_mass": {"type": "number", "minimum": 0},
+        "top_m_renormalized_entropy": {"type": "number", "minimum": 0},
+        "adjacent_position_confidence_change": {"type": ["number", "null"]},
+        "adjacent_position_confidence_change_unavailable_reason": {"type": ["string", "null"]},
+        "static_beam_score": {"type": ["number", "null"]},
+        "static_beam_score_unavailable_reason": {"type": ["string", "null"]},
+        "surviving_prefix_count": {"type": "integer", "minimum": 0},
+        "tree_depth": {"type": "integer", "minimum": 1, "maximum": 15},
+        "context_length": {"type": "integer", "minimum": 1},
+        "top_m": {"type": "integer", "minimum": 2, "maximum": 16},
+        "node_budget": {"type": "integer", "minimum": 16}
+      }
+    }
+  }
+}

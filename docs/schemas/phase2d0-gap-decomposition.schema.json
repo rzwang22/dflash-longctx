@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d0-gap-decomposition.schema.json",
+  "title": "Phase 2D.0 gap decomposition",
+  "type": "object",
+  "required": [
+    "schema_version", "phase", "gap_class_priority", "event_count",
+    "raw_round_count", "task_context", "task_level", "cross_task_macro",
+    "round_micro_treats_rounds_as_observations",
+    "sample_macro_uses_sample_as_independence_unit",
+    "no_cross_task_extrapolation"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.0"},
+    "gap_class_priority": {"type": "array", "minItems": 8, "maxItems": 8, "uniqueItems": true, "items": {"type": "string"}},
+    "event_count": {"type": "integer", "minimum": 1},
+    "raw_round_count": {"type": "integer", "minimum": 1},
+    "task_context": {"type": "array", "items": {"$ref": "#/$defs/row"}},
+    "task_level": {"type": "array", "items": {"$ref": "#/$defs/row"}},
+    "cross_task_macro": {"type": "array", "items": {"$ref": "#/$defs/row"}},
+    "round_micro_treats_rounds_as_observations": {"const": true},
+    "sample_macro_uses_sample_as_independence_unit": {"const": true},
+    "no_cross_task_extrapolation": {"const": true}
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "required": [
+        "schema_version", "scope", "top_m", "node_budget", "gap_class",
+        "gap_class_round_count", "round_count", "eligible_round_count",
+        "terminal_or_censored_excluded_count", "fraction",
+        "micro_fraction", "macro_fraction"
+      ],
+      "properties": {
+        "schema_version": {"const": "1.0"},
+        "scope": {"enum": ["task_context", "task_micro_and_sample_macro", "cross_task_macro"]},
+        "top_m": {"type": "integer", "minimum": 2, "maximum": 16},
+        "node_budget": {"type": "integer", "minimum": 16},
+        "gap_class": {"type": "string"},
+        "gap_class_round_count": {"type": "integer", "minimum": 0},
+        "round_count": {"type": "integer", "minimum": 1},
+        "eligible_round_count": {"type": "integer", "minimum": 0},
+        "terminal_or_censored_excluded_count": {"type": "integer", "minimum": 0},
+        "fraction": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "micro_fraction": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "macro_fraction": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      }
+    }
+  }
+}
