@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c43-cross-run-evidence.schema.json",
+  "title": "Phase 2C.4.3 cross-run evidence aggregate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "phase", "input_run_count", "group_count",
+    "grouping_key_fields", "input_directories",
+    "single_run_correctness_logic_modified", "instrumented_dflash_modified",
+    "formal_timing_contaminated", "actual_execution_is_semantic_oracle",
+    "dense_replay_controls_are_attribution_only", "groups"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2C.4.3"},
+    "input_run_count": {"type": "integer", "minimum": 1},
+    "group_count": {"type": "integer", "minimum": 1},
+    "grouping_key_fields": {
+      "const": [
+        "sample_id",
+        "nominal_prompt_length",
+        "first_actual_semantic_divergence"
+      ]
+    },
+    "input_directories": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "single_run_correctness_logic_modified": {"const": false},
+    "instrumented_dflash_modified": {"const": false},
+    "formal_timing_contaminated": {"const": false},
+    "actual_execution_is_semantic_oracle": {"const": true},
+    "dense_replay_controls_are_attribution_only": {"const": true},
+    "groups": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/group"}
+    }
+  },
+  "$defs": {
+    "tokenDistribution": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^(null|-?(0|[1-9][0-9]*))$"},
+      "additionalProperties": {"type": "integer", "minimum": 1}
+    },
+    "classificationDistribution": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "enum": [
+          "local_packed_verifier_numerical_divergence",
+          "target_kv_state_drift",
+          "target_hidden_state_drift",
+          "draft_state_or_candidate_drift",
+          "commit_or_root_transition_mismatch",
+          "unresolved_reference_state_divergence"
+        ]
+      },
+      "additionalProperties": {"type": "integer", "minimum": 1}
+    },
+    "classification": {
+      "enum": [
+        "local_packed_verifier_numerical_divergence",
+        "target_kv_state_drift",
+        "target_hidden_state_drift",
+        "draft_state_or_candidate_drift",
+        "commit_or_root_transition_mismatch",
+        "unresolved_reference_state_divergence"
+      ]
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_directory", "sample_id", "nominal_prompt_length",
+        "first_actual_semantic_divergence", "actual_reference_token_id",
+        "actual_tree_token_id", "packed_tree_token_id",
+        "native_replay_token_id", "same_mask_replay_token_id",
+        "math_replay_token_id", "native_matches_actual_reference",
+        "same_mask_matches_actual_reference", "math_matches_actual_reference",
+        "numerical_attribution_supported", "failure_classification",
+        "classification_evidence_complete", "unresolved_reason"
+      ],
+      "properties": {
+        "input_directory": {"type": "string", "minLength": 1},
+        "sample_id": {"type": "string", "minLength": 1},
+        "nominal_prompt_length": {"type": "integer", "minimum": 1},
+        "first_actual_semantic_divergence": {"type": "integer", "minimum": 0},
+        "actual_reference_token_id": {"type": "integer", "minimum": 0},
+        "actual_tree_token_id": {"type": "integer", "minimum": 0},
+        "packed_tree_token_id": {"type": "integer", "minimum": 0},
+        "native_replay_token_id": {"type": ["integer", "null"], "minimum": 0},
+        "same_mask_replay_token_id": {"type": ["integer", "null"], "minimum": 0},
+        "math_replay_token_id": {"type": ["integer", "null"], "minimum": 0},
+        "native_matches_actual_reference": {"type": ["boolean", "null"]},
+        "same_mask_matches_actual_reference": {"type": ["boolean", "null"]},
+        "math_matches_actual_reference": {"type": ["boolean", "null"]},
+        "numerical_attribution_supported": {"type": "boolean"},
+        "failure_classification": {"$ref": "#/$defs/classification"},
+        "classification_evidence_complete": {"type": "boolean"},
+        "unresolved_reason": {"type": ["string", "null"]}
+      }
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sample_id", "nominal_prompt_length",
+        "first_actual_semantic_divergence", "run_count",
+        "actual_reference_token_distribution", "actual_tree_token_distribution",
+        "packed_tree_token_distribution", "native_replay_token_distribution",
+        "same_mask_replay_token_distribution", "math_replay_token_distribution",
+        "actual_reference_stability", "actual_tree_stability",
+        "packed_tree_stability", "stable_actual_reference_tree_divergence",
+        "native_reference_support_count", "native_reference_support_rate",
+        "native_replay_available_count", "same_mask_reference_support_count",
+        "same_mask_reference_support_rate", "same_mask_replay_available_count",
+        "math_reference_support_count", "math_reference_support_rate",
+        "math_replay_available_count", "numerical_control_support_count",
+        "numerical_control_support_rate", "per_run_classification_distribution",
+        "classification_evidence_complete_count",
+        "classification_evidence_completeness_rate",
+        "aggregate_failure_classification", "aggregate_unresolved_reason",
+        "aggregate_evidence_complete", "runs"
+      ],
+      "properties": {
+        "sample_id": {"type": "string", "minLength": 1},
+        "nominal_prompt_length": {"type": "integer", "minimum": 1},
+        "first_actual_semantic_divergence": {"type": "integer", "minimum": 0},
+        "run_count": {"type": "integer", "minimum": 1},
+        "actual_reference_token_distribution": {"$ref": "#/$defs/tokenDistribution"},
+        "actual_tree_token_distribution": {"$ref": "#/$defs/tokenDistribution"},
+        "packed_tree_token_distribution": {"$ref": "#/$defs/tokenDistribution"},
+        "native_replay_token_distribution": {"$ref": "#/$defs/tokenDistribution"},
+        "same_mask_replay_token_distribution": {"$ref": "#/$defs/tokenDistribution"},
+        "math_replay_token_distribution": {"$ref": "#/$defs/tokenDistribution"},
+        "actual_reference_stability": {"type": "boolean"},
+        "actual_tree_stability": {"type": "boolean"},
+        "packed_tree_stability": {"type": "boolean"},
+        "stable_actual_reference_tree_divergence": {"type": "boolean"},
+        "native_reference_support_count": {"type": "integer", "minimum": 0},
+        "native_reference_support_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "native_replay_available_count": {"type": "integer", "minimum": 0},
+        "same_mask_reference_support_count": {"type": "integer", "minimum": 0},
+        "same_mask_reference_support_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "same_mask_replay_available_count": {"type": "integer", "minimum": 0},
+        "math_reference_support_count": {"type": "integer", "minimum": 0},
+        "math_reference_support_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "math_replay_available_count": {"type": "integer", "minimum": 0},
+        "numerical_control_support_count": {"type": "integer", "minimum": 0},
+        "numerical_control_support_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "per_run_classification_distribution": {"$ref": "#/$defs/classificationDistribution"},
+        "classification_evidence_complete_count": {"type": "integer", "minimum": 0},
+        "classification_evidence_completeness_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "aggregate_failure_classification": {"$ref": "#/$defs/classification"},
+        "aggregate_unresolved_reason": {
+          "enum": [
+            "nonreproducible_numerical_control_support",
+            "no_numerical_control_support",
+            "inconsistent_single_run_attribution",
+            "unstable_actual_or_packed_decision_evidence",
+            null
+          ]
+        },
+        "aggregate_evidence_complete": {"type": "boolean"},
+        "runs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/run"}}
+      }
+    }
+  }
+}
