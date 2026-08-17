@@ -1,12 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-reference-state-summary.schema.json",
-  "title": "Phase 2C.4 reference-state summary",
+  "title": "Phase 2C.4.2 reference-state summary",
   "type": "object",
   "required": [
     "schema_version", "status", "case_count", "cases",
     "absolute_generated_prefix_alignment_used", "round_index_alignment_assumed",
-    "formal_timing_contaminated", "target_only_used_as_authoritative_oracle"
+    "formal_timing_contaminated", "target_only_used_as_authoritative_oracle",
+    "actual_execution_is_semantic_oracle",
+    "dense_replay_controls_are_attribution_only"
   ],
   "properties": {
     "schema_version": {"const": "1.0"},
@@ -16,7 +18,9 @@
     "absolute_generated_prefix_alignment_used": {"const": true},
     "round_index_alignment_assumed": {"const": false},
     "formal_timing_contaminated": {"const": false},
-    "target_only_used_as_authoritative_oracle": {"const": false}
+    "target_only_used_as_authoritative_oracle": {"const": false},
+    "actual_execution_is_semantic_oracle": {"const": true},
+    "dense_replay_controls_are_attribution_only": {"const": true}
   },
   "$defs": {
     "case": {
@@ -24,15 +28,22 @@
       "required": [
         "task", "sample_id", "nominal_prompt_length", "actual_prompt_length",
         "configuration_id", "first_output_divergent_generated_token_offset",
+        "first_raw_numerical_state_difference", "first_trusted_state_difference",
+        "first_candidate_capture_inconsistency", "first_actual_semantic_divergence",
         "first_state_divergent_aligned_prefix",
         "first_semantically_consequential_state_divergence", "affected_component",
         "reference_tree_round_mapping", "evidence_completeness",
         "evidence_completeness_issues", "failure_classification",
         "classification_evidence_prefix", "classification_evidence_source",
-        "classification_priority", "unresolved_reason",
-        "downstream_consequence_count", "diagnostic_runs_excluded_from_formal_timing",
+        "classification_priority", "classification_evidence_complete",
+        "classification_evidence_issues", "global_diagnostic_evidence_completeness",
+        "unresolved_reason", "downstream_consequence_count",
+        "segmentation_only_difference_count", "actual_semantic_divergence_prefix",
+        "diagnostic_runs_excluded_from_formal_timing",
         "reference_execution_provenance", "tree_execution_provenance",
-        "full_float32_kv_cpu_copy_created", "tensor_comparison_scope"
+        "full_float32_kv_cpu_copy_created", "tensor_comparison_scope",
+        "actual_execution_is_semantic_oracle",
+        "dense_replay_controls_are_attribution_only"
       ],
       "properties": {
         "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
@@ -41,6 +52,10 @@
         "actual_prompt_length": {"type": "integer", "minimum": 1},
         "configuration_id": {"type": "string", "minLength": 1},
         "first_output_divergent_generated_token_offset": {"type": ["integer", "null"], "minimum": 0},
+        "first_raw_numerical_state_difference": {"type": ["integer", "null"], "minimum": 0},
+        "first_trusted_state_difference": {"type": ["integer", "null"], "minimum": 0},
+        "first_candidate_capture_inconsistency": {"type": ["integer", "null"], "minimum": 0},
+        "first_actual_semantic_divergence": {"type": ["integer", "null"], "minimum": 0},
         "first_state_divergent_aligned_prefix": {"type": ["integer", "null"], "minimum": 0},
         "first_semantically_consequential_state_divergence": {"type": ["integer", "null"], "minimum": 0},
         "affected_component": {"type": ["string", "null"]},
@@ -51,13 +66,20 @@
         "classification_evidence_prefix": {"type": ["integer", "null"], "minimum": 0},
         "classification_evidence_source": {"type": ["string", "null"]},
         "classification_priority": {"type": ["integer", "null"], "minimum": 1, "maximum": 5},
+        "classification_evidence_complete": {"type": "boolean"},
+        "classification_evidence_issues": {"type": "array", "items": {"type": "string"}},
+        "global_diagnostic_evidence_completeness": {"enum": ["complete", "partial"]},
         "unresolved_reason": {"type": ["string", "null"]},
         "downstream_consequence_count": {"type": "integer", "minimum": 0},
+        "segmentation_only_difference_count": {"type": "integer", "minimum": 0},
+        "actual_semantic_divergence_prefix": {"type": ["integer", "null"], "minimum": 0},
         "diagnostic_runs_excluded_from_formal_timing": {"const": true},
         "reference_execution_provenance": {"enum": ["actual_reference_checkpoint", "diagnostic_replay", "not_directly_comparable"]},
         "tree_execution_provenance": {"enum": ["actual_tree_checkpoint", "diagnostic_replay", "not_directly_comparable"]},
         "full_float32_kv_cpu_copy_created": {"const": false},
-        "tensor_comparison_scope": {"const": "bounded_stable_samples"}
+        "tensor_comparison_scope": {"const": "bounded_stable_samples"},
+        "actual_execution_is_semantic_oracle": {"const": true},
+        "dense_replay_controls_are_attribution_only": {"const": true}
       }
     }
   }

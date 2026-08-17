@@ -388,65 +388,211 @@ def _transitions_by_entry(
     return result
 
 
+def normalize_transition_semantic_events(
+    checkpoints: list[dict[str, Any]],
+    *,
+    side: str,
+) -> dict[int, dict[str, Any]]:
+    """Normalize round-local commits into absolute semantic token events.
+
+    Adjacent rounds intentionally describe the same token twice: once as the
+    previous round's next root and once as the next round's committed root.
+    Such duplicate evidence is merged only when the token ID agrees.
+    """
+
+    events: dict[int, dict[str, Any]] = {}
+    for checkpoint in checkpoints:
+        transition = checkpoint.get("commit_transition")
+        if transition is None or transition.get("generated_prefix_before") is None:
+            continue
+        before = int(transition["generated_prefix_before"])
+        round_index = transition.get("round_index")
+        if round_index is None:
+            round_index = _round_index(checkpoint, side)
+        provenance = {
+            "side": side,
+            "checkpoint_provenance": checkpoint.get("checkpoint_provenance"),
+            "execution_path": checkpoint.get("execution_path"),
+            "round_index": int(round_index) if round_index is not None else None,
+            "generated_prefix_before": before,
+        }
+        local_events = [
+            (
+                before + offset,
+                int(token_id),
+                "committed",
+                {**provenance, "committed_token_index": offset},
+            )
+            for offset, token_id in enumerate(
+                transition.get("committed_token_ids") or []
+            )
+        ]
+        next_root = transition.get("next_root_token_id")
+        if next_root is not None:
+            next_root_kind = transition.get("next_root_kind")
+            local_events.append(
+                (
+                    before + len(transition.get("committed_token_ids") or []),
+                    int(next_root),
+                    next_root_kind
+                    if next_root_kind in {"correction", "bonus"}
+                    else "next_root",
+                    {
+                        **provenance,
+                        "next_root_kind": next_root_kind,
+                        "next_root_event": True,
+                    },
+                )
+            )
+        for absolute_offset, token_id, source_kind, source in local_events:
+            current = events.get(absolute_offset)
+            if current is None:
+                events[absolute_offset] = {
+                    "absolute_generated_offset": absolute_offset,
+                    "token_id": token_id,
+                    "source_kind": source_kind,
+                    "source_kinds": [source_kind],
+                    "round_index": source["round_index"],
+                    "provenance": [source],
+                }
+                continue
+            if current["token_id"] != token_id:
+                raise ValueError(
+                    f"{side} transition evidence disagrees at generated offset "
+                    f"{absolute_offset}: {current['token_id']} != {token_id}"
+                )
+            current["provenance"].append(source)
+            if source_kind not in current["source_kinds"]:
+                current["source_kinds"].append(source_kind)
+    return events
+
+
+def _transition_offsets(transition: dict[str, Any] | None) -> set[int]:
+    if transition is None or transition.get("generated_prefix_before") is None:
+        return set()
+    before = int(transition["generated_prefix_before"])
+    committed_count = len(transition.get("committed_token_ids") or [])
+    end = before + committed_count
+    return set(range(before, end + (transition.get("next_root_token_id") is not None)))
+
+
 def _transition_comparison(
     reference: dict[str, Any] | None,
     tree: dict[str, Any] | None,
     *,
     entry_prefix: int,
+    reference_events: dict[int, dict[str, Any]],
+    tree_events: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
-    if reference is None or tree is None:
-        return {
-            "comparable": False,
-            "same_entry_prefix": False,
-            "actual_execution_evidence": False,
-            "alignment_status": "not_directly_comparable",
-            "semantics_equal": None,
-            "selected_path_equal": None,
-            "next_root_equal": None,
-            "actual_mismatch": False,
-            "reference": reference.get("transition") if reference else None,
-            "tree": tree.get("transition") if tree else None,
-        }
-    left = reference["transition"]
-    right = tree["transition"]
-    same_entry = (
-        int(left["generated_prefix_before"])
+    left = reference.get("transition") if reference else None
+    right = tree.get("transition") if tree else None
+    local_offsets = _transition_offsets(left) | _transition_offsets(right)
+    if entry_prefix in reference_events and entry_prefix in tree_events:
+        local_offsets.add(entry_prefix)
+    overlap = sorted(
+        offset
+        for offset in local_offsets
+        if offset in reference_events and offset in tree_events
+    )
+    mismatches = [
+        offset
+        for offset in overlap
+        if reference_events[offset]["token_id"] != tree_events[offset]["token_id"]
+    ]
+    same_entry = bool(
+        left is not None
+        and right is not None
+        and int(left["generated_prefix_before"])
         == int(right["generated_prefix_before"])
         == int(entry_prefix)
     )
-    actual_execution = bool(
-        reference.get("checkpoint_provenance") == "actual_reference_checkpoint"
-        and tree.get("checkpoint_provenance")
-        in {"actual_tree_checkpoint", "diagnostic_replay"}
+    reference_event_actual = any(
+        source.get("checkpoint_provenance") == "actual_reference_checkpoint"
+        for offset in overlap
+        for source in reference_events[offset]["provenance"]
     )
-    selected_path_equal = bool(
+    tree_event_actual = any(
+        source.get("checkpoint_provenance")
+        in {"actual_tree_checkpoint", "diagnostic_replay"}
+        for offset in overlap
+        for source in tree_events[offset]["provenance"]
+    )
+    actual_execution = bool(reference_event_actual and tree_event_actual)
+    selected_path_equal = (
         left.get("accepted_draft_token_count")
         == right.get("accepted_draft_token_count")
         and left.get("committed_token_ids") == right.get("committed_token_ids")
+        if same_entry
+        else None
     )
-    next_root_equal = bool(
-        left.get("next_root_token_id") == right.get("next_root_token_id")
+    left_next_offset = (
+        int(left["generated_prefix_before"])
+        + len(left.get("committed_token_ids") or [])
+        if left is not None and left.get("next_root_token_id") is not None
+        else None
+    )
+    right_next_offset = (
+        int(right["generated_prefix_before"])
+        + len(right.get("committed_token_ids") or [])
+        if right is not None and right.get("next_root_token_id") is not None
+        else None
+    )
+    next_root_equal = (
+        bool(
+            left.get("next_root_token_id") == right.get("next_root_token_id")
+            and left.get("next_root_kind") == right.get("next_root_kind")
+        )
+        if same_entry and left_next_offset == right_next_offset
+        else None
+    )
+    round_segmentation_equal = bool(
+        same_entry
+        and left.get("generated_prefix_after") == right.get("generated_prefix_after")
+        and left.get("accepted_draft_token_count")
+        == right.get("accepted_draft_token_count")
+        and left_next_offset == right_next_offset
         and left.get("next_root_kind") == right.get("next_root_kind")
     )
-    exit_equal = left.get("generated_prefix_after") == right.get(
-        "generated_prefix_after"
+    segmentation_difference = bool(
+        (left is not None or right is not None) and not round_segmentation_equal
     )
-    semantics_equal = bool(selected_path_equal and next_root_equal and exit_equal)
+    overlap_exact = bool(overlap and not mismatches)
+    first_mismatch = mismatches[0] if mismatches else None
     return {
-        "comparable": True,
+        "comparable": bool(overlap),
         "same_entry_prefix": same_entry,
         "actual_execution_evidence": actual_execution,
         "alignment_status": (
-            "same_absolute_entry_prefix"
-            if same_entry
-            else "different_absolute_entry_prefix"
+            "absolute_semantic_event_overlap"
+            if overlap
+            else "not_directly_comparable"
         ),
-        "semantics_equal": semantics_equal if same_entry else None,
-        "selected_path_equal": selected_path_equal if same_entry else None,
-        "next_root_equal": next_root_equal if same_entry else None,
-        "actual_mismatch": bool(
-            same_entry and actual_execution and not semantics_equal
+        "semantics_equal": overlap_exact if overlap else None,
+        "selected_path_equal": selected_path_equal,
+        "next_root_equal": next_root_equal,
+        "actual_mismatch": bool(actual_execution and mismatches),
+        "round_segmentation_equal": round_segmentation_equal,
+        "round_segmentation_difference_observed": segmentation_difference,
+        "transition_overlap_start_offset": overlap[0] if overlap else None,
+        "transition_overlap_end_offset": overlap[-1] if overlap else None,
+        "transition_overlap_token_exact": overlap_exact if overlap else None,
+        "transition_overlap_token_count": len(overlap),
+        "first_transition_semantic_mismatch_offset": first_mismatch,
+        "first_transition_reference_token_id": (
+            reference_events[first_mismatch]["token_id"]
+            if first_mismatch is not None
+            else None
         ),
+        "first_transition_tree_token_id": (
+            tree_events[first_mismatch]["token_id"]
+            if first_mismatch is not None
+            else None
+        ),
+        "segmentation_only_difference": bool(segmentation_difference and overlap_exact),
+        "transition_semantic_mismatch": bool(mismatches),
+        "transition_mismatch_causal": False,
+        "reference_semantic_events": [reference_events[offset] for offset in overlap],
+        "tree_semantic_events": [tree_events[offset] for offset in overlap],
         "reference_execution_provenance": ("actual_original_dflash_commit_transition"),
         "tree_execution_provenance": "actual_tree_diagnostic_execution",
         "reference": left,
@@ -496,6 +642,159 @@ def _probe_fidelity(
     }
 
 
+def _actual_token_evidence(
+    reference_actual_generated_token_ids: list[int] | None,
+    tree_actual_generated_token_ids: list[int] | None,
+    *,
+    generated_prefix_length: int,
+) -> dict[str, Any]:
+    reference_token = (
+        int(reference_actual_generated_token_ids[generated_prefix_length])
+        if reference_actual_generated_token_ids is not None
+        and generated_prefix_length < len(reference_actual_generated_token_ids)
+        else None
+    )
+    tree_token = (
+        int(tree_actual_generated_token_ids[generated_prefix_length])
+        if tree_actual_generated_token_ids is not None
+        and generated_prefix_length < len(tree_actual_generated_token_ids)
+        else None
+    )
+    equal = (
+        reference_token == tree_token
+        if reference_token is not None and tree_token is not None
+        else None
+    )
+    return {
+        "reference_actual_token_id": reference_token,
+        "tree_actual_token_id": tree_token,
+        "actual_token_equal": equal,
+        "actual_token_divergence": equal is False,
+        "actual_reference_tree_token_divergence": equal is False,
+        "actual_token_evidence_provenance": {
+            "reference": "actual_original_dflash_output_token_ids"
+            if reference_token is not None
+            else "not_directly_comparable",
+            "tree": "actual_tree_diagnostic_output_token_ids"
+            if tree_token is not None
+            else "not_directly_comparable",
+        },
+        "actual_decision_oracle_source": "actual_original_dflash_output",
+    }
+
+
+def _relevant_mode_record(
+    records: list[dict[str, Any]], mode: str
+) -> dict[str, Any] | None:
+    return next(
+        (
+            row
+            for row in records
+            if row.get("comparison_mode") == mode
+            and row.get("verifier_decision_relevant") is True
+            and row.get("availability", "available") == "available"
+        ),
+        None,
+    )
+
+
+def _verifier_actual_decision_evidence(
+    records: list[dict[str, Any]],
+    *,
+    reference_actual_token_id: int | None,
+    tree_actual_token_id: int | None,
+) -> dict[str, Any]:
+    native = _relevant_mode_record(records, "native")
+    same_mask = _relevant_mode_record(records, "same_mask")
+    math_record = _relevant_mode_record(records, "math")
+    packed_record = native or same_mask
+    packed_token = (
+        packed_record.get("packed_argmax_token_id") if packed_record else None
+    )
+    packed_token = int(packed_token) if packed_token is not None else None
+
+    def dense_token(record: dict[str, Any] | None) -> int | None:
+        value = record.get("dense_argmax_token_id") if record else None
+        return int(value) if value is not None else None
+
+    native_dense = dense_token(native)
+    same_mask_dense = dense_token(same_mask)
+    math_dense = dense_token(math_record)
+
+    def matches(value: int | None, expected: int | None) -> bool | None:
+        if value is None or expected is None:
+            return None
+        return value == expected
+
+    relevant_records = [
+        row
+        for row in records
+        if row.get("verifier_decision_relevant") is True
+        and row.get("availability", "available") == "available"
+    ]
+    structural_pass = bool(relevant_records) and all(
+        row.get("structural_status") == "pass" for row in relevant_records
+    )
+    supporting_modes = [
+        mode
+        for mode, value in (
+            ("same_mask", same_mask_dense),
+            ("math", math_dense),
+        )
+        if value is not None
+        and reference_actual_token_id is not None
+        and value == reference_actual_token_id
+    ]
+    packed_matches_reference = matches(packed_token, reference_actual_token_id)
+    packed_matches_tree = matches(packed_token, tree_actual_token_id)
+    actual_divergence = bool(
+        reference_actual_token_id is not None
+        and tree_actual_token_id is not None
+        and reference_actual_token_id != tree_actual_token_id
+    )
+    local_numerical = bool(
+        actual_divergence
+        and packed_matches_tree is True
+        and packed_matches_reference is False
+        and structural_pass
+        and supporting_modes
+    )
+    return {
+        "packed_tree_argmax_token_id": packed_token,
+        "packed_tree_argmax_matches_actual_reference": packed_matches_reference,
+        "packed_tree_argmax_matches_actual_tree": packed_matches_tree,
+        "packed_tree_verifier_decision_relevant": packed_record is not None,
+        "packed_tree_structural_evidence_passed": structural_pass,
+        "native_dense_replay_token_id": native_dense,
+        "native_dense_replay_matches_actual_reference": matches(
+            native_dense, reference_actual_token_id
+        ),
+        "same_mask_replay_token_id": same_mask_dense,
+        "same_mask_replay_matches_actual_reference": matches(
+            same_mask_dense, reference_actual_token_id
+        ),
+        "math_replay_token_id": math_dense,
+        "math_replay_matches_actual_reference": matches(
+            math_dense, reference_actual_token_id
+        ),
+        "dense_replay_control_only": True,
+        "actual_decision_oracle_source": "actual_original_dflash_output",
+        "supporting_numerical_control_modes": supporting_modes,
+        "local_packed_verifier_numerical_divergence_supported": local_numerical,
+    }
+
+
+def _first_actual_token_divergence(
+    reference: list[int] | None, tree: list[int] | None
+) -> int | None:
+    if reference is None or tree is None:
+        return None
+    for offset, (left, right) in enumerate(zip(reference, tree)):
+        if int(left) != int(right):
+            return offset
+    return min(len(reference), len(tree)) if len(reference) != len(tree) else None
+
+
 def compare_reference_tree_checkpoints(
     *,
     reference_checkpoints: list[dict[str, Any]],
@@ -521,6 +820,12 @@ def compare_reference_tree_checkpoints(
     packed_verifier_evidence = packed_verifier_evidence or {}
     reference_transitions = _transitions_by_entry(reference_checkpoints)
     tree_transitions = _transitions_by_entry(tree_checkpoints)
+    reference_transition_events = normalize_transition_semantic_events(
+        reference_checkpoints, side="reference"
+    )
+    tree_transition_events = normalize_transition_semantic_events(
+        tree_checkpoints, side="tree"
+    )
     rows = []
     layer_rows = []
     for prefix in prefixes:
@@ -558,7 +863,7 @@ def compare_reference_tree_checkpoints(
             tree_checkpoint=tree,
         )
         verifier = packed_verifier_evidence.get(prefix, [])
-        native_online_verifier_flip = any(
+        native_dense_replay_control_flip = any(
             row.get("verifier_decision_relevant")
             and row.get("argmax_equal") is False
             and row.get("comparison_mode") == "native"
@@ -576,10 +881,22 @@ def compare_reference_tree_checkpoints(
             and row.get("comparison_mode") == "math"
             for row in verifier
         )
+        actual_tokens = _actual_token_evidence(
+            reference_actual_generated_token_ids,
+            tree_actual_generated_token_ids,
+            generated_prefix_length=prefix,
+        )
+        actual_verifier = _verifier_actual_decision_evidence(
+            verifier,
+            reference_actual_token_id=actual_tokens["reference_actual_token_id"],
+            tree_actual_token_id=actual_tokens["tree_actual_token_id"],
+        )
         transition = _transition_comparison(
             reference_transitions.get(prefix),
             tree_transitions.get(prefix),
             entry_prefix=prefix,
+            reference_events=reference_transition_events,
+            tree_events=tree_transition_events,
         )
         probe_fidelity = {
             **_probe_fidelity(
@@ -628,18 +945,25 @@ def compare_reference_tree_checkpoints(
         )
         proposal_selected_path_drift = bool(
             draft.get("actual_proposal_top1_drift")
-            and transition["actual_mismatch"]
-            and (
-                transition["selected_path_equal"] is False
-                or transition["next_root_equal"] is False
-            )
+            and transition["transition_semantic_mismatch"]
         )
-        semantic_consequence = bool(
-            native_online_verifier_flip
-            or transition["actual_mismatch"]
-            or faithful_probe_decision_divergence
-            or proposal_selected_path_drift
+        transition["transition_mismatch_causal"] = bool(
+            transition["actual_mismatch"]
+            and transition["first_transition_semantic_mismatch_offset"] == prefix
+            and actual_tokens["actual_token_divergence"]
+            and actual_verifier["packed_tree_verifier_decision_relevant"]
+            and actual_verifier["packed_tree_structural_evidence_passed"]
+            and actual_verifier[
+                "packed_tree_argmax_matches_actual_reference"
+            ]
+            is True
+            and actual_verifier["packed_tree_argmax_matches_actual_tree"] is False
+            and not actual_verifier[
+                "local_packed_verifier_numerical_divergence_supported"
+            ]
+            and not proposal_selected_path_drift
         )
+        semantic_consequence = bool(actual_tokens["actual_token_divergence"])
         rows.append(
             {
                 "generated_prefix_length": prefix,
@@ -670,17 +994,23 @@ def compare_reference_tree_checkpoints(
                 "draft_state": draft,
                 "semantic_probe": semantic_probe,
                 **probe_fidelity,
+                **actual_tokens,
                 "faithful_probe_decision_divergence": (
                     faithful_probe_decision_divergence
                 ),
                 "packed_verifier_evidence": verifier,
+                **actual_verifier,
                 "shadow_native_canonical_decision": tree.get("shadow_decision")
                 if tree
                 else None,
-                "native_online_verifier_flip": native_online_verifier_flip,
+                "native_dense_replay_control_flip": (
+                    native_dense_replay_control_flip
+                ),
                 "same_mask_control_flip": same_mask_control_flip,
                 "math_control_flip": math_control_flip,
-                "local_packed_verifier_decision_flip": (native_online_verifier_flip),
+                "local_packed_verifier_decision_flip": actual_verifier[
+                    "local_packed_verifier_numerical_divergence_supported"
+                ],
                 "commit_transition_comparable": transition["comparable"],
                 "commit_transition_same_entry_prefix": transition["same_entry_prefix"],
                 "commit_transition_actual_execution_evidence": transition[
@@ -690,6 +1020,48 @@ def compare_reference_tree_checkpoints(
                 "commit_transition_semantics_equal": transition["semantics_equal"],
                 "commit_selected_path_equal": transition["selected_path_equal"],
                 "commit_next_root_equal": transition["next_root_equal"],
+                "round_segmentation_equal": transition[
+                    "round_segmentation_equal"
+                ],
+                "round_segmentation_difference_observed": transition[
+                    "round_segmentation_difference_observed"
+                ],
+                "transition_overlap_start_offset": transition[
+                    "transition_overlap_start_offset"
+                ],
+                "transition_overlap_end_offset": transition[
+                    "transition_overlap_end_offset"
+                ],
+                "transition_overlap_token_exact": transition[
+                    "transition_overlap_token_exact"
+                ],
+                "transition_overlap_token_count": transition[
+                    "transition_overlap_token_count"
+                ],
+                "first_transition_semantic_mismatch_offset": transition[
+                    "first_transition_semantic_mismatch_offset"
+                ],
+                "first_transition_reference_token_id": transition[
+                    "first_transition_reference_token_id"
+                ],
+                "first_transition_tree_token_id": transition[
+                    "first_transition_tree_token_id"
+                ],
+                "segmentation_only_difference": transition[
+                    "segmentation_only_difference"
+                ],
+                "transition_semantic_mismatch": transition[
+                    "transition_semantic_mismatch"
+                ],
+                "transition_mismatch_causal": transition[
+                    "transition_mismatch_causal"
+                ],
+                "reference_transition_semantic_events": transition[
+                    "reference_semantic_events"
+                ],
+                "tree_transition_semantic_events": transition[
+                    "tree_semantic_events"
+                ],
                 "reference_commit_transition": transition["reference"],
                 "tree_commit_transition": transition["tree"],
                 "numerical_state_difference_observed": numerical_state_difference,
@@ -723,7 +1095,9 @@ def compare_reference_tree_checkpoints(
                     transition["actual_mismatch"]
                     and (
                         proposal_selected_path_drift
-                        or native_online_verifier_flip
+                        or actual_verifier[
+                            "local_packed_verifier_numerical_divergence_supported"
+                        ]
                         or faithful_probe_decision_divergence
                     )
                 ),
@@ -732,19 +1106,56 @@ def compare_reference_tree_checkpoints(
         layer_rows.extend(target_layers)
         layer_rows.extend(draft_layers)
 
-    first_state = next(
+    proposal_cause_prefixes = [
+        row["generated_prefix_length"]
+        for row in rows
+        if row["proposal_selected_path_drift"]
+    ]
+    for row in rows:
+        mismatch_offset = row["first_transition_semantic_mismatch_offset"]
+        if row["transition_mismatch_causal"] and any(
+            proposal_prefix <= mismatch_offset
+            for proposal_prefix in proposal_cause_prefixes
+            if mismatch_offset is not None
+        ):
+            row["transition_mismatch_causal"] = False
+
+    first_raw_numerical = next(
         (
             row
             for row in rows
             if row["structural_state_difference_observed"]
             or row["numerical_state_difference_observed"]
-            or row["draft_candidate_difference_observed"]
-            or row["native_online_verifier_flip"]
+        ),
+        None,
+    )
+    first_trusted_state = next(
+        (
+            row
+            for row in rows
+            if row["structural_state_difference_observed"]
+            or row["numerical_state_difference_observed"]
+            or (
+                row["proposal_top1_semantically_aligned"] is True
+                and row["actual_proposal_top1_drift"]
+            )
+        ),
+        None,
+    )
+    first_candidate_inconsistency = next(
+        (
+            row
+            for row in rows
+            if row["candidate_alignment_status"]
+            == "candidate_capture_alignment_inconsistent"
         ),
         None,
     )
     first_consequential = next(
         (row for row in rows if row["semantic_consequence_observed"]), None
+    )
+    first_actual_divergence = _first_actual_token_divergence(
+        reference_actual_generated_token_ids, tree_actual_generated_token_ids
     )
     classification = classify_reference_state_divergence(
         rows=rows,
@@ -760,6 +1171,12 @@ def compare_reference_tree_checkpoints(
                     "classification_evidence_source"
                 ],
                 "classification_priority": classification["classification_priority"],
+                "classification_evidence_complete": classification[
+                    "classification_evidence_complete"
+                ],
+                "classification_evidence_issues": classification[
+                    "classification_evidence_issues"
+                ],
                 "unresolved_reason": classification["unresolved_reason"],
             }
         )
@@ -791,13 +1208,33 @@ def compare_reference_tree_checkpoints(
         evidence_issues.append("candidate_capture_alignment_inconsistent")
     if any(row["reference_probe_faithful"] is False for row in rows):
         evidence_issues.append("unfaithful_reference_decision_probe")
+    if first_actual_divergence != first_output_divergent_offset:
+        evidence_issues.append("formal_vs_diagnostic_actual_divergence_offset_mismatch")
     evidence_complete = not evidence_issues
     summary = {
         "first_output_divergent_generated_token_offset": (
             first_output_divergent_offset
         ),
-        "first_state_divergent_aligned_prefix": first_state["generated_prefix_length"]
-        if first_state
+        "first_raw_numerical_state_difference": first_raw_numerical[
+            "generated_prefix_length"
+        ]
+        if first_raw_numerical
+        else None,
+        "first_trusted_state_difference": first_trusted_state[
+            "generated_prefix_length"
+        ]
+        if first_trusted_state
+        else None,
+        "first_candidate_capture_inconsistency": first_candidate_inconsistency[
+            "generated_prefix_length"
+        ]
+        if first_candidate_inconsistency
+        else None,
+        "first_actual_semantic_divergence": first_actual_divergence,
+        "first_state_divergent_aligned_prefix": first_trusted_state[
+            "generated_prefix_length"
+        ]
+        if first_trusted_state
         else None,
         "first_semantically_consequential_state_divergence": first_consequential[
             "generated_prefix_length"
@@ -818,6 +1255,9 @@ def compare_reference_tree_checkpoints(
         ),
         "evidence_completeness": "complete" if evidence_complete else "partial",
         "evidence_completeness_issues": evidence_issues,
+        "global_diagnostic_evidence_completeness": (
+            "complete" if evidence_complete else "partial"
+        ),
         "failure_classification": classification["failure_classification"],
         "classification_evidence_prefix": classification[
             "classification_evidence_prefix"
@@ -826,6 +1266,12 @@ def compare_reference_tree_checkpoints(
             "classification_evidence_source"
         ],
         "classification_priority": classification["classification_priority"],
+        "classification_evidence_complete": classification[
+            "classification_evidence_complete"
+        ],
+        "classification_evidence_issues": classification[
+            "classification_evidence_issues"
+        ],
         "unresolved_reason": classification["unresolved_reason"],
         "downstream_consequence_count": sum(
             bool(row["downstream_consequence_only"]) for row in rows
@@ -833,10 +1279,16 @@ def compare_reference_tree_checkpoints(
         "numerical_variation_only_prefix_count": sum(
             bool(row["mere_numerical_variation_only"]) for row in rows
         ),
+        "segmentation_only_difference_count": sum(
+            bool(row["segmentation_only_difference"]) for row in rows
+        ),
+        "actual_semantic_divergence_prefix": first_actual_divergence,
         "aligned_checkpoint_count": len(directly_aligned),
         "requested_checkpoint_count": len(all_expected),
         "absolute_generated_prefix_alignment_used": True,
         "target_only_used_as_authoritative_oracle": False,
+        "actual_execution_is_semantic_oracle": True,
+        "dense_replay_controls_are_attribution_only": True,
     }
     return {"rows": rows, "layer_rows": layer_rows, "summary": summary}
 
@@ -847,43 +1299,38 @@ def classify_reference_state_divergence(
     """Classify only semantically consequential evidence, never raw drift alone."""
 
     if first_output_divergent_offset is None:
-        return _classification_result(None, None, None, None, None)
+        return _classification_result(
+            None, None, None, None, None, evidence_complete=True
+        )
 
-    native = next((row for row in rows if row["native_online_verifier_flip"]), None)
-    if native is not None:
+    local_numerical = next(
+        (
+            row
+            for row in rows
+            if row["local_packed_verifier_numerical_divergence_supported"]
+            and row["actual_token_divergence"]
+        ),
+        None,
+    )
+    if local_numerical is not None:
         return _classification_result(
             "local_packed_verifier_numerical_divergence",
             "target_verifier",
-            native["generated_prefix_length"],
-            "actual_native_online_verifier_argmax_flip",
+            local_numerical["generated_prefix_length"],
+            "actual_reference_vs_packed_tree_decision_with_numerical_controls",
             1,
+            evidence_complete=True,
         )
 
-    actual_semantic_prefixes = [
-        row["generated_prefix_length"]
-        for row in rows
-        if row["faithful_probe_decision_divergence"]
-        or row["proposal_selected_path_drift"]
-    ]
     for row in rows:
-        transition_is_first = not any(
-            prefix <= row["generated_prefix_length"]
-            for prefix in actual_semantic_prefixes
-        )
-        transition_explained_by_proposal = row["proposal_selected_path_drift"]
-        if (
-            row["commit_transition_semantics_equal"] is False
-            and row["commit_transition_same_entry_prefix"]
-            and row["commit_transition_actual_execution_evidence"]
-            and transition_is_first
-            and not transition_explained_by_proposal
-        ):
+        if row["transition_mismatch_causal"]:
             return _classification_result(
                 "commit_or_root_transition_mismatch",
                 "root_or_commit_transition",
-                row["generated_prefix_length"],
-                "actual_same_entry_commit_transition",
+                row["first_transition_semantic_mismatch_offset"],
+                "absolute_semantic_transition_token_mismatch",
                 2,
+                evidence_complete=True,
             )
 
     for row in rows:
@@ -905,6 +1352,7 @@ def classify_reference_state_divergence(
                 row["generated_prefix_length"],
                 "faithful_actual_target_decision_after_target_kv_drift",
                 3,
+                evidence_complete=True,
             )
         if any(
             candidate["target_hidden"].get("numerically_equal") is False
@@ -920,6 +1368,7 @@ def classify_reference_state_divergence(
                 row["generated_prefix_length"],
                 "faithful_actual_target_decision_after_target_hidden_drift",
                 3,
+                evidence_complete=True,
             )
 
     proposal = next((row for row in rows if row["proposal_selected_path_drift"]), None)
@@ -930,23 +1379,35 @@ def classify_reference_state_divergence(
             proposal["generated_prefix_length"],
             "aligned_actual_proposal_drift_changed_selected_path",
             4,
+            evidence_complete=True,
         )
 
+    issues = []
+    divergence_row = next(
+        (row for row in rows if row["actual_token_divergence"]), None
+    )
+    if divergence_row is None:
+        issues.append("missing_actual_divergence_checkpoint")
+    elif not divergence_row["packed_tree_verifier_decision_relevant"]:
+        issues.append("missing_packed_verifier_absolute_position_evidence")
+    elif not divergence_row["supporting_numerical_control_modes"]:
+        issues.append("inconclusive_numerical_replay_controls")
     if any(row["reference_probe_faithful"] is False for row in rows):
         reason = "unfaithful_reference_decision_probe"
+        issues.append(reason)
     elif any(
         row["candidate_alignment_status"] == "candidate_capture_alignment_inconsistent"
         for row in rows
     ):
         reason = "candidate_capture_alignment_inconsistent"
-    elif any(row["same_mask_control_flip"] for row in rows) and not any(
-        row["native_online_verifier_flip"] for row in rows
-    ):
-        reason = "counterfactual_same_mask_control_only"
+        issues.append(reason)
+    elif any(row["same_mask_control_flip"] for row in rows):
+        reason = "same_mask_replay_control_only"
     elif any(row["math_control_flip"] for row in rows):
-        reason = "counterfactual_math_control_only"
+        reason = "math_replay_control_only"
     else:
         reason = "no_faithful_actual_semantic_cause_observed"
+    issues = list(dict.fromkeys(issues))
     return _classification_result(
         "unresolved_reference_state_divergence",
         None,
@@ -954,6 +1415,8 @@ def classify_reference_state_divergence(
         "insufficient_actual_causal_evidence",
         5,
         unresolved_reason=reason,
+        evidence_complete=False,
+        evidence_issues=issues,
     )
 
 
@@ -965,6 +1428,8 @@ def _classification_result(
     priority: int | None,
     *,
     unresolved_reason: str | None = None,
+    evidence_complete: bool,
+    evidence_issues: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "failure_classification": failure_classification,
@@ -972,6 +1437,8 @@ def _classification_result(
         "classification_evidence_prefix": evidence_prefix,
         "classification_evidence_source": evidence_source,
         "classification_priority": priority,
+        "classification_evidence_complete": evidence_complete,
+        "classification_evidence_issues": list(evidence_issues or []),
         "unresolved_reason": unresolved_reason,
     }
 
@@ -1009,6 +1476,19 @@ def verifier_evidence_by_prefix(
                 "semantic_status": record.get("semantic_status"),
                 "argmax_equal": record.get("argmax_equal"),
                 "verifier_decision_relevant": record.get("verifier_decision_relevant"),
+                "flattened_node_index": record.get("flattened_node_index"),
+                "node_depth": depth,
+                "root_to_node_token_ids": record.get("root_to_node_token_ids"),
+                "predicted_token_semantic_position": predicted_position,
+                "verifier_decision_kind": record.get("verifier_decision_kind"),
+                "verifier_selected_child_node_index": record.get(
+                    "verifier_selected_child_node_index"
+                ),
+                "selected_token_id": record.get("selected_token_id"),
+                "packed_argmax_token_id": record.get("packed_argmax_token_id"),
+                "dense_argmax_token_id": record.get("dense_argmax_token_id"),
+                "packed_top8_token_ids": record.get("packed_top8_token_ids"),
+                "dense_top8_token_ids": record.get("dense_top8_token_ids"),
                 "max_abs_error": record.get("max_abs_error"),
                 "mean_abs_error": record.get("mean_abs_error"),
                 "p99_abs_error": record.get("p99_abs_error"),

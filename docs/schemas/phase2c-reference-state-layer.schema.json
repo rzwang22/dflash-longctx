@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-reference-state-layer.schema.json",
-  "title": "Phase 2C.4 layer-wise bounded state differential",
+  "title": "Phase 2C.4.2 layer-wise bounded state differential",
   "type": "object",
   "required": [
     "schema_version", "task", "sample_id", "nominal_prompt_length",

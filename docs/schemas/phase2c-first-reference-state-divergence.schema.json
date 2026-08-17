@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2c-first-reference-state-divergence.schema.json",
-  "title": "Phase 2C.4 first consequential state divergence inventory",
+  "title": "Phase 2C.4.2 first consequential state divergence inventory",
   "type": "object",
   "required": ["schema_version", "status", "cases"],
   "properties": {
@@ -14,12 +14,17 @@
         "required": [
           "task", "sample_id", "nominal_prompt_length", "actual_prompt_length",
           "configuration_id", "first_output_divergent_generated_token_offset",
+          "first_raw_numerical_state_difference", "first_trusted_state_difference",
+          "first_candidate_capture_inconsistency", "first_actual_semantic_divergence",
           "first_state_divergent_aligned_prefix",
           "first_semantically_consequential_state_divergence", "affected_component",
           "reference_tree_round_mapping", "evidence_completeness",
           "failure_classification", "classification_evidence_prefix",
           "classification_evidence_source", "classification_priority",
-          "unresolved_reason", "downstream_consequence_count"
+          "classification_evidence_complete", "classification_evidence_issues",
+          "global_diagnostic_evidence_completeness", "unresolved_reason",
+          "downstream_consequence_count", "segmentation_only_difference_count",
+          "actual_semantic_divergence_prefix"
         ],
         "properties": {
           "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
@@ -28,6 +33,10 @@
           "actual_prompt_length": {"type": "integer", "minimum": 1},
           "configuration_id": {"type": "string", "minLength": 1},
           "first_output_divergent_generated_token_offset": {"type": ["integer", "null"], "minimum": 0},
+          "first_raw_numerical_state_difference": {"type": ["integer", "null"], "minimum": 0},
+          "first_trusted_state_difference": {"type": ["integer", "null"], "minimum": 0},
+          "first_candidate_capture_inconsistency": {"type": ["integer", "null"], "minimum": 0},
+          "first_actual_semantic_divergence": {"type": ["integer", "null"], "minimum": 0},
           "first_state_divergent_aligned_prefix": {"type": ["integer", "null"], "minimum": 0},
           "first_semantically_consequential_state_divergence": {"type": ["integer", "null"], "minimum": 0},
           "affected_component": {"type": ["string", "null"]},
@@ -37,8 +46,13 @@
           "classification_evidence_prefix": {"type": ["integer", "null"], "minimum": 0},
           "classification_evidence_source": {"type": ["string", "null"]},
           "classification_priority": {"type": ["integer", "null"], "minimum": 1, "maximum": 5},
+          "classification_evidence_complete": {"type": "boolean"},
+          "classification_evidence_issues": {"type": "array", "items": {"type": "string"}},
+          "global_diagnostic_evidence_completeness": {"enum": ["complete", "partial"]},
           "unresolved_reason": {"type": ["string", "null"]},
-          "downstream_consequence_count": {"type": "integer", "minimum": 0}
+          "downstream_consequence_count": {"type": "integer", "minimum": 0},
+          "segmentation_only_difference_count": {"type": "integer", "minimum": 0},
+          "actual_semantic_divergence_prefix": {"type": ["integer", "null"], "minimum": 0}
         }
       }
     }

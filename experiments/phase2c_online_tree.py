@@ -234,14 +234,41 @@ REFERENCE_STATE_CSV_FIELDS = (
     "tree_probe_argmax_token_id",
     "tree_probe_faithful",
     "tree_probe_fidelity_status",
-    "native_online_verifier_flip",
+    "actual_token_equal",
+    "actual_token_divergence",
+    "actual_decision_oracle_source",
+    "packed_tree_argmax_token_id",
+    "packed_tree_argmax_matches_actual_reference",
+    "packed_tree_argmax_matches_actual_tree",
+    "native_dense_replay_token_id",
+    "native_dense_replay_matches_actual_reference",
+    "same_mask_replay_token_id",
+    "same_mask_replay_matches_actual_reference",
+    "math_replay_token_id",
+    "math_replay_matches_actual_reference",
+    "dense_replay_control_only",
+    "native_dense_replay_control_flip",
     "same_mask_control_flip",
     "math_control_flip",
     "local_packed_verifier_decision_flip",
     "commit_transition_semantics_equal",
+    "round_segmentation_equal",
+    "round_segmentation_difference_observed",
+    "transition_overlap_start_offset",
+    "transition_overlap_end_offset",
+    "transition_overlap_token_exact",
+    "transition_overlap_token_count",
+    "first_transition_semantic_mismatch_offset",
+    "first_transition_reference_token_id",
+    "first_transition_tree_token_id",
+    "segmentation_only_difference",
+    "transition_semantic_mismatch",
+    "transition_mismatch_causal",
     "classification_evidence_prefix",
     "classification_evidence_source",
     "classification_priority",
+    "classification_evidence_complete",
+    "classification_evidence_issues",
     "downstream_consequence_only",
     "unresolved_reason",
     "mere_numerical_variation_only",
@@ -426,22 +453,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.enable_reference_state_diagnostics:
         if args.decision_stabilization != "shadow":
             raise ValueError(
-                "Phase 2C.4.1 reference-state diagnostics require shadow mode"
+                "Phase 2C.4.2 reference-state diagnostics require shadow mode"
             )
         if not args.enable_gold_checks:
             raise ValueError(
-                "Phase 2C.4.1 reference-state diagnostics require gold checks"
+                "Phase 2C.4.2 reference-state diagnostics require gold checks"
             )
         required_modes = {"native", "same_mask", "math"}
         missing_modes = required_modes - set(args.gold_comparison_modes)
         if missing_modes:
             raise ValueError(
-                "Phase 2C.4.1 requires gold comparison modes native, same_mask, "
+                "Phase 2C.4.2 requires gold comparison modes native, same_mask, "
                 f"and math; missing {sorted(missing_modes)}"
             )
         if any(config["tree_policy"] != "layerwise_beam" for config in configurations):
             raise ValueError(
-                "Phase 2C.4.1 reference-state diagnostics require layerwise_beam"
+                "Phase 2C.4.2 reference-state diagnostics require layerwise_beam"
             )
     return args
 
@@ -451,7 +478,7 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
         **phase1b_configuration(args),
         "phase": "2C",
         "phase_detail": (
-            "2C.4.1" if args.enable_reference_state_diagnostics else "2C.3"
+            "2C.4.2" if args.enable_reference_state_diagnostics else "2C.3"
         ),
         "mode": "online_bounded_marginal_tree",
         "sample_id": args.sample_id,
@@ -851,6 +878,8 @@ def _run_reference_state_differential(
             "tree_execution_provenance": "diagnostic_replay",
             "full_float32_kv_cpu_copy_created": False,
             "tensor_comparison_scope": "bounded_stable_samples",
+            "actual_execution_is_semantic_oracle": True,
+            "dense_replay_controls_are_attribution_only": True,
         }
     )
     if not (reference_replay_stable and tree_replay_stable):
@@ -867,6 +896,10 @@ def _run_reference_state_differential(
             "diagnostic_execution_output_instability"
         )
         comparison["summary"]["classification_priority"] = 5
+        comparison["summary"]["classification_evidence_complete"] = False
+        comparison["summary"]["classification_evidence_issues"] = [
+            "diagnostic_execution_output_instability"
+        ]
         comparison["summary"]["unresolved_reason"] = (
             "diagnostic_execution_output_instability"
         )
@@ -2196,6 +2229,8 @@ def persist_reference_state_artifacts(
         "round_index_alignment_assumed": False,
         "formal_timing_contaminated": False,
         "target_only_used_as_authoritative_oracle": False,
+        "actual_execution_is_semantic_oracle": True,
+        "dense_replay_controls_are_attribution_only": True,
     }
     first = {
         "schema_version": SCHEMA_VERSION,
@@ -2210,6 +2245,10 @@ def persist_reference_state_artifacts(
                     "actual_prompt_length",
                     "configuration_id",
                     "first_output_divergent_generated_token_offset",
+                    "first_raw_numerical_state_difference",
+                    "first_trusted_state_difference",
+                    "first_candidate_capture_inconsistency",
+                    "first_actual_semantic_divergence",
                     "first_state_divergent_aligned_prefix",
                     "first_semantically_consequential_state_divergence",
                     "affected_component",
@@ -2219,8 +2258,13 @@ def persist_reference_state_artifacts(
                     "classification_evidence_prefix",
                     "classification_evidence_source",
                     "classification_priority",
+                    "classification_evidence_complete",
+                    "classification_evidence_issues",
+                    "global_diagnostic_evidence_completeness",
                     "unresolved_reason",
                     "downstream_consequence_count",
+                    "segmentation_only_difference_count",
+                    "actual_semantic_divergence_prefix",
                 )
             }
             for case in cases
