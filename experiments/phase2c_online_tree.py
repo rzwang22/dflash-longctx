@@ -218,10 +218,32 @@ REFERENCE_STATE_CSV_FIELDS = (
     "target_hidden_max_abs_error",
     "draft_top1_candidates_equal",
     "draft_topk_candidates_equal",
+    "candidate_alignment_status",
+    "candidate_alignment_reason",
+    "proposal_top1_semantically_aligned",
+    "reference_actual_proposal_token_ids",
+    "reference_candidate_top1_token_ids",
+    "tree_candidate_top1_token_ids",
     "semantic_probe_argmax_equal",
     "semantic_probe_top8_ordered_equal",
+    "reference_actual_token_id",
+    "reference_probe_argmax_token_id",
+    "reference_probe_faithful",
+    "reference_probe_fidelity_status",
+    "tree_actual_token_id",
+    "tree_probe_argmax_token_id",
+    "tree_probe_faithful",
+    "tree_probe_fidelity_status",
+    "native_online_verifier_flip",
+    "same_mask_control_flip",
+    "math_control_flip",
     "local_packed_verifier_decision_flip",
     "commit_transition_semantics_equal",
+    "classification_evidence_prefix",
+    "classification_evidence_source",
+    "classification_priority",
+    "downstream_consequence_only",
+    "unresolved_reason",
     "mere_numerical_variation_only",
     "semantic_consequence_observed",
 )
@@ -404,22 +426,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.enable_reference_state_diagnostics:
         if args.decision_stabilization != "shadow":
             raise ValueError(
-                "Phase 2C.4 reference-state diagnostics require shadow mode"
+                "Phase 2C.4.1 reference-state diagnostics require shadow mode"
             )
         if not args.enable_gold_checks:
             raise ValueError(
-                "Phase 2C.4 reference-state diagnostics require gold checks"
+                "Phase 2C.4.1 reference-state diagnostics require gold checks"
             )
         required_modes = {"native", "same_mask", "math"}
         missing_modes = required_modes - set(args.gold_comparison_modes)
         if missing_modes:
             raise ValueError(
-                "Phase 2C.4 requires gold comparison modes native, same_mask, "
+                "Phase 2C.4.1 requires gold comparison modes native, same_mask, "
                 f"and math; missing {sorted(missing_modes)}"
             )
         if any(config["tree_policy"] != "layerwise_beam" for config in configurations):
             raise ValueError(
-                "Phase 2C.4 reference-state diagnostics require layerwise_beam"
+                "Phase 2C.4.1 reference-state diagnostics require layerwise_beam"
             )
     return args
 
@@ -429,7 +451,7 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
         **phase1b_configuration(args),
         "phase": "2C",
         "phase_detail": (
-            "2C.4" if args.enable_reference_state_diagnostics else "2C.3"
+            "2C.4.1" if args.enable_reference_state_diagnostics else "2C.3"
         ),
         "mode": "online_bounded_marginal_tree",
         "sample_id": args.sample_id,
@@ -735,15 +757,7 @@ def _run_reference_state_differential(
         return {"rows": [], "layer_rows": [], "summary": None}
 
     prompt_length = int(input_ids.shape[1])
-    maximum_prefix = (
-        int(first_output_divergent_offset)
-        if first_output_divergent_offset is not None
-        else min(
-            int(reference_ids.shape[1]) - prompt_length,
-            int(tree_ids.shape[1]) - prompt_length,
-        )
-    )
-    requested_prefixes = list(range(maximum_prefix + 1))
+    requested_prefixes = list(range(args.max_new_tokens + 1))
     tree_state_ids, tree_state_diagnostics, _, _ = _call_generation(
         torch_module=torch_module,
         draft=draft,
@@ -801,6 +815,14 @@ def _run_reference_state_differential(
             gold_records=gold_logits,
             prompt_length=prompt_length,
         ),
+        reference_actual_generated_token_ids=[
+            int(value)
+            for value in reference_ids[0, prompt_length:].detach().cpu().tolist()
+        ],
+        tree_actual_generated_token_ids=[
+            int(value)
+            for value in tree_state_ids[0, prompt_length:].detach().cpu().tolist()
+        ],
     )
     common = {
         "schema_version": SCHEMA_VERSION,
@@ -833,10 +855,21 @@ def _run_reference_state_differential(
     )
     if not (reference_replay_stable and tree_replay_stable):
         comparison["summary"]["evidence_completeness"] = "partial"
+        comparison["summary"].setdefault("evidence_completeness_issues", []).append(
+            "diagnostic_execution_output_instability"
+        )
         comparison["summary"]["failure_classification"] = (
             "unresolved_reference_state_divergence"
         )
         comparison["summary"]["affected_component"] = None
+        comparison["summary"]["classification_evidence_prefix"] = None
+        comparison["summary"]["classification_evidence_source"] = (
+            "diagnostic_execution_output_instability"
+        )
+        comparison["summary"]["classification_priority"] = 5
+        comparison["summary"]["unresolved_reason"] = (
+            "diagnostic_execution_output_instability"
+        )
     return comparison
 
 
@@ -2183,6 +2216,11 @@ def persist_reference_state_artifacts(
                     "reference_tree_round_mapping",
                     "evidence_completeness",
                     "failure_classification",
+                    "classification_evidence_prefix",
+                    "classification_evidence_source",
+                    "classification_priority",
+                    "unresolved_reason",
+                    "downstream_consequence_count",
                 )
             }
             for case in cases

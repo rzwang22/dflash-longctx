@@ -17,8 +17,29 @@
           "first_state_divergent_aligned_prefix",
           "first_semantically_consequential_state_divergence", "affected_component",
           "reference_tree_round_mapping", "evidence_completeness",
-          "failure_classification"
-        ]
+          "failure_classification", "classification_evidence_prefix",
+          "classification_evidence_source", "classification_priority",
+          "unresolved_reason", "downstream_consequence_count"
+        ],
+        "properties": {
+          "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+          "sample_id": {"type": "string", "minLength": 1},
+          "nominal_prompt_length": {"type": "integer", "minimum": 1},
+          "actual_prompt_length": {"type": "integer", "minimum": 1},
+          "configuration_id": {"type": "string", "minLength": 1},
+          "first_output_divergent_generated_token_offset": {"type": ["integer", "null"], "minimum": 0},
+          "first_state_divergent_aligned_prefix": {"type": ["integer", "null"], "minimum": 0},
+          "first_semantically_consequential_state_divergence": {"type": ["integer", "null"], "minimum": 0},
+          "affected_component": {"type": ["string", "null"]},
+          "reference_tree_round_mapping": {"type": ["object", "null"]},
+          "evidence_completeness": {"enum": ["complete", "partial"]},
+          "failure_classification": {"enum": ["local_packed_verifier_numerical_divergence", "target_kv_state_drift", "target_hidden_state_drift", "draft_state_or_candidate_drift", "commit_or_root_transition_mismatch", "unresolved_reference_state_divergence", null]},
+          "classification_evidence_prefix": {"type": ["integer", "null"], "minimum": 0},
+          "classification_evidence_source": {"type": ["string", "null"]},
+          "classification_priority": {"type": ["integer", "null"], "minimum": 1, "maximum": 5},
+          "unresolved_reason": {"type": ["string", "null"]},
+          "downstream_consequence_count": {"type": "integer", "minimum": 0}
+        }
       }
     }
   }
