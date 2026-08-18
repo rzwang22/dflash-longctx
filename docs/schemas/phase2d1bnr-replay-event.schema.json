@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1bnr-replay-event.schema.json",
+  "title": "Phase 2D.1B-NR replay-side semantic or numerical event",
+  "type": "object",
+  "required": [
+    "schema_version", "experiment", "task", "sample_id", "source_sample_id",
+    "nominal_prompt_length", "selector_mode", "node_budget", "repeat_index",
+    "physical_case_id", "configuration_case_id",
+    "independent_repeat_observation_id", "source", "round_index",
+    "comparison_mode", "structural_status", "semantic_status",
+    "numerical_status", "verifier_decision_changed", "argmax_equal",
+    "top8_ordered_equal", "semantic_mismatch", "numerical_variation",
+    "variation_kind"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source": {"enum": ["gold_logit", "gold_kv"]},
+    "round_index": {"type": "integer", "minimum": -1},
+    "comparison_mode": {"type": ["string", "null"]},
+    "structural_status": {"type": ["string", "null"]},
+    "semantic_status": {"type": ["string", "null"]},
+    "numerical_status": {"type": ["string", "null"]},
+    "verifier_decision_changed": {"type": ["boolean", "null"]},
+    "argmax_equal": {"type": ["boolean", "null"]},
+    "top8_ordered_equal": {"type": ["boolean", "null"]},
+    "semantic_mismatch": {"type": "boolean"},
+    "numerical_variation": {"type": "boolean"},
+    "variation_kind": {"enum": ["semantic_mismatch", "numerical_variation_without_semantic_mismatch"]}
+  }
+}

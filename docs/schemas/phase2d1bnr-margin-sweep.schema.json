@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1bnr-margin-sweep.schema.json",
+  "title": "Phase 2D.1B-NR offline margin-trigger sweep",
+  "type": "object",
+  "required": ["schema_version", "thresholds", "rows"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "thresholds": {"type": "array", "minItems": 1, "items": {"type": "number", "minimum": 0}},
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["experiment", "selector_mode", "node_budget", "scope", "nominal_prompt_length", "threshold", "analyzable_round_count", "trigger_count", "trigger_rate", "first_actual_divergence_round_count", "divergence_rounds_caught_by_trigger", "divergence_recall", "non_divergence_trigger_count", "non_divergence_trigger_rate", "source_macro_trigger_rate"],
+        "properties": {
+          "scope": {"enum": ["overall", "context"]},
+          "trigger_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "divergence_recall": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+        }
+      }
+    }
+  }
+}

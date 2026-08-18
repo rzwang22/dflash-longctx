@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1bnr-manifest.schema.json",
+  "title": "Phase 2D.1B-NR study manifest",
+  "type": "object",
+  "required": [
+    "schema_version", "phase", "status", "baseline_repo_sha", "repository",
+    "target_model", "materialized_draft", "frozen_selector", "capture_inputs",
+    "longbench", "environment", "configuration", "count_semantics",
+    "decision_rules", "subruns", "artifacts", "online_execution_modified",
+    "selector_modified", "tree_modified", "kv_compaction_modified",
+    "correctness_gate_modified", "numerical_thresholds_modified",
+    "materialization_required", "formal_timing_claims_made",
+    "no_performance_claims", "error"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.1B-NR"},
+    "status": {"enum": ["started", "ok", "incomplete"]},
+    "baseline_repo_sha": {"const": "d60e7db0514053ac580f2bfa9ca8cf7a534c1b49"},
+    "repository": {
+      "type": "object",
+      "required": ["current_sha", "branch", "dirty", "protected_online_paths_changed"],
+      "properties": {
+        "current_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "branch": {"const": "codex/phase2d1b-nr-numerical-robustness"},
+        "dirty": {"type": "boolean"},
+        "protected_online_paths_changed": {"type": "array", "maxItems": 0}
+      }
+    },
+    "target_model": {"type": "object"},
+    "materialized_draft": {"type": "object", "required": ["path", "materialization_id", "materialization_manifest_sha256", "manifest"]},
+    "frozen_selector": {"type": "object", "required": ["path", "config_sha256", "file_sha256", "training_source_ids"]},
+    "capture_inputs": {"type": "array", "minItems": 1},
+    "longbench": {"type": "object", "required": ["root", "task", "jsonl_path", "jsonl_sha256", "matched_capture_cohort"]},
+    "environment": {"type": "object"},
+    "configuration": {"type": "object"},
+    "count_semantics": {"type": "object", "required": ["physical_case", "configuration_case", "independent_repeat_observation", "repeats_are_not_independent_source_evidence", "requested_subrun_count"]},
+    "decision_rules": {"type": "object"},
+    "subruns": {"type": "array", "items": {"type": "object"}},
+    "artifacts": {"type": "array", "items": {"type": "string"}},
+    "completed_subrun_count": {"type": "integer", "minimum": 0},
+    "online_execution_modified": {"const": false},
+    "selector_modified": {"const": false},
+    "tree_modified": {"const": false},
+    "kv_compaction_modified": {"const": false},
+    "correctness_gate_modified": {"const": false},
+    "numerical_thresholds_modified": {"const": false},
+    "materialization_required": {"const": false},
+    "formal_timing_claims_made": {"const": false},
+    "no_performance_claims": {"const": true},
+    "error": {"type": ["object", "null"]}
+  }
+}

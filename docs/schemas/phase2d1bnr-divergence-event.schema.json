@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1bnr-divergence-event.schema.json",
+  "title": "Phase 2D.1B-NR canonical actual divergence event",
+  "type": "object",
+  "required": [
+    "schema_version", "experiment", "task", "sample_id", "source_sample_id",
+    "nominal_prompt_length", "selector_mode", "node_budget", "repeat_index",
+    "physical_case_id", "configuration_case_id",
+    "independent_repeat_observation_id", "first_divergent_generated_offset",
+    "first_divergent_absolute_position", "first_divergent_tree_round",
+    "divergent_token_kind", "reference_token_id", "tree_token_id",
+    "actual_reference_output_sha256", "actual_tree_output_sha256",
+    "actual_reference_output_ids", "actual_tree_output_ids",
+    "target_only_output_ids", "divergence_failure_class",
+    "divergence_evidence_complete", "structural_correctness_passed",
+    "replay_evidence"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "first_divergent_generated_offset": {"type": "integer", "minimum": 0},
+    "first_divergent_absolute_position": {"type": "integer", "minimum": 0},
+    "first_divergent_tree_round": {"type": "integer", "minimum": 0},
+    "reference_token_id": {"type": "integer"},
+    "tree_token_id": {"type": "integer"},
+    "actual_reference_output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "actual_tree_output_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "actual_reference_output_ids": {"type": "array", "items": {"type": "integer"}},
+    "actual_tree_output_ids": {"type": "array", "items": {"type": "integer"}},
+    "target_only_output_ids": {"type": "array", "items": {"type": "integer"}},
+    "divergence_evidence_complete": {"type": "boolean"},
+    "structural_correctness_passed": {"type": "boolean"},
+    "replay_evidence": {"type": "array", "items": {"type": "object"}}
+  }
+}

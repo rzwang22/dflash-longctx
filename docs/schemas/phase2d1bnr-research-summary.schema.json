@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1bnr-research-summary.schema.json",
+  "title": "Phase 2D.1B-NR research-question answers",
+  "type": "object",
+  "required": ["schema_version", "RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ6", "RQ7", "no_performance_claims"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "RQ1": {"type": "object"},
+    "RQ2": {"type": "object"},
+    "RQ3": {"type": "object"},
+    "RQ4": {"type": "object"},
+    "RQ5": {"type": "object"},
+    "RQ6": {"type": "object"},
+    "RQ7": {"type": "object"},
+    "no_performance_claims": {"const": true}
+  }
+}

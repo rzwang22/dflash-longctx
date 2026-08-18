@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1bnr-round-margin.schema.json",
+  "title": "Phase 2D.1B-NR packed-native round margin event",
+  "type": "object",
+  "required": [
+    "schema_version", "experiment", "task", "sample_id", "source_sample_id",
+    "nominal_prompt_length", "selector_mode", "node_budget", "repeat_index",
+    "physical_case_id", "configuration_case_id",
+    "independent_repeat_observation_id", "round_index",
+    "generated_root_offset", "actual_node_count", "selected_policy_config",
+    "accepted_draft_depth", "committed_token_count",
+    "minimum_verifier_margin", "margin_source", "margin_unavailable_reason",
+    "first_actual_divergence_round", "pre_divergence",
+    "included_in_trigger_characterization", "structural_checks_passed",
+    "replay_semantic_variation_observed",
+    "actual_execution_divergence_occurs_here", "terminal_round",
+    "truncated_token_count"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "round_index": {"type": "integer", "minimum": 0},
+    "minimum_verifier_margin": {"type": ["number", "null"]},
+    "margin_unavailable_reason": {"type": ["string", "null"]},
+    "first_actual_divergence_round": {"type": "boolean"},
+    "included_in_trigger_characterization": {"const": true},
+    "actual_execution_divergence_occurs_here": {"type": "boolean"},
+    "structural_checks_passed": {"type": ["boolean", "null"]}
+  }
+}

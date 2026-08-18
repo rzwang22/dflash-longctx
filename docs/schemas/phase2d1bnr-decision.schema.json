@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1bnr-decision.schema.json",
+  "title": "Phase 2D.1B-NR pilot engineering decision",
+  "type": "object",
+  "required": ["schema_version", "decision", "reason", "decision_rules", "primary_branching_configuration", "qualifying_margin_trigger", "pilot_engineering_guidance_not_population_claim"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "decision": {"enum": ["characterize_selective_stabilization_cost", "reconsider_branching_verifier", "investigate_reference_instability", "investigate_structural_correctness", "collect_more_robustness_evidence"]},
+    "reason": {"type": "string", "minLength": 1},
+    "decision_rules": {"type": "object"},
+    "qualifying_margin_trigger": {"type": ["object", "null"]},
+    "pilot_engineering_guidance_not_population_claim": {"const": true}
+  }
+}

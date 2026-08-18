@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1bnr-subrun.schema.json",
+  "title": "Phase 2D.1B-NR independent subprocess observation",
+  "type": "object",
+  "required": [
+    "schema_version", "experiment", "task", "sample_id", "source_sample_id",
+    "nominal_prompt_length", "selector_mode", "node_budget", "repeat_index",
+    "max_new_tokens", "physical_case_id", "configuration_case_id",
+    "independent_repeat_observation_id", "raw_subrun_dir",
+    "subprocess_return_code", "subprocess_nonzero_retained_as_diagnostic",
+    "outcome_category"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "experiment": {"enum": ["exact_case", "cohort"]},
+    "task": {"const": "gov_report"},
+    "sample_id": {"type": "string", "minLength": 1},
+    "source_sample_id": {"type": "string", "minLength": 1},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "selector_mode": {"enum": ["top1_packed_tree", "global_fixed"]},
+    "node_budget": {"enum": [16, 32]},
+    "repeat_index": {"type": "integer", "minimum": 0},
+    "max_new_tokens": {"type": "integer", "minimum": 1},
+    "physical_case_id": {"type": "string", "minLength": 1},
+    "configuration_case_id": {"type": "string", "minLength": 1},
+    "independent_repeat_observation_id": {"type": "string", "minLength": 1},
+    "raw_subrun_dir": {"type": "string", "minLength": 1},
+    "subprocess_return_code": {"type": "integer"},
+    "subprocess_nonzero_retained_as_diagnostic": {"type": "boolean"},
+    "outcome_category": {"enum": ["pass_actual_exact", "actual_numerical_decision_divergence", "actual_structural_failure", "reference_instability", "incomplete_correctness_evidence", "infrastructure_failure"]},
+    "actual_reference_output_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "actual_tree_output_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "target_only_output_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "actual_reference_output_ids": {"type": ["array", "null"], "items": {"type": "integer"}},
+    "actual_tree_output_ids": {"type": ["array", "null"], "items": {"type": "integer"}},
+    "target_only_output_ids": {"type": ["array", "null"], "items": {"type": "integer"}},
+    "actual_reference_tree_output_ids_equal": {"type": ["boolean", "null"]},
+    "gold_evidence_complete": {"type": "boolean"},
+    "selector_target_blind": {"type": "boolean"},
+    "target_forward_count_added": {"const": 0},
+    "actual_node_counts": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+    "source_provenance_status": {"enum": ["ok", "failed"]},
+    "source_provenance_validation_passed": {"type": "boolean"},
+    "source_provenance_validation_failures": {"type": "array", "items": {"type": "string"}},
+    "source_provenance_wrapper_failure_is_expected_correctness": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome_category": {"not": {"const": "infrastructure_failure"}}}},
+      "then": {"required": ["actual_reference_output_sha256", "actual_tree_output_sha256", "target_only_output_sha256", "actual_reference_output_ids", "actual_tree_output_ids", "target_only_output_ids", "actual_reference_tree_output_ids_equal", "gold_evidence_complete", "selector_target_blind", "target_forward_count_added", "actual_node_counts", "source_provenance_status", "source_provenance_validation_passed", "source_provenance_validation_failures", "source_provenance_wrapper_failure_is_expected_correctness"]}
+    },
+    {
+      "if": {"properties": {"outcome_category": {"const": "pass_actual_exact"}}},
+      "then": {"properties": {"actual_reference_tree_output_ids_equal": {"const": true}}}
+    },
+    {
+      "if": {"properties": {"outcome_category": {"const": "actual_numerical_decision_divergence"}}},
+      "then": {"properties": {"actual_reference_tree_output_ids_equal": {"const": false}, "structural_correctness_passed": {"const": true}}}
+    }
+  ]
+}

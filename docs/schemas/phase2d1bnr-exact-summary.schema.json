@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1bnr-exact-summary.schema.json",
+  "title": "Phase 2D.1B-NR exact-case reproducibility summary",
+  "type": "object",
+  "required": ["schema_version", "status", "repeat_observation_count", "configuration_strata"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["complete", "incomplete", "not_run"]},
+    "repeat_observation_count": {"type": "integer", "minimum": 0},
+    "configuration_strata": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["selector_mode", "node_budget", "repeat_count", "reference_output_hash_distribution", "tree_output_hash_distribution", "actual_divergence_count", "reference_stable_across_repeats", "tree_stable_across_repeats", "reproducibility_classification"],
+        "properties": {
+          "reproducibility_classification": {"enum": ["stable_actual_divergence", "stochastic_actual_divergence", "no_reproduced_actual_divergence", "reference_instability", "insufficient_evidence"]}
+        }
+      }
+    }
+  }
+}
