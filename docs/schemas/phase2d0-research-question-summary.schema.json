@@ -5,12 +5,14 @@
   "type": "object",
   "required": [
     "schema_version", "phase", "rq1", "rq2", "rq3", "rq4", "rq5",
-    "rq6", "eligible_configuration_round_count", "task_count",
+    "rq6", "eligible_configuration_round_count", "raw_physical_round_count",
+    "combined_node_budget_count_unit", "core_share_denominator_name",
+    "core_shares_by_node_budget", "censoring_by_task_and_node_budget", "task_count",
     "gap_class_counts", "core_configuration", "decision",
     "no_dependency_dominance_claim_without_capture_results"
   ],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "2.0"},
     "phase": {"const": "2D.0"},
     "rq1": {"type": "object"},
     "rq2": {"type": "object"},
@@ -19,6 +21,11 @@
     "rq5": {"type": "object"},
     "rq6": {"type": "object", "required": ["question", "decision", "decision_rules"]},
     "eligible_configuration_round_count": {"type": "integer", "minimum": 0},
+    "raw_physical_round_count": {"type": "integer", "minimum": 1},
+    "combined_node_budget_count_unit": {"const": "configuration_round"},
+    "core_share_denominator_name": {"const": "eligible_configuration_rounds"},
+    "core_shares_by_node_budget": {"type": "array"},
+    "censoring_by_task_and_node_budget": {"type": "array"},
     "task_count": {"type": "integer", "minimum": 0},
     "gap_class_counts": {"type": "object"},
     "core_configuration": {"type": "object"},

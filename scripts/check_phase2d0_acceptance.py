@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from functools import cache
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,9 @@ else:
 
 CSV_FILENAMES = (
     "gap-decomposition.csv",
+    "gap-decomposition-v2.csv",
     "context-gap-composition.csv",
+    "context-gap-composition-v2.csv",
     "availability-by-depth.csv",
     "static-survival-frontier.csv",
     "minimum-survival-budget.csv",
@@ -49,7 +52,9 @@ CSV_FILENAMES = (
 )
 CSV_FIELDS = {
     "gap-decomposition.csv": GAP_FIELDS,
+    "gap-decomposition-v2.csv": GAP_FIELDS,
     "context-gap-composition.csv": CONTEXT_GAP_FIELDS,
+    "context-gap-composition-v2.csv": CONTEXT_GAP_FIELDS,
     "availability-by-depth.csv": AVAILABILITY_FIELDS,
     "static-survival-frontier.csv": FRONTIER_FIELDS,
     "minimum-survival-budget.csv": MINIMUM_FIELDS,
@@ -102,16 +107,21 @@ def check_output(output_dir: Path) -> dict[str, Any]:
     events = _read_jsonl(output_dir / "opportunity-events.jsonl")
     signals = _read_jsonl(output_dir / "signal-labels.jsonl")
     gap = _read_json(output_dir / "gap-decomposition.json")
+    gap_v2 = _read_json(output_dir / "gap-decomposition-v2.json")
     rq = _read_json(output_dir / "research-question-summary.json")
+    rq_v2 = _read_json(output_dir / "research-question-summary-v2.json")
     manifest = _read_json(output_dir / "analysis-manifest.json")
     for event in events:
         _validate(event, "phase2d0-opportunity-event.schema.json")
     for signal in signals:
         _validate(signal, "phase2d0-signal-label.schema.json")
     _validate(gap, "phase2d0-gap-decomposition.schema.json")
+    _validate(gap_v2, "phase2d0-gap-decomposition.schema.json")
     _validate(rq, "phase2d0-research-question-summary.schema.json")
+    _validate(rq_v2, "phase2d0-research-question-summary.schema.json")
     _validate(manifest, "phase2d0-analysis-manifest.schema.json")
     _check(checks, "json_schema_validation", True)
+    _check(checks, "v2_json_aliases_match", gap == gap_v2 and rq == rq_v2)
     _check(checks, "event_count", len(events) == gap["event_count"])
     _check(
         checks,
@@ -147,28 +157,99 @@ def check_output(output_dir: Path) -> dict[str, Any]:
             rows = list(reader)
             if not set(CSV_FIELDS[filename]) <= set(reader.fieldnames or []):
                 csv_fields_ok = False
-            if rows and any(row.get("schema_version") != "1.0" for row in rows):
+            expected_version = (
+                "2.0"
+                if filename.startswith(("gap-decomposition", "context-gap-composition"))
+                else "1.0"
+            )
+            if rows and any(
+                row.get("schema_version") != expected_version for row in rows
+            ):
                 csv_versions_ok = False
     _check(checks, "csv_schema_versions", csv_versions_ok)
     _check(checks, "all_csv_schema_fields", csv_fields_ok)
 
+    composition_ok = True
+    denominator_ok = True
+    no_ambiguous_fraction = True
+    seen = set()
     for group in gap["task_context"]:
+        key = tuple(
+            group[field] for field in ("task", "context_length", "top_m", "node_budget")
+        )
+        if key in seen:
+            continue
+        seen.add(key)
         matching = [
             row
             for row in gap["task_context"]
-            if all(
-                row[field] == group[field]
+            if tuple(
+                row[field]
                 for field in ("task", "context_length", "top_m", "node_budget")
             )
+            == key
         ]
-        if (
+        eligible = [
+            row for row in matching if row["gap_class"] != "right_censored_or_terminal"
+        ]
+        censored = next(
+            row for row in matching if row["gap_class"] == "right_censored_or_terminal"
+        )
+        composition_ok &= (
             sum(row["gap_class_round_count"] for row in matching)
-            != group["round_count"]
-        ):
-            _check(checks, "mutually_exclusive_class_counts", False)
-            break
-    else:
-        _check(checks, "mutually_exclusive_class_counts", True)
+            == group["raw_round_count"]
+            and math.isclose(
+                sum(row["fraction_over_all_rounds"] for row in matching), 1.0
+            )
+            and (
+                group["eligible_round_count"] == 0
+                or math.isclose(
+                    sum(row["fraction_among_eligible_rounds"] for row in eligible),
+                    1.0,
+                )
+            )
+            and censored["fraction_among_eligible_rounds"] is None
+            and bool(censored["fraction_among_eligible_rounds_unavailable_reason"])
+        )
+        denominator_ok &= all(
+            row["fraction_denominator_name"]
+            == (
+                "all_configuration_rounds"
+                if row["gap_class"] == "right_censored_or_terminal"
+                else "eligible_configuration_rounds"
+            )
+            and row["fraction_denominator_count"]
+            == (
+                row["raw_round_count"]
+                if row["gap_class"] == "right_censored_or_terminal"
+                else row["eligible_round_count"]
+            )
+            for row in matching
+        )
+        no_ambiguous_fraction &= all("fraction" not in row for row in matching)
+    _check(checks, "all_strata_fraction_contract", composition_ok)
+    _check(checks, "explicit_fraction_denominators", denominator_ok)
+    _check(checks, "ambiguous_naked_fraction_absent", no_ambiguous_fraction)
+    _check(
+        checks,
+        "node_budgets_are_configuration_strata",
+        gap["node_budgets_are_separate_configuration_strata"] is True
+        and gap["cross_node_budget_counts_are_configuration_round_counts"] is True,
+    )
+    expected_censoring = {
+        (event["task"], event["node_budget"])
+        for event in events
+        if event["top_m"] == 16
+    }
+    reported_censoring = {
+        (row["task"], row["node_budget"])
+        for row in rq["censoring_by_task_and_node_budget"]
+    }
+    _check(
+        checks,
+        "task_budget_censoring_reported_separately",
+        expected_censoring == reported_censoring,
+    )
 
     return {
         "phase": "2D.0",

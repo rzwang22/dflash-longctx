@@ -338,16 +338,32 @@ class Phase2D0AggregationTests(unittest.TestCase):
             for row in summary["task_context"]
             if row["context_length"] == 4096 and row["node_budget"] == 16
         ]
-        self.assertEqual({row["round_count"] for row in rows}, {2})
+        self.assertEqual({row["raw_round_count"] for row in rows}, {2})
         self.assertEqual({row["eligible_round_count"] for row in rows}, {1})
-        self.assertEqual(
-            {row["terminal_or_censored_excluded_count"] for row in rows}, {1}
-        )
+        self.assertEqual({row["right_censored_or_terminal_count"] for row in rows}, {1})
         self.assertEqual(
             {row["context_length"] for row in summary["task_context"]},
             {1024, 4096},
         )
-        self.assertAlmostEqual(sum(row["fraction"] for row in rows), 1.0)
+        self.assertAlmostEqual(
+            sum(row["fraction_over_all_rounds"] for row in rows), 1.0
+        )
+        eligible_rows = [
+            row for row in rows if row["gap_class"] != "right_censored_or_terminal"
+        ]
+        self.assertAlmostEqual(
+            sum(row["fraction_among_eligible_rounds"] for row in eligible_rows),
+            1.0,
+        )
+        censored_row = next(
+            row for row in rows if row["gap_class"] == "right_censored_or_terminal"
+        )
+        self.assertIsNone(censored_row["fraction_among_eligible_rounds"])
+        self.assertEqual(
+            censored_row["fraction_among_eligible_rounds_unavailable_reason"],
+            "class_excluded_from_eligible_denominator",
+        )
+        self.assertNotIn("fraction", censored_row)
 
     def test_signal_metrics_report_counts_auc_and_calibration(self) -> None:
         base_events = analyze_captures(
@@ -466,7 +482,7 @@ class Phase2D0RunnerTests(unittest.TestCase):
             with (output / "context-gap-composition.csv").open() as stream:
                 rows = list(csv.DictReader(stream))
             self.assertTrue(rows)
-            self.assertTrue(all(row["schema_version"] == "1.0" for row in rows))
+            self.assertTrue(all(row["schema_version"] == "2.0" for row in rows))
             self.assertTrue(check_output(output)["passed"])
 
     def test_three_task_real_shape_captures_are_aggregated_separately(self) -> None:

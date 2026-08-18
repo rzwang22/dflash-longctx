@@ -77,13 +77,25 @@ single-feature AUROC, AUPRC, five-bin precision, counts, and per-context trends.
 Results with fewer than 30 observations or fewer than five observations in one
 class are marked unstable. No refinement-gain label such as `ΔA_i` is defined.
 
-## Aggregation and Phase 2D.1 decision
+## Version 2 denominator contract and Phase 2D.1 decision
 
-The context table reports every mutually exclusive class, including censored
-and unresolved events. Round micro fractions use configuration-rounds as
-observations. Macro fractions first aggregate within each sample. Task-level
-and cross-task macro rows are separate, and no GovReport result is extrapolated
-to another task.
+Schema version 2 closes an ambiguity in the original context table. Every
+`(task, context, M, N)` stratum now records `raw_round_count`,
+`eligible_round_count`, `right_censored_or_terminal_count`, and
+`gap_class_round_count`. `fraction_over_all_rounds` includes the explicit
+censored/terminal class and sums to one over all classes.
+`fraction_among_eligible_rounds` excludes that class and sums to one over the
+eligible mechanism classes. On the censored/terminal row it is JSON null with
+`fraction_among_eligible_rounds_unavailable_reason`, never zero. The separate
+`censoring_fraction` always uses the all-round denominator. The deprecated,
+ambiguous naked `fraction` field is no longer emitted.
+
+N=16 and N=32 remain separate configuration records for the same physical
+round. Cross-budget totals and fractions are therefore explicitly named
+configuration-level micro or macro summaries; they are never described as
+independent physical-round fractions. Qasper censoring remains a separate
+reported rate and is not folded into a mechanism-class denominator. This
+statistical change does not alter any Phase 2D.0 event classification.
 
 `research-question-summary.json` answers RQ1–RQ6 mechanically. The decision is
 not selected by hand. With at least 100 eligible Top-16 configuration-rounds
@@ -115,7 +127,7 @@ python scripts/phase2d0_dependency_opportunity.py \
   --node-budgets 16,32 \
   --survival-budget-cap 256 \
   --policies top1_chain,score_beam,confidence_gated,layerwise_beam \
-  --output-dir outputs/phase2d0-dependency-opportunity
+  --output-dir outputs/phase2d0-dependency-opportunity-v2
 ```
 
 Validate existence, JSON schemas, mutually exclusive counts, CSV versions, and
@@ -124,7 +136,7 @@ the no-framework provenance contract with:
 ```bash
 CUDA_VISIBLE_DEVICES="" PYTHONDONTWRITEBYTECODE=1 \
 python scripts/check_phase2d0_acceptance.py \
-  --output-dir outputs/phase2d0-dependency-opportunity
+  --output-dir outputs/phase2d0-dependency-opportunity-v2
 ```
 
 The output contains:
@@ -142,8 +154,17 @@ signal-labels.jsonl
 signal-hypotheses.csv
 research-question-summary.json
 analysis-manifest.json
+context-gap-composition-v2.csv
+gap-decomposition-v2.json
+gap-decomposition-v2.csv
+research-question-summary-v2.json
 terminal.log
 ```
+
+The unsuffixed aggregation files in a v2 run carry the same schema-version-2
+content for programmatic continuity. The explicit `-v2` aliases are the files
+that downstream Phase 2D.1A preflight requires, so an old server directory is
+never overwritten or mistaken for corrected output.
 
 This phase does not implement selective refinement, remasking, training,
 adapter inference, a second model pass, sparse KV, hardware simulation, or any

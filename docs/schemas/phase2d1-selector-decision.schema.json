@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1-selector-decision.schema.json",
+  "title": "Phase 2D.1A preregistered selector decision",
+  "type": "object",
+  "required": ["schema_version", "phase", "decision", "decision_rules", "evidence_sufficient", "fixed_policy_gate_passed", "global_fixed_selection_stability_by_node_budget", "global_fixed_selection_stability_gate_passed", "primary_task_source_macro_nonnegative_gate_passed", "context_rule_source_macro_improvement_by_task", "context_rule_gate_passed", "decision_stump_gate_passed", "engineering_gate_not_statistical_significance_theorem", "online_integration_not_performed"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.1A"},
+    "decision": {"enum": ["integrate_fixed_policy_online", "integrate_context_rule_online", "integrate_lightweight_selector_online", "selector_headroom_not_realizable", "deprioritize_selector_prioritize_candidate_generation", "insufficient_evidence"]},
+    "decision_rules": {"type": "object"},
+    "evidence_sufficient": {"type": "boolean"},
+    "fixed_policy_gate_passed": {"type": "boolean"},
+    "global_fixed_selection_stability_by_node_budget": {"type": "object"},
+    "global_fixed_selection_stability_gate_passed": {"type": "boolean"},
+    "primary_task_source_macro_nonnegative_gate_passed": {"type": "boolean"},
+    "context_rule_source_macro_improvement_by_task": {"type": "object"},
+    "context_rule_gate_passed": {"type": "boolean"},
+    "decision_stump_gate_passed": {"type": "boolean"},
+    "engineering_gate_not_statistical_significance_theorem": {"const": true},
+    "online_integration_not_performed": {"const": true}
+  }
+}

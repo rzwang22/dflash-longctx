@@ -55,6 +55,10 @@ OUTPUT_FILENAMES = (
     "signal-hypotheses.csv",
     "research-question-summary.json",
     "analysis-manifest.json",
+    "context-gap-composition-v2.csv",
+    "gap-decomposition-v2.json",
+    "gap-decomposition-v2.csv",
+    "research-question-summary-v2.json",
     "terminal.log",
 )
 
@@ -204,15 +208,22 @@ GAP_FIELDS = (
     "node_budget",
     "gap_class",
     "gap_class_round_count",
-    "round_count",
+    "raw_round_count",
     "eligible_round_count",
-    "terminal_or_censored_excluded_count",
+    "right_censored_or_terminal_count",
     "task_count",
-    "fraction",
-    "micro_fraction",
-    "macro_fraction",
-    "fraction_denominator",
-    "eligible_fraction_denominator",
+    "fraction_over_all_rounds",
+    "fraction_among_eligible_rounds",
+    "fraction_among_eligible_rounds_unavailable_reason",
+    "censoring_fraction",
+    "micro_fraction_over_all_rounds",
+    "micro_fraction_among_eligible_rounds",
+    "macro_fraction_over_all_rounds",
+    "macro_fraction_among_eligible_rounds",
+    "macro_fraction_among_eligible_rounds_unavailable_reason",
+    "fraction_denominator_name",
+    "fraction_denominator_count",
+    "count_unit",
 )
 CONTEXT_GAP_FIELDS = (
     "schema_version",
@@ -222,12 +233,21 @@ CONTEXT_GAP_FIELDS = (
     "node_budget",
     "gap_class",
     "gap_class_round_count",
-    "round_count",
+    "raw_round_count",
     "eligible_round_count",
-    "terminal_or_censored_excluded_count",
-    "fraction",
-    "micro_fraction",
-    "macro_fraction",
+    "right_censored_or_terminal_count",
+    "fraction_over_all_rounds",
+    "fraction_among_eligible_rounds",
+    "fraction_among_eligible_rounds_unavailable_reason",
+    "censoring_fraction",
+    "micro_fraction_over_all_rounds",
+    "micro_fraction_among_eligible_rounds",
+    "macro_fraction_over_all_rounds",
+    "macro_fraction_among_eligible_rounds",
+    "macro_fraction_among_eligible_rounds_unavailable_reason",
+    "fraction_denominator_name",
+    "fraction_denominator_count",
+    "count_unit",
 )
 AVAILABILITY_FIELDS = (
     "schema_version",
@@ -344,7 +364,7 @@ def _manifest(
     rq_summary: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "phase": "2D.0",
         "status": "ok",
         "mode": "cpu_only_offline_dependency_opportunity_characterization",
@@ -513,9 +533,16 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _write_jsonl(output_dir / "opportunity-events.jsonl", events)
             _write_json(output_dir / "gap-decomposition.json", gap)
+            _write_json(output_dir / "gap-decomposition-v2.json", gap)
             _write_csv(output_dir / "gap-decomposition.csv", gap_rows, GAP_FIELDS)
+            _write_csv(output_dir / "gap-decomposition-v2.csv", gap_rows, GAP_FIELDS)
             _write_csv(
                 output_dir / "context-gap-composition.csv",
+                context_rows,
+                CONTEXT_GAP_FIELDS,
+            )
+            _write_csv(
+                output_dir / "context-gap-composition-v2.csv",
                 context_rows,
                 CONTEXT_GAP_FIELDS,
             )
@@ -546,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
                 SIGNAL_FIELDS,
             )
             _write_json(output_dir / "research-question-summary.json", rq_summary)
+            _write_json(output_dir / "research-question-summary-v2.json", rq_summary)
             _write_json(output_dir / "analysis-manifest.json", manifest)
             print(
                 f"Validated {len(validated['inputs'])} immutable capture directories "

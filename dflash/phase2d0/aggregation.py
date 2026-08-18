@@ -9,25 +9,69 @@ from typing import Any
 from .analysis import GAP_CLASS_PRIORITY
 
 
-def _fractions(
-    events: list[dict[str, Any]], gap_class: str
-) -> tuple[int, int, int, float | None, float | None]:
-    total = len(events)
-    eligible = sum(event["classification_eligible"] for event in events)
+def _fraction_metrics(events: list[dict[str, Any]], gap_class: str) -> dict[str, Any]:
+    raw = len(events)
+    eligible_events = [event for event in events if event["classification_eligible"]]
+    eligible = len(eligible_events)
+    censored = raw - eligible
     count = sum(event["gap_class"] == gap_class for event in events)
-    micro = count / total if total else None
+    is_censored_class = gap_class == "right_censored_or_terminal"
+    eligible_count = sum(event["gap_class"] == gap_class for event in eligible_events)
     by_sample: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for event in events:
-        by_sample[str(event["sample_id"])].append(event)
-    macro = (
-        mean(
-            sum(event["gap_class"] == gap_class for event in rows) / len(rows)
-            for rows in by_sample.values()
-        )
-        if by_sample
+        source_id = event.get("source_sample_id", event["sample_id"])
+        by_sample[f"{event['task']}::{source_id}"].append(event)
+    macro_all = mean(
+        sum(event["gap_class"] == gap_class for event in rows) / len(rows)
+        for rows in by_sample.values()
+    )
+    eligible_sample_fractions = []
+    if not is_censored_class:
+        for rows in by_sample.values():
+            sample_eligible = [row for row in rows if row["classification_eligible"]]
+            if sample_eligible:
+                eligible_sample_fractions.append(
+                    sum(row["gap_class"] == gap_class for row in sample_eligible)
+                    / len(sample_eligible)
+                )
+    eligible_fraction = (
+        None if is_censored_class or not eligible else eligible_count / eligible
+    )
+    eligible_reason = (
+        "class_excluded_from_eligible_denominator"
+        if is_censored_class
+        else "no_eligible_configuration_rounds"
+        if not eligible
         else None
     )
-    return count, total, eligible, micro, macro
+    return {
+        "gap_class_round_count": count,
+        "raw_round_count": raw,
+        "eligible_round_count": eligible,
+        "right_censored_or_terminal_count": censored,
+        "fraction_over_all_rounds": count / raw,
+        "fraction_among_eligible_rounds": eligible_fraction,
+        "fraction_among_eligible_rounds_unavailable_reason": eligible_reason,
+        "censoring_fraction": censored / raw,
+        "micro_fraction_over_all_rounds": count / raw,
+        "micro_fraction_among_eligible_rounds": eligible_fraction,
+        "macro_fraction_over_all_rounds": macro_all,
+        "macro_fraction_among_eligible_rounds": (
+            mean(eligible_sample_fractions) if eligible_sample_fractions else None
+        ),
+        "macro_fraction_among_eligible_rounds_unavailable_reason": (
+            None
+            if eligible_sample_fractions
+            else eligible_reason or "no_sample_with_eligible_configuration_rounds"
+        ),
+        "fraction_denominator_name": (
+            "all_configuration_rounds"
+            if is_censored_class
+            else "eligible_configuration_rounds"
+        ),
+        "fraction_denominator_count": raw if is_censored_class else eligible,
+        "count_unit": "configuration_round_at_fixed_node_budget",
+    }
 
 
 def _group_rows(
@@ -40,24 +84,13 @@ def _group_rows(
     for key, events in sorted(grouped.items()):
         identity = dict(zip(key_fields, key))
         for gap_class in GAP_CLASS_PRIORITY:
-            count, total, eligible, micro, macro = _fractions(events, gap_class)
             rows.append(
                 {
-                    "schema_version": "1.0",
+                    "schema_version": "2.0",
                     "scope": scope,
                     **identity,
                     "gap_class": gap_class,
-                    "gap_class_round_count": count,
-                    "round_count": total,
-                    "eligible_round_count": eligible,
-                    "terminal_or_censored_excluded_count": total - eligible,
-                    "fraction": micro,
-                    "micro_fraction": micro,
-                    "macro_fraction": macro,
-                    "fraction_denominator": "all mutually-exclusive configuration-round events",
-                    "eligible_fraction_denominator": (
-                        "non-terminal and non-right-censored configuration-round events"
-                    ),
+                    **_fraction_metrics(events, gap_class),
                 }
             )
     return rows
@@ -95,47 +128,49 @@ def aggregate_gap_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
     cross_task_rows = []
-    grouped_task_rows: dict[tuple[int, int, str], list[dict[str, Any]]] = defaultdict(
-        list
-    )
-    for row in task_rows:
-        grouped_task_rows[
-            (int(row["top_m"]), int(row["node_budget"]), row["gap_class"])
-        ].append(row)
-    for (top_m, budget, gap_class), rows in sorted(grouped_task_rows.items()):
-        cross_task_rows.append(
-            {
-                "schema_version": "1.0",
-                "scope": "cross_task_macro",
-                "top_m": top_m,
-                "node_budget": budget,
-                "gap_class": gap_class,
-                "task_count": len(rows),
-                "gap_class_round_count": sum(
-                    row["gap_class_round_count"] for row in rows
-                ),
-                "round_count": sum(row["round_count"] for row in rows),
-                "eligible_round_count": sum(
-                    row["eligible_round_count"] for row in rows
-                ),
-                "terminal_or_censored_excluded_count": sum(
-                    row["terminal_or_censored_excluded_count"] for row in rows
-                ),
-                "fraction": mean(row["micro_fraction"] for row in rows),
-                "micro_fraction": (
-                    sum(row["gap_class_round_count"] for row in rows)
-                    / sum(row["round_count"] for row in rows)
-                ),
-                "macro_fraction": mean(row["macro_fraction"] for row in rows),
-                "fraction_denominator": "tasks",
-                "eligible_fraction_denominator": "tasks",
-            }
+    cross_task_events: dict[tuple[int, int], list[dict[str, Any]]] = defaultdict(list)
+    for event in events:
+        cross_task_events[(int(event["top_m"]), int(event["node_budget"]))].append(
+            event
         )
+    for (top_m, budget), grouped_events in sorted(cross_task_events.items()):
+        for gap_class in GAP_CLASS_PRIORITY:
+            metrics = _fraction_metrics(grouped_events, gap_class)
+            matching_task_rows = [
+                row
+                for row in task_rows
+                if row["top_m"] == top_m
+                and row["node_budget"] == budget
+                and row["gap_class"] == gap_class
+            ]
+            eligible_task_values = [
+                row["fraction_among_eligible_rounds"]
+                for row in matching_task_rows
+                if row["fraction_among_eligible_rounds"] is not None
+            ]
+            metrics["macro_fraction_over_all_rounds"] = mean(
+                row["fraction_over_all_rounds"] for row in matching_task_rows
+            )
+            metrics["macro_fraction_among_eligible_rounds"] = (
+                mean(eligible_task_values) if eligible_task_values else None
+            )
+            cross_task_rows.append(
+                {
+                    "schema_version": "2.0",
+                    "scope": "cross_task_macro",
+                    "top_m": top_m,
+                    "node_budget": budget,
+                    "gap_class": gap_class,
+                    "task_count": len(matching_task_rows),
+                    **metrics,
+                }
+            )
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "phase": "2D.0",
         "gap_class_priority": list(GAP_CLASS_PRIORITY),
         "event_count": len(events),
+        "configuration_round_count": len(events),
         "raw_round_count": len(
             {
                 (
@@ -148,6 +183,20 @@ def aggregate_gap_events(events: list[dict[str, Any]]) -> dict[str, Any]:
                 for event in events
             }
         ),
+        "raw_physical_round_count": len(
+            {
+                (
+                    event["task"],
+                    event["sample_id"],
+                    event["nominal_prompt_length"],
+                    event["generation_repeat"],
+                    event["round_index"],
+                )
+                for event in events
+            }
+        ),
+        "node_budgets_are_separate_configuration_strata": True,
+        "cross_node_budget_counts_are_configuration_round_counts": True,
         "task_context": context_rows,
         "task_level": task_rows,
         "cross_task_macro": cross_task_rows,
@@ -474,8 +523,77 @@ def build_research_summary(
         decision = "insufficient_evidence"
 
     class_counts = Counter(event["gap_class"] for event in eligible)
+    core_physical_round_count = len(
+        {
+            (
+                event["task"],
+                event["sample_id"],
+                event["nominal_prompt_length"],
+                event["generation_repeat"],
+                event["round_index"],
+            )
+            for event in core
+        }
+    )
+    core_shares_by_budget = []
+    for node_budget in sorted({event["node_budget"] for event in core}):
+        budget_events = [event for event in core if event["node_budget"] == node_budget]
+        budget_eligible = [
+            event for event in budget_events if event["classification_eligible"]
+        ]
+        core_shares_by_budget.append(
+            {
+                "node_budget": node_budget,
+                "raw_physical_round_count": len(budget_events),
+                "eligible_physical_round_count": len(budget_eligible),
+                "right_censored_or_terminal_count": (
+                    len(budget_events) - len(budget_eligible)
+                ),
+                "shares_among_eligible_physical_rounds": {
+                    name: _share(budget_events, classes)
+                    for name, classes in (
+                        (
+                            "candidate_availability_failure",
+                            {"candidate_availability_failure"},
+                        ),
+                        ("selection_failure", {"selection_failure"}),
+                        ("budget_failure", {"budget_failure"}),
+                        (
+                            "dependency_realization_opportunity",
+                            {"dependency_realization_opportunity"},
+                        ),
+                        (
+                            "possible_dependency_opportunity",
+                            {"possible_dependency_opportunity"},
+                        ),
+                    )
+                },
+            }
+        )
+    censoring_by_task_and_budget = []
+    for task, node_budget in sorted(
+        {(event["task"], event["node_budget"]) for event in core}
+    ):
+        task_budget_events = [
+            event
+            for event in core
+            if event["task"] == task and event["node_budget"] == node_budget
+        ]
+        censored_count = sum(
+            not event["classification_eligible"] for event in task_budget_events
+        )
+        censoring_by_task_and_budget.append(
+            {
+                "task": task,
+                "node_budget": node_budget,
+                "raw_physical_round_count": len(task_budget_events),
+                "right_censored_or_terminal_count": censored_count,
+                "censoring_fraction": censored_count / len(task_budget_events),
+                "mechanism_class_denominator_excludes_censored_rounds": True,
+            }
+        )
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "phase": "2D.0",
         "rq1": {
             "question": "Does target-token Top-M availability decline with context length?",
@@ -488,8 +606,12 @@ def build_research_summary(
         },
         "rq3": {
             "question": "Can selector changes or modest budget increases explain static failures?",
-            "selection_failure_share": shares["selection"],
-            "budget_failure_share": shares["budget"],
+            "selection_failure_share_among_eligible_configuration_rounds": shares[
+                "selection"
+            ],
+            "budget_failure_share_among_eligible_configuration_rounds": shares[
+                "budget"
+            ],
             "candidate_available_baseline_failure_count": len(
                 candidate_available_failures
             ),
@@ -502,8 +624,12 @@ def build_research_summary(
         },
         "rq4": {
             "question": "What share meets the conservative dependency opportunity definition?",
-            "dependency_realization_opportunity_share": shares["dependency"],
-            "possible_dependency_opportunity_share": shares["possible_dependency"],
+            "dependency_realization_opportunity_share_among_eligible_configuration_rounds": shares[
+                "dependency"
+            ],
+            "possible_dependency_opportunity_share_among_eligible_configuration_rounds": shares[
+                "possible_dependency"
+            ],
             "dependency_share_among_candidate_available_failures": _share(
                 candidate_available_failures,
                 {"dependency_realization_opportunity"},
@@ -520,6 +646,11 @@ def build_research_summary(
             "decision_rules": decision_rules,
         },
         "eligible_configuration_round_count": len(eligible),
+        "raw_physical_round_count": core_physical_round_count,
+        "combined_node_budget_count_unit": "configuration_round",
+        "core_shares_by_node_budget": core_shares_by_budget,
+        "censoring_by_task_and_node_budget": censoring_by_task_and_budget,
+        "core_share_denominator_name": "eligible_configuration_rounds",
         "task_count": task_count,
         "gap_class_counts": dict(sorted(class_counts.items())),
         "core_configuration": {"top_m": 16, "node_budgets": [16, 32]},

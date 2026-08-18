@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1-cross-validation-folds.schema.json",
+  "title": "Phase 2D.1A grouped cross-validation folds",
+  "type": "object",
+  "required": ["schema_version", "phase", "primary_evaluation", "supplemental_evaluation", "source_cluster_count", "task_count", "source_cluster_ids", "folds", "round_level_random_split_used", "same_source_all_contexts_and_rounds_in_one_fold", "source_leakage_detected"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.1A"},
+    "primary_evaluation": {"const": "leave-one-source-out"},
+    "supplemental_evaluation": {"const": "leave-one-task-out"},
+    "source_cluster_count": {"type": "integer", "minimum": 2},
+    "task_count": {"type": "integer", "minimum": 2},
+    "source_cluster_ids": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "string"}},
+    "folds": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/fold"}},
+    "round_level_random_split_used": {"const": false},
+    "same_source_all_contexts_and_rounds_in_one_fold": {"const": true},
+    "source_leakage_detected": {"const": false}
+  },
+  "$defs": {
+    "fold": {
+      "type": "object",
+      "required": ["fold_id", "evaluation_scheme", "training_source_ids", "held_out_source_ids", "training_task_ids", "held_out_task_ids"],
+      "properties": {
+        "fold_id": {"type": "string", "minLength": 1},
+        "evaluation_scheme": {"enum": ["leave-one-source-out", "leave-one-task-out"]},
+        "training_source_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "held_out_source_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "training_task_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "held_out_task_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}}
+      }
+    }
+  }
+}

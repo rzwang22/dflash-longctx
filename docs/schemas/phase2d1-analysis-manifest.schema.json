@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1-analysis-manifest.schema.json",
+  "title": "Phase 2D.1A selector realization manifest",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "mode", "phase2d0_baseline_sha", "repository", "command", "capture_inputs", "phase2d0_input", "configuration", "decision_rules", "fold_semantics", "count_semantics", "framework_modules_loaded", "input_artifacts_mutated", "instrumented_custom_code_modified", "materialization_required", "formal_timing_contaminated", "decision", "artifacts", "forbidden_interpretations"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.1A"},
+    "status": {"const": "ok"},
+    "mode": {"const": "cpu_only_offline_fixed_budget_selector_realization"},
+    "phase2d0_baseline_sha": {"const": "26b451dbe55737aeabdccb51871d562208694320"},
+    "repository": {
+      "type": "object",
+      "required": ["commit_sha", "branch", "dirty"],
+      "properties": {
+        "commit_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+        "branch": {"type": ["string", "null"]},
+        "dirty": {"type": "boolean"}
+      }
+    },
+    "command": {"type": "string", "minLength": 1},
+    "capture_inputs": {"type": "array", "minItems": 1},
+    "phase2d0_input": {
+      "type": "object",
+      "required": ["directory", "directory_sha256", "artifact_sha256", "decision", "schema_version"],
+      "properties": {
+        "directory": {"type": "string", "minLength": 1},
+        "directory_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "artifact_sha256": {"type": "object", "minProperties": 6, "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+        "decision": {"enum": ["continue_dependency_refinement", "prioritize_candidate_generation", "prioritize_selector", "mixed_problem", "insufficient_evidence"]},
+        "schema_version": {"const": "2.0"}
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "required": ["top_m", "node_budgets", "node_budget_includes_root", "evaluation", "selector_families", "portfolio_sizes", "minimum_leaf_support", "minimum_leaf_source_support", "stump_max_thresholds_per_feature", "bootstrap_repeats", "random_seed", "minimum_stable_clusters"],
+      "properties": {
+        "top_m": {"const": 16},
+        "node_budgets": {"const": [16, 32]},
+        "node_budget_includes_root": {"const": true}
+      }
+    },
+    "decision_rules": {"type": "object", "minProperties": 10},
+    "fold_semantics": {"type": "object", "required": ["primary", "supplemental", "round_level_random_split_used", "same_source_all_contexts_and_rounds_in_one_fold", "source_leakage_detected", "source_cluster_count"]},
+    "count_semantics": {"type": "object", "required": ["raw_physical_round_count", "eligible_physical_round_count", "eligible_configuration_round_count_over_fixed_node_budgets", "n16_and_n32_are_separate_configuration_records", "configuration_records_are_not_independent_physical_rounds"]},
+    "framework_modules_loaded": {"type": "object", "required": ["torch", "transformers", "datasets"], "properties": {"torch": {"const": false}, "transformers": {"const": false}, "datasets": {"const": false}}},
+    "input_artifacts_mutated": {"const": false},
+    "instrumented_custom_code_modified": {"const": false},
+    "materialization_required": {"const": false},
+    "formal_timing_contaminated": {"const": false},
+    "decision": {"type": "string"},
+    "artifacts": {"type": "array", "minItems": 18, "uniqueItems": true},
+    "forbidden_interpretations": {"type": "array", "minItems": 1}
+  }
+}

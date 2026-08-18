@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1-research-question-summary.schema.json",
+  "title": "Phase 2D.1A RQ1-RQ7 summary",
+  "type": "object",
+  "required": ["schema_version", "phase", "rq1", "rq2", "rq3", "rq4", "rq5", "rq6", "rq7", "decision", "offline_target_prefix_coverage_only", "no_acceptance_latency_or_speedup_claim"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.1A"},
+    "rq1": {"type": "object"}, "rq2": {"type": "object"},
+    "rq3": {"type": "object"}, "rq4": {"type": "object"},
+    "rq5": {"type": "object"}, "rq6": {"type": "object"},
+    "rq7": {"type": "object"},
+    "decision": {"enum": ["integrate_fixed_policy_online", "integrate_context_rule_online", "integrate_lightweight_selector_online", "selector_headroom_not_realizable", "deprioritize_selector_prioritize_candidate_generation", "insufficient_evidence"]},
+    "offline_target_prefix_coverage_only": {"const": true},
+    "no_acceptance_latency_or_speedup_claim": {"const": true}
+  }
+}

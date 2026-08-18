@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d1-fixed-policy-summary.schema.json",
+  "title": "Phase 2D.1A fixed policy summary",
+  "type": "object",
+  "required": ["schema_version", "phase", "configuration_inventory", "rows", "fixed_configurations_are_reported_without_per_round_target_selection"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.1A"},
+    "configuration_inventory": {"type": "array", "minItems": 4, "items": {"type": "object"}},
+    "rows": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "fixed_configurations_are_reported_without_per_round_target_selection": {"const": true}
+  }
+}
