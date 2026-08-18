@@ -528,6 +528,88 @@ def build_online_tree_tensors(
     }
 
 
+def build_online_tree_tensors_from_nodes(
+    torch_module: Any,
+    *,
+    positions: list[dict[str, Any]],
+    nodes: set[Node],
+    root_token_id: Any,
+    policy: str,
+    node_budget: int,
+    beam_width: int,
+    device: Any,
+) -> dict[str, Any]:
+    """Pack nodes emitted by a canonical pure-Python policy onto the device.
+
+    Phase 2D.1B uses this adapter for frozen policies that are already defined
+    by Phase 2B/2D.  It does not reconstruct or approximate policy decisions.
+    """
+
+    root_id = int(root_token_id.item()) if hasattr(root_token_id, "item") else int(root_token_id)
+    flat = flatten_tree(
+        nodes,
+        positions,
+        root_token_id=root_id,
+        policy=policy,
+        requested_node_budget=node_budget,
+        beam_width=beam_width,
+    )
+    records = flat["nodes"]
+    path_rows = [
+        [*record["draft_token_path"], *([-1] * (MAXIMUM_DRAFT_DEPTH - record["depth"]))]
+        for record in records
+    ]
+    token_ids = torch_module.tensor(
+        [record["token_id"] for record in records], dtype=torch_module.long, device=device
+    )
+    parents = torch_module.tensor(
+        [-1 if record["parent_index"] is None else record["parent_index"] for record in records],
+        dtype=torch_module.long,
+        device=device,
+    )
+    depths = torch_module.tensor(
+        [record["depth"] for record in records], dtype=torch_module.long, device=device
+    )
+    positional = torch_module.tensor(
+        [0.0 if record["positional_draft_log_probability"] is None else record["positional_draft_log_probability"] for record in records],
+        dtype=torch_module.float64,
+        device=device,
+    )
+    cumulative = torch_module.tensor(
+        [record["cumulative_score"] for record in records],
+        dtype=torch_module.float64,
+        device=device,
+    )
+    normalized = torch_module.tensor(
+        [0.0 if record["normalized_score"] is None else record["normalized_score"] for record in records],
+        dtype=torch_module.float64,
+        device=device,
+    )
+    return {
+        "policy": policy,
+        "requested_node_budget": int(node_budget),
+        "actual_total_node_count": len(records),
+        "beam_width": int(beam_width),
+        "maximum_depth": int(flat["maximum_depth"]),
+        "per_depth_node_counts": [
+            int(flat["per_depth_node_counts"].get(str(depth), 0))
+            for depth in range(int(flat["maximum_depth"]) + 1)
+        ],
+        "token_ids": token_ids,
+        "parent_indices": parents,
+        "depths": depths,
+        "path_tokens": torch_module.tensor(
+            path_rows, dtype=torch_module.long, device=device
+        ),
+        "positional_log_probabilities": positional,
+        "cumulative_scores": cumulative,
+        "normalized_scores": normalized,
+        "score_rule": SCORE_RULE,
+        "tie_breaking": TIE_BREAKING_RULE,
+        "construction_provenance": "canonical_pure_python_policy_then_tensor_pack",
+    }
+
+
 def build_tree_attention_mask(
     torch_module: Any,
     *,

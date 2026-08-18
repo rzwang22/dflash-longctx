@@ -50,6 +50,7 @@ from .phase2c_gold import (
 )
 from .phase2c_online import (
     build_online_tree_tensors,
+    build_online_tree_tensors_from_nodes,
     build_tree_attention_mask,
     build_tree_attention_visibility,
     clone_dynamic_cache,
@@ -57,6 +58,7 @@ from .phase2c_online import (
     dynamic_cache_lengths,
     extract_topk_candidates,
     greedy_tree_traversal_tensors,
+    layerwise_beam_tree,
     tensor_tree_metadata,
     tree_position_tensors,
     validate_online_tree_options,
@@ -67,6 +69,17 @@ from .phase2c_stabilization import (
     should_recheck,
     stabilization_commit_source,
     validate_decision_stabilization,
+)
+from .phase2d1_features import (
+    aggregate_runtime_features,
+    build_deployable_feature_rows,
+    candidate_positions,
+)
+from .phase2d1_selector import select_policy, validate_frozen_selector
+from .phase2d1_tree_policies import (
+    confidence_gated_tree,
+    score_beam_tree,
+    top1_chain_tree,
 )
 from .utils import build_target_layer_ids, extract_context_feature, sample
 
@@ -412,6 +425,10 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         reference_state_generated_prefixes: list[int] | None = None,
         decision_stabilization: str = "off",
         decision_margin_threshold: float = 0.1,
+        online_selector_mode: str | None = None,
+        online_selector_config: dict | None = None,
+        online_selector_config_hash: str | None = None,
+        online_selector_context_length: int | None = None,
     ):
         """Generate with the pinned behavior; diagnostics are strictly opt-in."""
 
@@ -453,6 +470,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 decision_stabilization, decision_margin_threshold
             )
         )
+        configured_selector = None
+        if online_selector_mode is not None:
+            if not enable_online_tree:
+                raise ValueError("online selector requires enable_online_tree=True")
+            if online_selector_config is None:
+                raise ValueError("online selector requires a frozen selector config")
+            configured_selector = validate_frozen_selector(online_selector_config)
+            if configured_selector["config_sha256"] != online_selector_config_hash:
+                raise ValueError("online selector expected config hash mismatch")
+            if online_selector_context_length is None:
+                raise ValueError("online selector requires nominal context length")
         if online_tree_gold_layer_localization and not enable_online_tree_gold_checks:
             raise ValueError("gold layer localization requires gold checks")
         if enable_online_tree_divergence_diagnostics and not (
@@ -523,6 +551,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 ),
                 decision_stabilization=configured_stabilization,
                 decision_margin_threshold=configured_margin_threshold,
+                selector_mode=online_selector_mode,
+                selector_config=configured_selector,
+                selector_context_length=online_selector_context_length,
             )
         if not any(
             (
@@ -2091,6 +2122,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         reference_state_generated_prefixes: list[int],
         decision_stabilization: str,
         decision_margin_threshold: float,
+        selector_mode: str | None,
+        selector_config: dict | None,
+        selector_context_length: int | None,
     ):
         """Run opt-in online marginal-tree drafting with packed target verification."""
 
@@ -2141,6 +2175,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         tree_traversal_checks = []
         requested_state_prefixes = set(reference_state_generated_prefixes)
         reference_state_checkpoints = {}
+        if selector_mode is not None and selector_config is None:
+            raise RuntimeError("online selector config disappeared after validation")
 
         with nvtx_range(torch, "phase2c.total", enable_profiling):
             prefill_pair = timer.start()
@@ -2300,17 +2336,166 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             baseline_ids[0] == candidates["token_ids"][:, 0]
                         ).all()
 
+                    selector_record = None
+                    selected_nodes = None
+                    effective_tree_policy = tree_policy
+                    effective_beam_width = beam_width
+                    selector_cpu_timing = {
+                        "draft_topk_device_to_host_sync_cpu_ms": 0.0,
+                        "feature_extraction_cpu_ms": 0.0,
+                        "decision_cpu_ms": 0.0,
+                        "canonical_policy_construction_cpu_ms": 0.0,
+                        "tree_tensor_pack_host_to_device_cpu_ms": 0.0,
+                        "device_to_host_synchronization_occurred": False,
+                        "host_to_device_transfer_occurred": False,
+                    }
+                    if selector_mode is not None:
+                        selector_runtime_features = None
+                        selector_feature_rows = []
+                        if selector_mode != "decision_stump":
+                            decision_started = time.perf_counter()
+                            selector_record = select_policy(
+                                selector_config,
+                                mode=selector_mode,
+                                node_budget=node_budget,
+                                context_length=selector_context_length,
+                                runtime_features=None,
+                            )
+                            selector_cpu_timing["decision_cpu_ms"] = (
+                                time.perf_counter() - decision_started
+                            ) * 1000.0
+                        sync_started = time.perf_counter()
+                        selector_token_ids = candidates["token_ids"].detach().cpu().tolist()
+                        selector_log_probabilities = (
+                            candidates["log_probabilities"].detach().cpu().tolist()
+                        )
+                        selector_cpu_timing[
+                            "draft_topk_device_to_host_sync_cpu_ms"
+                        ] = (time.perf_counter() - sync_started) * 1000.0
+                        selector_cpu_timing[
+                            "device_to_host_synchronization_occurred"
+                        ] = bool(candidates["token_ids"].is_cuda)
+                        if selector_mode == "decision_stump":
+                            feature_started = time.perf_counter()
+                            selector_positions = candidate_positions(
+                                selector_token_ids, selector_log_probabilities
+                            )
+                            selector_canonical_nodes = score_beam_tree(
+                                selector_positions, budget=node_budget
+                            )
+                            selector_feature_rows = build_deployable_feature_rows(
+                                positions=selector_positions,
+                                canonical_nodes=selector_canonical_nodes,
+                                context_length=selector_context_length,
+                                top_m=draft_top_k,
+                                node_budget=node_budget,
+                            )
+                            selector_runtime_features = aggregate_runtime_features(
+                                selector_feature_rows,
+                                context_length=selector_context_length,
+                                node_budget=node_budget,
+                                policy_configuration_count=len(
+                                    selector_config["node_budget_rules"][
+                                        str(node_budget)
+                                    ]["allowed_policy_configurations"]
+                                ),
+                            )
+                            selector_cpu_timing["feature_extraction_cpu_ms"] = (
+                                time.perf_counter() - feature_started
+                            ) * 1000.0
+                            decision_started = time.perf_counter()
+                            selector_record = select_policy(
+                                selector_config,
+                                mode=selector_mode,
+                                node_budget=node_budget,
+                                context_length=selector_context_length,
+                                runtime_features=selector_runtime_features,
+                            )
+                            selector_cpu_timing["decision_cpu_ms"] = (
+                                time.perf_counter() - decision_started
+                            ) * 1000.0
+                        selected_policy = selector_record["selected_policy"]
+                        effective_tree_policy = selected_policy["policy"]
+                        policy_parameters = selected_policy["policy_parameters"]
+                        effective_beam_width = int(policy_parameters.get("beam_width", 1))
+                        construction_started = time.perf_counter()
+                        if selector_mode != "decision_stump":
+                            selector_positions = candidate_positions(
+                                selector_token_ids, selector_log_probabilities
+                            )
+                        if effective_tree_policy == "top1_chain":
+                            selected_nodes = top1_chain_tree(
+                                selector_positions, budget=node_budget
+                            )
+                        elif effective_tree_policy == "score_beam":
+                            selected_nodes = score_beam_tree(
+                                selector_positions, budget=node_budget
+                            )
+                        elif effective_tree_policy == "confidence_gated":
+                            selected_nodes = confidence_gated_tree(
+                                selector_positions,
+                                budget=node_budget,
+                                margin_threshold=float(
+                                    policy_parameters["margin_threshold"]
+                                ),
+                                branch_width=int(policy_parameters["branch_width"]),
+                            )
+                        elif effective_tree_policy == "layerwise_beam":
+                            selected_nodes = layerwise_beam_tree(
+                                selector_positions,
+                                budget=node_budget,
+                                beam_width=effective_beam_width,
+                            )
+                        else:
+                            raise RuntimeError(
+                                f"frozen selector chose unsupported policy {effective_tree_policy}"
+                            )
+                        selector_cpu_timing[
+                            "canonical_policy_construction_cpu_ms"
+                        ] = (time.perf_counter() - construction_started) * 1000.0
+
                     tree_build_pair = timer.start()
                     with nvtx_range(torch, "phase2c.tree_build", enable_profiling):
-                        tree = build_online_tree_tensors(
-                            torch,
-                            candidates=candidates,
-                            root_token_id=block_output_ids[0, 0],
-                            policy=tree_policy,
-                            node_budget=node_budget,
-                            beam_width=beam_width,
-                        )
+                        if selector_mode is None:
+                            tree = build_online_tree_tensors(
+                                torch,
+                                candidates=candidates,
+                                root_token_id=block_output_ids[0, 0],
+                                policy=tree_policy,
+                                node_budget=node_budget,
+                                beam_width=beam_width,
+                            )
+                        else:
+                            pack_started = time.perf_counter()
+                            tree = build_online_tree_tensors_from_nodes(
+                                torch,
+                                positions=selector_positions,
+                                nodes=selected_nodes,
+                                root_token_id=block_output_ids[0, 0],
+                                policy=effective_tree_policy,
+                                node_budget=node_budget,
+                                beam_width=effective_beam_width,
+                                device=target.device,
+                            )
+                            selector_cpu_timing[
+                                "tree_tensor_pack_host_to_device_cpu_ms"
+                            ] = (time.perf_counter() - pack_started) * 1000.0
+                            selector_cpu_timing[
+                                "host_to_device_transfer_occurred"
+                            ] = bool(input_ids.is_cuda)
                     timer.stop(tree_build_pair)
+                    if selector_record is not None:
+                        selector_record["runtime_features"] = selector_runtime_features
+                        selector_record["feature_rows"] = selector_feature_rows
+                        selector_record["cpu_timing"] = selector_cpu_timing
+                        selector_record["actual_constructed_node_count"] = int(
+                            tree["actual_total_node_count"]
+                        )
+                        selector_record["node_budget_cap"] = node_budget
+                        selector_record["selected_policy_matches_tree"] = (
+                            tree["policy"] == effective_tree_policy
+                        )
+                        selector_record["target_forward_count_added"] = 0
                     if (
                         enable_reference_state_diagnostics
                         and generated_prefix_before in requested_state_prefixes
@@ -3042,7 +3227,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         "maximum_tree_depth": tree["maximum_depth"],
                         "per_depth_node_counts": tree["per_depth_node_counts"],
                         "terminal_round": accounting["stop_reason"] != "continue",
-                        "tree_policy": tree_policy,
+                        "tree_policy": tree["policy"],
+                        "online_selector": selector_record,
                         "tree_metadata": tree,
                         "tree_attention": {
                             "mask_shape": [int(value) for value in tree_mask.shape],
@@ -3277,7 +3463,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "rounds": rounds,
             "phase2c": {
                 "enabled": True,
-                "tree_policy": tree_policy,
+                "tree_policy": (
+                    "dynamic_frozen_selector"
+                    if selector_mode is not None
+                    else tree_policy
+                ),
+                "online_selector_mode": selector_mode,
+                "online_selector_config_hash": (
+                    selector_config["config_sha256"]
+                    if selector_config is not None
+                    else None
+                ),
                 "requested_node_budget": node_budget,
                 "beam_width": beam_width,
                 "draft_top_k": draft_top_k,

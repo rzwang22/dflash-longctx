@@ -17,6 +17,7 @@ from dflash.phase2b.tree import (
 )
 from dflash.phase2b1.policies import layerwise_beam_tree
 from dflash.phase2b1.ranking import capped_target_prefix_score_rank
+from dflash.phase2d1.features import build_deployable_feature_rows
 
 GAP_CLASS_PRIORITY = (
     "right_censored_or_terminal",
@@ -119,84 +120,6 @@ def _policy_specs(
     if not specs:
         raise ValueError("at least one target-blind static policy is required")
     return specs
-
-
-def _score_maps(positions: list[dict[str, Any]]) -> list[dict[int, float]]:
-    return [
-        {
-            int(candidate["token_id"]): float(candidate["log_probability"])
-            for candidate in position["candidates"]
-        }
-        for position in positions
-    ]
-
-
-def _normalized_score(node: Node, score_maps: list[dict[int, float]]) -> float:
-    return sum(score_maps[index][token] for index, token in enumerate(node)) / len(node)
-
-
-def _static_feature_state(
-    nodes: set[Node], positions: list[dict[str, Any]], depth: int
-) -> dict[str, Any]:
-    same_depth = [node for node in nodes if len(node) == depth]
-    if not same_depth:
-        return {
-            "static_beam_score": None,
-            "static_beam_score_unavailable_reason": "no_static_node_at_depth",
-            "surviving_prefix_count": 0,
-        }
-    score_maps = _score_maps(positions)
-    scores = [_normalized_score(node, score_maps) for node in same_depth]
-    return {
-        "static_beam_score": max(scores),
-        "static_beam_score_unavailable_reason": None,
-        "surviving_prefix_count": len(same_depth),
-    }
-
-
-def _deployable_features_by_position(
-    *,
-    positions: list[dict[str, Any]],
-    canonical_nodes: set[Node],
-    context_length: int,
-    top_m: int,
-    node_budget: int,
-) -> list[dict[str, Any]]:
-    rows = []
-    previous_margin = None
-    for depth, position in enumerate(positions, 1):
-        log_probabilities = [
-            float(candidate["log_probability"]) for candidate in position["candidates"]
-        ]
-        probabilities = [math.exp(value) for value in log_probabilities]
-        probability_mass = sum(probabilities)
-        normalized = [value / probability_mass for value in probabilities]
-        entropy = -sum(value * math.log(value) for value in normalized if value > 0)
-        current_margin = log_probabilities[0] - log_probabilities[1]
-        rows.append(
-            {
-                "position_index": depth,
-                "top1_log_probability": log_probabilities[0],
-                "top1_top2_log_probability_margin": current_margin,
-                "top_m_probability_mass": probability_mass,
-                "top_m_renormalized_entropy": entropy,
-                "adjacent_position_confidence_change": (
-                    current_margin - previous_margin
-                    if previous_margin is not None
-                    else None
-                ),
-                "adjacent_position_confidence_change_unavailable_reason": (
-                    None if previous_margin is not None else "no_previous_position"
-                ),
-                **_static_feature_state(canonical_nodes, positions, depth),
-                "tree_depth": depth,
-                "context_length": context_length,
-                "top_m": top_m,
-                "node_budget": node_budget,
-            }
-        )
-        previous_margin = current_margin
-    return rows
 
 
 def _availability(capture: dict[str, Any], top_m: int) -> dict[str, Any]:
@@ -548,7 +471,7 @@ def _event_for_configuration(
         replay.specs[0],
     )
     canonical_nodes = replay.tree(canonical_spec, node_budget)
-    deployable_features = _deployable_features_by_position(
+    deployable_features = build_deployable_feature_rows(
         positions=replay.positions,
         canonical_nodes=canonical_nodes,
         context_length=int(capture["nominal_prompt_length"]),

@@ -257,6 +257,38 @@ def _load_inputs(args: argparse.Namespace, manifest: dict[str, Any], provenance:
     if tokenizer.eos_token_id is None:
         raise RuntimeError("The target tokenizer does not define eos_token_id")
     prepared, inventory, _, _ = _prepare_workload(args, tokenizer, build_cohort=False)
+    if getattr(args, "exclude_selector_training_sources", False):
+        from dflash.phase1b.workload import build_workload_inventory
+
+        frozen = getattr(args, "frozen_selector", None)
+        if frozen is None:
+            raise ValueError("training-source exclusion requires a frozen selector")
+        training_ids = set(frozen["training_source_ids"])
+        total_source_ids = {
+            f"{args.longbench_task}::{row['source_sample_id']}" for row in prepared
+        }
+        excluded = sorted(total_source_ids & training_ids)
+        prepared = [
+            row
+            for row in prepared
+            if f"{args.longbench_task}::{row['source_sample_id']}" not in training_ids
+        ]
+        inventory = build_workload_inventory(
+            prepared,
+            task=args.longbench_task,
+            nominal_lengths=args.context_lengths,
+            requested_sample_count=args.pilot_samples,
+        )
+        inventory["selector_training_source_exclusion"] = {
+            "enabled": True,
+            "total_eligible_source_ids_before_length_filter": sorted(total_source_ids),
+            "excluded_training_source_ids": excluded,
+            "remaining_independent_source_ids": sorted(
+                f"{args.longbench_task}::{row['source_sample_id']}" for row in prepared
+            ),
+            "training_sources_reintroduced": False,
+            "completed_before_model_loading": True,
+        }
     explicit_matches = (
         [row for row in prepared if row["sample_id"] == args.sample_id]
         if args.sample_id is not None

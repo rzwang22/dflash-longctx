@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "selector_config_hash", "online_selector_modes", "selector_node_budgets", "evaluation_cohort", "independent_generalization", "decision_rules", "target_blind_contract", "formal_latency_source", "component_timing_source", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.1B"},
+    "status": {"enum": ["started", "ok", "failed", "error", "inventory_only"]},
+    "selector_config_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "online_selector_modes": {"type": "array", "uniqueItems": true},
+    "selector_node_budgets": {"type": "array", "items": {"enum": [16, 32]}},
+    "evaluation_cohort": {"enum": ["in_sample_mechanics", "independent_evaluation"]},
+    "independent_generalization": {"type": "boolean"},
+    "decision_rules": {"type": "object"},
+    "target_blind_contract": {"type": "object"},
+    "formal_latency_source": {"type": "string"},
+    "component_timing_source": {"type": "string"},
+    "artifacts": {"type": "array"}
+  },
+  "additionalProperties": true
+}

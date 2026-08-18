@@ -54,6 +54,7 @@ from dflash.phase2c.stabilization import (
     summarize_decision_stabilization,
     validate_decision_stabilization,
 )
+from dflash.phase2d1.runtime import validate_frozen_selector
 from experiments.phase0_smoke import TeeStream
 from experiments.phase1_observability import _atomic_write_jsonl, _call_generation
 from experiments.phase1b_longctx import (
@@ -307,6 +308,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--draft-top-k", type=int, default=16)
     parser.add_argument(
+        "--online-selector-mode",
+        choices=("global_fixed", "context_rule", "decision_stump"),
+        default=None,
+        help="Phase 2D.1B frozen selector mode; omitted preserves Phase 2C behavior.",
+    )
+    parser.add_argument("--frozen-selector-config", type=Path, default=None)
+    parser.add_argument("--selector-node-budget", type=int, choices=(16, 32), default=None)
+    parser.add_argument(
+        "--exclude-selector-training-sources",
+        action="store_true",
+        help="Exclude frozen-selector training sources during workload preflight.",
+    )
+    parser.add_argument(
         "--decision-stabilization",
         choices=DECISION_STABILIZATION_MODES,
         default="off",
@@ -364,6 +378,22 @@ def _unique(values: list[Any], *, label: str) -> tuple[Any, ...]:
 
 
 def tree_configurations(args: argparse.Namespace) -> list[dict[str, Any]]:
+    if args.online_selector_mode is not None:
+        budget = int(args.selector_node_budget)
+        return [
+            {
+                "tree_policy": "layerwise_beam",
+                "node_budget": budget,
+                "beam_width": 4 if budget == 16 else 8,
+                "draft_top_k": 16,
+                "configuration_id": f"{args.online_selector_mode}-n{budget}",
+                "decision_stabilization": args.decision_stabilization,
+                "decision_margin_threshold": args.decision_margin_threshold,
+                "online_selector_mode": args.online_selector_mode,
+                "online_selector_config": args.frozen_selector,
+                "online_selector_config_hash": args.frozen_selector["config_sha256"],
+            }
+        ]
     policies = args.tree_policies or ["top1_chain"]
     budgets = args.node_budgets or [16]
     widths = args.beam_widths or [4]
@@ -422,6 +452,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "layer_localization_p99_error": args.gold_layer_threshold,
         }
     )
+    if args.online_selector_mode is not None and args.frozen_selector_config is None:
+        raise ValueError("--online-selector-mode requires --frozen-selector-config")
+    args.frozen_selector = (
+        validate_frozen_selector(
+            json.loads(args.frozen_selector_config.read_text(encoding="utf-8"))
+        )
+        if args.frozen_selector_config is not None
+        else None
+    )
+    if args.online_selector_mode is not None:
+        if args.selector_node_budget is None:
+            raise ValueError("online selector requires --selector-node-budget")
+        args.tree_policies = ("layerwise_beam",)
+        args.node_budgets = (args.selector_node_budget,)
+        args.beam_widths = (4 if args.selector_node_budget == 16 else 8,)
+        if args.draft_top_k != 16:
+            raise ValueError("Phase 2D.1B frozen selector requires --draft-top-k 16")
+    else:
+        if args.selector_node_budget is not None:
+            raise ValueError("--selector-node-budget requires an online selector")
+    if args.exclude_selector_training_sources and args.frozen_selector is None:
+        raise ValueError(
+            "--exclude-selector-training-sources requires a frozen selector config"
+        )
     args.decision_stabilization, args.decision_margin_threshold = (
         validate_decision_stabilization(
             args.decision_stabilization, args.decision_margin_threshold
@@ -495,6 +549,13 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "gold_thresholds": args.gold_thresholds,
         "enable_reference_state_diagnostics": (
             args.enable_reference_state_diagnostics
+        ),
+        "online_selector_mode": args.online_selector_mode,
+        "frozen_selector_config": (
+            str(args.frozen_selector_config) if args.frozen_selector_config else None
+        ),
+        "frozen_selector_config_hash": (
+            args.frozen_selector["config_sha256"] if args.frozen_selector else None
         ),
         "phase2b_capture_dirs": [str(path) for path in args.phase2b_capture_dir],
         "phase2b1_analysis_dir": (
@@ -626,6 +687,21 @@ def _tree_options(
             {
                 "enable_reference_state_diagnostics": True,
                 "reference_state_generated_prefixes": reference_state_prefixes,
+            }
+        )
+    if configuration.get("online_selector_mode") is not None:
+        if "selector_context_length" not in configuration:
+            raise ValueError("selector tree options require nominal context length")
+        options.update(
+            {
+                "online_selector_mode": configuration["online_selector_mode"],
+                "online_selector_config": configuration["online_selector_config"],
+                "online_selector_config_hash": configuration[
+                    "online_selector_config_hash"
+                ],
+                "online_selector_context_length": configuration[
+                    "selector_context_length"
+                ],
             }
         )
     return options
@@ -935,6 +1011,10 @@ def _warmup(
                 temperature=0.0,
             )
             for configuration in tree_configurations(args):
+                configuration = {
+                    **configuration,
+                    "selector_context_length": nominal_length,
+                }
                 draft.spec_generate(
                     target=target,
                     input_ids=input_ids,
@@ -972,6 +1052,10 @@ def _run_sample_configuration(
     list[dict[str, Any]],
     dict[str, Any],
 ]:
+    configuration = {
+        **configuration,
+        "selector_context_length": workload["nominal_prompt_length"],
+    }
     input_ids = torch_module.tensor(
         [workload["input_ids"]], dtype=torch_module.long, device=args.device
     )
@@ -1058,6 +1142,7 @@ def _run_sample_configuration(
                     "task": workload["longbench_task"],
                     "sample_id": workload["sample_id"],
                     "source_sample_id": workload["source_sample_id"],
+                    "source_text_sha256": workload["source_text_sha256"],
                     "nominal_prompt_length": workload["nominal_prompt_length"],
                     "actual_prompt_length": workload["actual_prompt_length"],
                     "configuration_id": configuration["configuration_id"],
@@ -1658,6 +1743,10 @@ def _run_sample_configuration(
         "max_new_tokens_truncated": len(generated) == args.max_new_tokens,
         "reference": {
             "output_ids_equal": True,
+            "generated_token_count": len(reference_generated),
+            "generated_output_token_ids_sha256": _token_ids_sha256(
+                reference_generated
+            ),
             "decoded_text_equal": True,
             "eos_position_equal": True,
             "returned_token_count_equal": True,
@@ -1668,6 +1757,7 @@ def _run_sample_configuration(
             "accepted_draft_token_lengths": reference_diagnostics[
                 "accepted_draft_token_lengths"
             ],
+            "round_records": reference_diagnostics["rounds"],
         },
         "control": {
             "formal_end_to_end": True,
@@ -1901,6 +1991,12 @@ def _load_reference_and_run(
                         float(row["timing"]["round_cuda_elapsed_ms"] or 0.0)
                         for row in profile_diagnostics["rounds"]
                     ),
+                    "peak_allocated_bytes": profile_timing["profile_breakdown"][
+                        "memory"
+                    ]["peak_allocated_bytes"],
+                    "peak_reserved_bytes": profile_timing["profile_breakdown"][
+                        "memory"
+                    ]["peak_reserved_bytes"],
                     "formal_end_to_end": False,
                 }
             )

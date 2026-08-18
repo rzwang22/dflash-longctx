@@ -3,37 +3,23 @@
 from __future__ import annotations
 
 import json
-from statistics import fmean
 from typing import Any
 
-RUNTIME_FEATURE_NAMES = (
-    "context_length",
-    "node_budget_cap",
-    "mean_top1_log_probability",
-    "min_top1_log_probability",
-    "mean_top1_top2_margin",
-    "min_top1_top2_margin",
-    "mean_top16_cumulative_probability_mass",
-    "mean_top16_renormalized_entropy",
-    "mean_adjacent_confidence_change",
-    "mean_surviving_prefix_count",
-    "mean_static_beam_score",
-    "min_static_beam_score",
-    "tree_depth",
-    "policy_configuration_count",
+from .features import (
+    FORBIDDEN_RUNTIME_FIELD_FRAGMENTS,
+    RUNTIME_FEATURE_NAMES,
+    aggregate_runtime_features,
 )
-FORBIDDEN_RUNTIME_FIELD_FRAGMENTS = (
-    "target",
-    "accepted",
-    "oracle",
-    "winner",
-    "coverage",
-    "gain",
-    "gap_class",
-    "continuation",
-    "membership",
-    "rank",
-)
+
+__all__ = [
+    "FORBIDDEN_RUNTIME_FIELD_FRAGMENTS",
+    "RUNTIME_FEATURE_NAMES",
+    "build_selector_events",
+    "physical_round_id",
+    "policy_config_id",
+    "policy_map",
+    "source_cluster_id",
+]
 
 
 def source_cluster_id(row: dict[str, Any]) -> str:
@@ -68,66 +54,13 @@ def policy_config_id(
     )
 
 
-def _mean(values: list[float]) -> float:
-    if not values:
-        raise ValueError("cannot aggregate an empty deployable feature")
-    return fmean(values)
-
-
 def _runtime_features(event: dict[str, Any], policy_count: int) -> dict[str, float]:
-    rows = event["deployable_features_by_position"]
-    if len(rows) != 15:
-        raise ValueError("selector runtime features require all 15 draft positions")
-    adjacent = [
-        float(row["adjacent_position_confidence_change"])
-        for row in rows
-        if row["adjacent_position_confidence_change"] is not None
-    ]
-    static_scores = [
-        float(row["static_beam_score"])
-        for row in rows
-        if row["static_beam_score"] is not None
-    ]
-    features = {
-        "context_length": float(event["nominal_prompt_length"]),
-        "node_budget_cap": float(event["node_budget"]),
-        "mean_top1_log_probability": _mean(
-            [float(row["top1_log_probability"]) for row in rows]
-        ),
-        "min_top1_log_probability": min(
-            float(row["top1_log_probability"]) for row in rows
-        ),
-        "mean_top1_top2_margin": _mean(
-            [float(row["top1_top2_log_probability_margin"]) for row in rows]
-        ),
-        "min_top1_top2_margin": min(
-            float(row["top1_top2_log_probability_margin"]) for row in rows
-        ),
-        "mean_top16_cumulative_probability_mass": _mean(
-            [float(row["top_m_probability_mass"]) for row in rows]
-        ),
-        "mean_top16_renormalized_entropy": _mean(
-            [float(row["top_m_renormalized_entropy"]) for row in rows]
-        ),
-        "mean_adjacent_confidence_change": _mean(adjacent),
-        "mean_surviving_prefix_count": _mean(
-            [float(row["surviving_prefix_count"]) for row in rows]
-        ),
-        "mean_static_beam_score": _mean(static_scores),
-        "min_static_beam_score": min(static_scores),
-        "tree_depth": 15.0,
-        "policy_configuration_count": float(policy_count),
-    }
-    if tuple(features) != RUNTIME_FEATURE_NAMES:
-        raise RuntimeError("runtime feature contract changed unexpectedly")
-    leaking = [
-        name
-        for name in features
-        if any(fragment in name for fragment in FORBIDDEN_RUNTIME_FIELD_FRAGMENTS)
-    ]
-    if leaking:
-        raise ValueError(f"target-dependent fields entered runtime features: {leaking}")
-    return features
+    return aggregate_runtime_features(
+        event["deployable_features_by_position"],
+        context_length=int(event["nominal_prompt_length"]),
+        node_budget=int(event["node_budget"]),
+        policy_configuration_count=policy_count,
+    )
 
 
 def _policy_rows(event: dict[str, Any]) -> list[dict[str, Any]]:

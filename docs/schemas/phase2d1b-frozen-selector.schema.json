@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dflash.local/schemas/phase2d1b-frozen-selector.schema.json",
+  "type": "object",
+  "required": [
+    "schema_version", "selector_config_version", "phase2d1_commit_sha",
+    "phase2d1_artifact_hashes", "capture_hashes", "training_source_ids",
+    "runtime_feature_schema", "top_m", "node_budget_rules", "global_fixed_rule",
+    "context_conditioned_rule", "decision_stump_rule", "fallback_rule",
+    "allowed_policy_configurations", "target_blind", "task_id_used_as_feature",
+    "target_dependent_fields_present", "config_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "selector_config_version": {"const": "phase2d1b-frozen-selector-v1"},
+    "phase2d1_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "phase2d1_artifact_hashes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "capture_hashes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "training_source_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+    "runtime_feature_schema": {
+      "type": "object",
+      "required": ["schema_version", "feature_names", "feature_definitions"],
+      "properties": {
+        "schema_version": {"const": "phase2d1-runtime-features-v1"},
+        "feature_names": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+        "feature_definitions": {"type": "object"}
+      },
+      "additionalProperties": true
+    },
+    "top_m": {"const": 16},
+    "node_budget_rules": {
+      "type": "object",
+      "required": ["16", "32"],
+      "properties": {
+        "16": {"$ref": "#/$defs/budgetRule"},
+        "32": {"$ref": "#/$defs/budgetRule"}
+      },
+      "additionalProperties": false
+    },
+    "target_blind": {"const": true},
+    "task_id_used_as_feature": {"const": false},
+    "target_dependent_fields_present": {"const": false},
+    "config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "policy": {
+      "type": "object",
+      "required": ["config_id", "policy", "policy_variant", "policy_parameters", "top_m", "node_budget_cap", "node_budget_includes_root", "policy_construction_uses_target_information"],
+      "properties": {
+        "config_id": {"type": "string"},
+        "policy": {"enum": ["top1_chain", "score_beam", "confidence_gated", "layerwise_beam"]},
+        "policy_variant": {"type": "string"},
+        "policy_parameters": {"type": "object"},
+        "top_m": {"const": 16},
+        "node_budget_cap": {"enum": [16, 32]},
+        "node_budget_includes_root": {"const": true},
+        "policy_construction_uses_target_information": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "budgetRule": {
+      "type": "object",
+      "required": ["node_budget_cap", "top_m", "global_fixed_rule", "context_conditioned_rule", "decision_stump_rule", "fallback_rule", "allowed_policy_configurations"],
+      "properties": {
+        "node_budget_cap": {"enum": [16, 32]},
+        "top_m": {"const": 16},
+        "global_fixed_rule": {"type": "object"},
+        "context_conditioned_rule": {"type": "object"},
+        "decision_stump_rule": {"type": "object"},
+        "fallback_rule": {"type": "object"},
+        "allowed_policy_configurations": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/policy"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

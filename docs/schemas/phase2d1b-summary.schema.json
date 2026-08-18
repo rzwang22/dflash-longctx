@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "status", "sample_level_record_count", "round_level_record_count", "aggregates", "source_micro", "source_macro", "task_macro", "terminal_and_truncation_excluded_from_primary_acceptance"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"const": "ok"},
+    "aggregates": {"type": "array"},
+    "terminal_and_truncation_excluded_from_primary_acceptance": {"const": true}
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "source_sample_id", "nominal_prompt_length", "profiling_repeat", "round_index", "generated_root_offset", "root_token_id", "accepted_draft_token_count", "committed_token_count", "terminal", "right_censored", "actual_constructed_node_count", "node_budget_cap", "selected_policy_config", "selector_mode", "round_latency", "draft_latency", "selector_latency", "verification_latency", "KV_compaction_latency", "selector_runtime_included_in_formal_control", "component_timing_source"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "accepted_draft_token_count": {"type": "integer", "minimum": 0},
+    "committed_token_count": {"type": "integer", "minimum": 1},
+    "actual_constructed_node_count": {"type": "integer", "minimum": 1},
+    "node_budget_cap": {"enum": [16, 32]},
+    "selector_mode": {"enum": ["reference_dflash", "top1_packed_tree", "global_fixed", "context_rule", "decision_stump"]},
+    "terminal": {"type": "boolean"},
+    "right_censored": {"type": "boolean"}
+  },
+  "additionalProperties": true
+}
