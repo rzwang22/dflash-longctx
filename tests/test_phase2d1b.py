@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -497,6 +498,8 @@ class ActualExecutionCorrectnessTests(unittest.TestCase):
         self.assertTrue(result["actual_execution_correctness_passed"])
         self.assertTrue(result["diagnostic_numerical_variation_observed"])
         self.assertTrue(result["gold_fail_semantic_treated_as_diagnostic"])
+        self.assertFalse(result["actual_execution_semantic_failure"])
+        self.assertFalse(result["replay_semantic_variation_observed"])
         self.assertEqual(result["hard_correctness_failure_reasons"], [])
         self.assertTrue(
             _phase2d1b_subrun_correctness(
@@ -509,6 +512,112 @@ class ActualExecutionCorrectnessTests(unittest.TestCase):
                     "observed_native_output_divergence": False,
                 }
             )
+        )
+
+    def test_round_11_gold_kv_replay_mismatch_without_consequence_passes(
+        self,
+    ) -> None:
+        gold_kv = {
+            "round_index": 11,
+            "comparison_mode": "dense_committed_path",
+            "status": "fail_semantic",
+            "structural_status": "pass",
+            "semantic_status": "fail",
+            "numerical_status": "outside_strict_thresholds",
+            "verifier_decision_changed": True,
+            "selected_token_id": 24154,
+            "selected_token_packed_rank": 1,
+            "selected_token_dense_rank": 1,
+            "top8_ordered_equal": False,
+        }
+        original = deepcopy(gold_kv)
+        result = classify_actual_execution_correctness(
+            self._correctness(),
+            gold_logits=[
+                {
+                    "round_index": 11,
+                    "structural_status": "pass",
+                    "semantic_status": "pass",
+                    "numerical_status": "within_strict_thresholds",
+                    "argmax_equal": True,
+                    "top8_ordered_equal": True,
+                }
+            ],
+            gold_kv=[gold_kv],
+            traversal_checks=[
+                {
+                    "round_index": 11,
+                    "status": "pass",
+                    "structural_mask_issues": [],
+                    "checks": {
+                        "structural_checks_passed": True,
+                        "traversal_checks_passed": True,
+                        "kv_root_transition_checks_passed": True,
+                        "all_checks_passed": True,
+                    },
+                }
+            ],
+            gold_checks_requested=True,
+        )
+        self.assertEqual(gold_kv, original)
+        self.assertTrue(result["actual_execution_correctness_passed"])
+        self.assertFalse(result["actual_execution_semantic_failure"])
+        self.assertTrue(result["replay_semantic_mismatch"])
+        self.assertFalse(
+            result["replay_semantic_mismatch_with_actual_consequence"]
+        )
+        self.assertTrue(
+            result["replay_semantic_variation_without_actual_consequence"]
+        )
+        self.assertTrue(result["replay_semantic_variation_observed"])
+        self.assertEqual(result["replay_semantic_variation_rounds"], [11])
+        self.assertFalse(
+            result["replay_semantic_variation_with_actual_consequence"]
+        )
+        self.assertEqual(
+            result["replay_semantic_classification"],
+            "replay_semantic_variation_without_actual_consequence",
+        )
+        self.assertEqual(
+            result["replay_semantic_variation_evidence"],
+            [{"source": "gold_kv", **original}],
+        )
+        self.assertEqual(result["hard_correctness_failure_reasons"], [])
+        self.assertTrue(
+            _phase2d1b_subrun_correctness(
+                {
+                    "all_checks_passed": True,
+                    "actual_execution_correctness_passed": result[
+                        "actual_execution_correctness_passed"
+                    ],
+                    "all_required_token_exact_checks_passed": True,
+                    "observed_native_output_divergence": False,
+                }
+            )
+        )
+        _validate_correctness(
+            {
+                "all_checks_passed": True,
+                "target_blind_invariants_passed": True,
+                "actual_execution_correctness_passed": True,
+                "actual_execution_semantic_failure": False,
+                "actual_output_exactness_required": True,
+                "replay_semantic_variation_observed": True,
+                "replay_semantic_variation_with_actual_consequence": False,
+                "records": [
+                    {
+                        "phase2d1b_online_correctness_passed": True,
+                        "actual_execution_semantic_failure": False,
+                        "replay_semantic_variation_with_actual_consequence": False,
+                    }
+                ],
+            },
+            {
+                "all_control_profile_output_ids_equal": True,
+                "all_original_dflash_reference_tree_output_ids_equal": True,
+                "reference_output_stable_across_subruns": True,
+                "tree_output_stable_across_subruns": True,
+            },
         )
 
     def test_actual_output_or_structural_failure_remains_hard(self) -> None:
@@ -537,20 +646,55 @@ class ActualExecutionCorrectnessTests(unittest.TestCase):
             gold_checks_requested=True,
         )
         self.assertFalse(structural["actual_execution_correctness_passed"])
-        semantic = classify_actual_execution_correctness(
-            self._correctness(),
+        semantic_with_consequence = classify_actual_execution_correctness(
+            self._correctness(
+                original_dflash_reference_tree_output_ids_equal=False,
+                gold_output_ids_equal=False,
+            ),
             gold_logits=[
                 {
                     "round_index": 3,
                     "structural_status": "pass",
                     "semantic_status": "fail",
+                    "argmax_equal": False,
                 }
             ],
             gold_kv=[],
             traversal_checks=[],
             gold_checks_requested=True,
         )
-        self.assertFalse(semantic["actual_execution_correctness_passed"])
+        self.assertFalse(
+            semantic_with_consequence["actual_execution_correctness_passed"]
+        )
+        self.assertTrue(
+            semantic_with_consequence["actual_execution_semantic_failure"]
+        )
+        self.assertTrue(
+            semantic_with_consequence[
+                "replay_semantic_variation_with_actual_consequence"
+            ]
+        )
+        self.assertTrue(
+            any(
+                "replay_semantic_mismatch_with_actual_consequence" in reason
+                for reason in semantic_with_consequence[
+                    "hard_correctness_failure_reasons"
+                ]
+            )
+        )
+        top1 = classify_actual_execution_correctness(
+            self._correctness(top1_round_exact_equal=False),
+            gold_logits=[],
+            gold_kv=[],
+            traversal_checks=[],
+            gold_checks_requested=True,
+        )
+        self.assertFalse(top1["actual_execution_correctness_passed"])
+        self.assertTrue(top1["actual_execution_semantic_failure"])
+        self.assertIn(
+            "top1_round_semantics_mismatch",
+            top1["hard_correctness_failure_reasons"],
+        )
 
     def test_acceptance_checker_rejects_reference_tree_output_mismatch(self) -> None:
         correctness = {

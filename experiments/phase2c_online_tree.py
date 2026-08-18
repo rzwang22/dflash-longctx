@@ -2136,6 +2136,34 @@ def _load_reference_and_run(
                             )
                             for row in correctness_records
                         ),
+                        "replay_semantic_variation_observed": any(
+                            row.get(
+                                "replay_semantic_variation_observed", False
+                            )
+                            for row in correctness_records
+                        ),
+                        "replay_semantic_variation_rounds": sorted(
+                            {
+                                round_index
+                                for row in correctness_records
+                                for round_index in row.get(
+                                    "replay_semantic_variation_rounds", []
+                                )
+                            }
+                        ),
+                        "replay_semantic_variation_with_actual_consequence": any(
+                            row.get(
+                                "replay_semantic_variation_with_actual_consequence",
+                                False,
+                            )
+                            for row in correctness_records
+                        ),
+                        "actual_execution_semantic_failure": any(
+                            row.get(
+                                "actual_execution_semantic_failure", False
+                            )
+                            for row in correctness_records
+                        ),
                         "completed_checks": correctness["gold_completed_checks"],
                         "uncompleted_checks": correctness["gold_uncompleted_checks"],
                         "uncompleted_check_details": correctness[
@@ -2146,12 +2174,21 @@ def _load_reference_and_run(
                     },
                 )
             if not correctness["passed"]:
+                if args.phase2d1b_actual_execution_correctness:
+                    failure_detail = (
+                        "hard_correctness_failure_reasons="
+                        f"{correctness.get('hard_correctness_failure_reasons', [])}"
+                    )
+                else:
+                    failure_detail = (
+                        "failure_class="
+                        f"{correctness['output_divergence_failure_class'] or correctness['gold_failure_class']}"
+                    )
                 raise Phase2CCorrectnessFailure(
                     "Phase 2C.2 correctness validation failed after diagnostic "
                     "artifacts were persisted: "
                     f"gold_status={correctness['gold_status']} "
-                    "failure_class="
-                    f"{correctness['output_divergence_failure_class'] or correctness['gold_failure_class']}"
+                    f"{failure_detail}"
                 )
     manifest["status"] = "ok"
 
@@ -2632,6 +2669,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "diagnostic_numerical_variation_observed": False,
         "diagnostic_numerical_variation_reasons": [],
+        "replay_semantic_variation_observed": False,
+        "replay_semantic_variation_rounds": [],
+        "replay_semantic_variation_with_actual_consequence": False,
+        "actual_execution_semantic_failure": False,
+        "hard_correctness_failure_reasons": [],
         "hard_failure_class": None,
         "gold_status": "not_run",
         "failure_class": None,
@@ -2700,6 +2742,43 @@ def main(argv: list[str] | None = None) -> int:
                             "diagnostic_numerical_variation_observed", False
                         )
                         for record in correctness_records
+                    ),
+                    "replay_semantic_variation_observed": any(
+                        record.get(
+                            "replay_semantic_variation_observed", False
+                        )
+                        for record in correctness_records
+                    ),
+                    "replay_semantic_variation_rounds": sorted(
+                        {
+                            round_index
+                            for record in correctness_records
+                            for round_index in record.get(
+                                "replay_semantic_variation_rounds", []
+                            )
+                        }
+                    ),
+                    "replay_semantic_variation_with_actual_consequence": any(
+                        record.get(
+                            "replay_semantic_variation_with_actual_consequence",
+                            False,
+                        )
+                        for record in correctness_records
+                    ),
+                    "actual_execution_semantic_failure": any(
+                        record.get(
+                            "actual_execution_semantic_failure", False
+                        )
+                        for record in correctness_records
+                    ),
+                    "hard_correctness_failure_reasons": list(
+                        dict.fromkeys(
+                            reason
+                            for record in correctness_records
+                            for reason in record.get(
+                                "hard_correctness_failure_reasons", []
+                            )
+                        )
                     ),
                     "all_required_token_exact_checks_passed": all(
                         not record.get("token_exact_required", True)
@@ -2796,6 +2875,17 @@ def main(argv: list[str] | None = None) -> int:
                 correctness["uncompleted_check_details"] = last.get(
                     "gold_uncompleted_check_details", []
                 )
+                for field in (
+                    "actual_execution_correctness_passed",
+                    "actual_execution_semantic_failure",
+                    "diagnostic_numerical_variation_observed",
+                    "diagnostic_numerical_variation_reasons",
+                    "replay_semantic_variation_observed",
+                    "replay_semantic_variation_rounds",
+                    "replay_semantic_variation_with_actual_consequence",
+                    "hard_correctness_failure_reasons",
+                ):
+                    correctness[field] = last.get(field, correctness.get(field))
             print(f"FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
             traceback.print_exc()
         except Exception as exc:  # noqa: BLE001 - preserve partial evidence.
@@ -2811,6 +2901,17 @@ def main(argv: list[str] | None = None) -> int:
                 correctness["uncompleted_check_details"] = last.get(
                     "gold_uncompleted_check_details", []
                 )
+                for field in (
+                    "actual_execution_correctness_passed",
+                    "actual_execution_semantic_failure",
+                    "diagnostic_numerical_variation_observed",
+                    "diagnostic_numerical_variation_reasons",
+                    "replay_semantic_variation_observed",
+                    "replay_semantic_variation_rounds",
+                    "replay_semantic_variation_with_actual_consequence",
+                    "hard_correctness_failure_reasons",
+                ):
+                    correctness[field] = last.get(field, correctness.get(field))
             print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
             traceback.print_exc()
         finally:

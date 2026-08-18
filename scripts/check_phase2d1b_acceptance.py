@@ -50,6 +50,12 @@ def _validate_correctness(correctness: dict, cross_run: dict) -> None:
         raise ValueError("Phase 2D.1B correctness or target-blind invariant failed")
     if not correctness.get("actual_execution_correctness_passed", False):
         raise ValueError("Phase 2D.1B actual execution correctness failed")
+    if correctness.get("actual_execution_semantic_failure", False):
+        raise ValueError("Phase 2D.1B actual execution semantic failure")
+    if correctness.get(
+        "replay_semantic_variation_with_actual_consequence", False
+    ):
+        raise ValueError("replay semantic mismatch has an actual consequence")
     if not correctness.get("actual_output_exactness_required", False):
         raise ValueError("Phase 2D.1B did not require actual output exactness")
     if any(
@@ -59,6 +65,12 @@ def _validate_correctness(correctness: dict, cross_run: dict) -> None:
         raise ValueError(
             "a selector subrun has output divergence or incomplete token-exact correctness"
         )
+    if any(
+        row.get("actual_execution_semantic_failure", False)
+        or row.get("replay_semantic_variation_with_actual_consequence", False)
+        for row in correctness["records"]
+    ):
+        raise ValueError("a selector subrun has an actual semantic consequence")
     if not all(
         cross_run.get(field, False)
         for field in (

@@ -618,6 +618,10 @@ def _initialize_semantic_artifacts(output: Path) -> None:
             "actual_output_exactness_required": True,
             "diagnostic_numerical_variation_observed": False,
             "diagnostic_numerical_variation_reasons": [],
+            "replay_semantic_variation_observed": False,
+            "replay_semantic_variation_rounds": [],
+            "replay_semantic_variation_with_actual_consequence": False,
+            "actual_execution_semantic_failure": False,
             "hard_failure_classes": [],
         },
         "offline-online-selector-summary.json": {
@@ -710,6 +714,7 @@ def main(argv: list[str] | None = None) -> int:
             "original_dflash_tree_output_exactness_required": True,
             "structural_kv_traversal_failures_are_hard": True,
             "consequence_free_numerical_backend_variation_is_diagnostic": True,
+            "replay_semantic_mismatch_requires_actual_consequence_to_fail": True,
         },
         "subruns": [],
         "artifacts": list(ROOT_ARTIFACTS + PHASE2C_DIAGNOSTIC_ARTIFACTS),
@@ -796,6 +801,33 @@ def main(argv: list[str] | None = None) -> int:
                         "diagnostic_numerical_variation_reasons": child_correctness.get(
                             "diagnostic_numerical_variation_reasons", []
                         ),
+                        "replay_semantic_variation_observed": child_correctness.get(
+                            "replay_semantic_variation_observed", False
+                        ),
+                        "replay_semantic_mismatch": child_correctness.get(
+                            "replay_semantic_mismatch", False
+                        ),
+                        "replay_semantic_mismatch_with_actual_consequence": child_correctness.get(
+                            "replay_semantic_mismatch_with_actual_consequence",
+                            False,
+                        ),
+                        "replay_semantic_variation_without_actual_consequence": child_correctness.get(
+                            "replay_semantic_variation_without_actual_consequence",
+                            False,
+                        ),
+                        "replay_semantic_variation_rounds": child_correctness.get(
+                            "replay_semantic_variation_rounds", []
+                        ),
+                        "replay_semantic_variation_with_actual_consequence": child_correctness.get(
+                            "replay_semantic_variation_with_actual_consequence",
+                            False,
+                        ),
+                        "actual_execution_semantic_failure": child_correctness.get(
+                            "actual_execution_semantic_failure", False
+                        ),
+                        "hard_correctness_failure_reasons": child_correctness.get(
+                            "hard_correctness_failure_reasons", []
+                        ),
                         "phase2d1b_online_correctness_passed": (
                             _phase2d1b_subrun_correctness(child_correctness)
                         ),
@@ -866,6 +898,29 @@ def main(argv: list[str] | None = None) -> int:
                             "diagnostic_numerical_variation_reasons"
                         ]
                     }
+                ),
+                "replay_semantic_variation_observed": any(
+                    row["replay_semantic_variation_observed"]
+                    for row in correctness_records
+                ),
+                "replay_semantic_variation_rounds": sorted(
+                    {
+                        round_index
+                        for row in correctness_records
+                        for round_index in row[
+                            "replay_semantic_variation_rounds"
+                        ]
+                    }
+                ),
+                "replay_semantic_variation_with_actual_consequence": any(
+                    row[
+                        "replay_semantic_variation_with_actual_consequence"
+                    ]
+                    for row in correctness_records
+                ),
+                "actual_execution_semantic_failure": any(
+                    row["actual_execution_semantic_failure"]
+                    for row in correctness_records
                 ),
                 "hard_failure_classes": sorted(
                     {
