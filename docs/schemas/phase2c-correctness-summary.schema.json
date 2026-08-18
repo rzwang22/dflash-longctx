@@ -8,6 +8,11 @@
     "schema_version": {"const": "1.0"},
     "status": {"enum": ["started", "ok", "failed", "error"]},
     "all_checks_passed": {"type": "boolean"},
+    "actual_execution_correctness_passed": {"type": "boolean"},
+    "actual_output_exactness_required": {"type": "boolean"},
+    "diagnostic_numerical_variation_observed": {"type": "boolean"},
+    "diagnostic_numerical_variation_reasons": {"type": "array", "items": {"type": "string"}},
+    "hard_failure_class": {"type": ["string", "null"]},
     "gold_status": {"enum": ["not_run", "pass_exact", "pass_semantic_with_numerical_variation", "fail_semantic", "fail_structural"]},
     "failure_class": {"type": ["string", "null"]},
     "completed_checks": {"type": "array", "items": {"type": "string"}},
@@ -31,5 +36,19 @@
       }
     },
     "error": {"type": ["object", "null"]}
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"actual_output_exactness_required": {"const": true}},
+        "required": ["actual_output_exactness_required"]
+      },
+      "then": {
+        "required": [
+          "actual_execution_correctness_passed",
+          "diagnostic_numerical_variation_observed"
+        ]
+      }
+    }
+  ]
 }

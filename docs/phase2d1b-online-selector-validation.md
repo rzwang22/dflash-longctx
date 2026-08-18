@@ -82,6 +82,16 @@ The automatic decision is one of the registered Phase 2D.1B values. Correctness
 or target-blind failure has first priority. Phase 2C shadow-mode diagnostics
 remain available, but any observed Original-DFlash/tree output divergence is a
 Phase 2D.1B correctness failure and can never yield an adoption decision.
+For Phase 2D.1B subruns, actual Original-DFlash/tree execution is the semantic
+oracle. A Gold replay labelled `numerical_backend_variation` (including strict
+numerical threshold or Top-K ordering variation) is retained as a diagnostic
+warning when actual outputs are exact and the raw structural, semantic, KV, and
+traversal checks pass. It is not a hard failure by itself. Output divergence,
+structural/mask/position/KV/traversal failure, incomplete Gold validation, or a
+raw semantic failure remains fatal. `correctness-summary.json` records
+`actual_execution_correctness_passed`,
+`diagnostic_numerical_variation_observed`, and the mandatory actual-output
+exactness contract explicitly.
 Inadequate independent evidence is
 reported explicitly. A configuration is not adoptable unless online
 accepted/committed tokens improve and formal latency per returned token falls.

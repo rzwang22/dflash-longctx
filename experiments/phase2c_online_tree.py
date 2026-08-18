@@ -55,6 +55,7 @@ from dflash.phase2c.stabilization import (
     validate_decision_stabilization,
 )
 from dflash.phase2d1.runtime import validate_frozen_selector
+from dflash.phase2d1b.correctness import classify_actual_execution_correctness
 from experiments.phase0_smoke import TeeStream
 from experiments.phase1_observability import _atomic_write_jsonl, _call_generation
 from experiments.phase1b_longctx import (
@@ -316,6 +317,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frozen-selector-config", type=Path, default=None)
     parser.add_argument("--selector-node-budget", type=int, choices=(16, 32), default=None)
     parser.add_argument(
+        "--phase2d1b-actual-execution-correctness",
+        action="store_true",
+        help=(
+            "Use the Phase 2D.1B actual-execution hard gate while retaining "
+            "Gold numerical replay variation as diagnostics."
+        ),
+    )
+    parser.add_argument(
         "--exclude-selector-training-sources",
         action="store_true",
         help="Exclude frozen-selector training sources during workload preflight.",
@@ -461,6 +470,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.frozen_selector_config is not None
         else None
     )
+    if (
+        args.phase2d1b_actual_execution_correctness
+        and args.frozen_selector is None
+    ):
+        raise ValueError(
+            "Phase 2D.1B actual-execution correctness requires a frozen selector"
+        )
     if args.online_selector_mode is not None:
         if args.selector_node_budget is None:
             raise ValueError("online selector requires --selector-node-budget")
@@ -542,6 +558,9 @@ def run_configuration(args: argparse.Namespace) -> dict[str, Any]:
         "decision_margin_threshold": args.decision_margin_threshold,
         "decision_margin_frontier_thresholds": list(DEFAULT_MARGIN_THRESHOLDS),
         "enable_gold_checks": args.enable_gold_checks,
+        "phase2d1b_actual_execution_correctness": (
+            args.phase2d1b_actual_execution_correctness
+        ),
         "gold_comparison_modes": list(args.gold_comparison_modes),
         "gold_layer_localization": args.gold_layer_localization,
         "gold_max_rounds": args.gold_max_rounds,
@@ -605,6 +624,12 @@ def _new_manifest(
             "configured_attention_implementation_is_not_a_kernel_name": True,
             "actual_cuda_kernel": None,
             "numerical_variation_requires_control_evidence": True,
+            "phase2d1b_actual_execution_is_semantic_oracle": (
+                args.phase2d1b_actual_execution_correctness
+            ),
+            "diagnostic_numerical_variation_is_not_a_hard_failure": (
+                args.phase2d1b_actual_execution_correctness
+            ),
         },
     }
     manifest["measurement_policy"] = {
@@ -1866,6 +1891,19 @@ def _run_sample_configuration(
             )
         ),
     }
+    if args.phase2d1b_actual_execution_correctness:
+        actual_execution = classify_actual_execution_correctness(
+            correctness,
+            gold_logits=gold_logits,
+            gold_kv=gold_kv,
+            traversal_checks=traversal_checks,
+            gold_checks_requested=args.enable_gold_checks,
+        )
+        correctness.update(actual_execution)
+        correctness["passed"] = actual_execution[
+            "actual_execution_correctness_passed"
+        ]
+        sample["correctness"].update(actual_execution)
     return (
         sample,
         round_rows,
@@ -2081,6 +2119,22 @@ def _load_reference_and_run(
                         ),
                         "all_checks_passed": all(
                             row["passed"] for row in correctness_records
+                        ),
+                        "actual_execution_correctness_passed": all(
+                            row.get(
+                                "actual_execution_correctness_passed",
+                                row["passed"],
+                            )
+                            for row in correctness_records
+                        ),
+                        "actual_output_exactness_required": bool(
+                            args.phase2d1b_actual_execution_correctness
+                        ),
+                        "diagnostic_numerical_variation_observed": any(
+                            row.get(
+                                "diagnostic_numerical_variation_observed", False
+                            )
+                            for row in correctness_records
                         ),
                         "completed_checks": correctness["gold_completed_checks"],
                         "uncompleted_checks": correctness["gold_uncompleted_checks"],
@@ -2572,6 +2626,13 @@ def main(argv: list[str] | None = None) -> int:
         "schema_version": SCHEMA_VERSION,
         "status": "started",
         "all_checks_passed": False,
+        "actual_execution_correctness_passed": False,
+        "actual_output_exactness_required": bool(
+            args.phase2d1b_actual_execution_correctness
+        ),
+        "diagnostic_numerical_variation_observed": False,
+        "diagnostic_numerical_variation_reasons": [],
+        "hard_failure_class": None,
         "gold_status": "not_run",
         "failure_class": None,
         "completed_checks": [],
@@ -2623,6 +2684,22 @@ def main(argv: list[str] | None = None) -> int:
                     "status": "ok",
                     "all_checks_passed": all(
                         record["passed"] for record in correctness_records
+                    ),
+                    "actual_execution_correctness_passed": all(
+                        record.get(
+                            "actual_execution_correctness_passed",
+                            record["passed"],
+                        )
+                        for record in correctness_records
+                    ),
+                    "actual_output_exactness_required": bool(
+                        args.phase2d1b_actual_execution_correctness
+                    ),
+                    "diagnostic_numerical_variation_observed": any(
+                        record.get(
+                            "diagnostic_numerical_variation_observed", False
+                        )
+                        for record in correctness_records
                     ),
                     "all_required_token_exact_checks_passed": all(
                         not record.get("token_exact_required", True)
@@ -2677,6 +2754,20 @@ def main(argv: list[str] | None = None) -> int:
                     ],
                     "error": None,
                 }
+            )
+            correctness["diagnostic_numerical_variation_reasons"] = sorted(
+                {
+                    reason
+                    for record in correctness_records
+                    for reason in record.get(
+                        "diagnostic_numerical_variation_reasons", []
+                    )
+                }
+            )
+            correctness["hard_failure_class"] = (
+                None
+                if correctness["actual_execution_correctness_passed"]
+                else correctness["failure_class"]
             )
             offline = _offline_comparison(args, rounds)
             _attach_offline_comparison(rounds, offline)

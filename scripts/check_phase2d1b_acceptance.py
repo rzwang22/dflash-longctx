@@ -43,40 +43,15 @@ def _validate(value: dict, name: str) -> None:
     Draft202012Validator(schema).validate(value)
 
 
-def check_output(output_dir: Path) -> dict:
-    root = output_dir.expanduser().resolve()
-    missing = [
-        name
-        for name in (*ROOT_ARTIFACTS, *PHASE2C_DIAGNOSTIC_ARTIFACTS)
-        if not (root / name).is_file()
-    ]
-    if missing:
-        raise ValueError(f"Phase 2D.1B output lacks artifacts: {missing}")
-    manifest = _read_json(root / "manifest.json")
-    frozen = validate_frozen_selector(_read_json(root / "frozen-selector.json"))
-    summary = _read_json(root / "selector-summary.json")
-    comparison = _read_json(root / "selector-comparison.json")
-    cross_run = _read_json(root / "cross-run-comparison.json")
-    correctness = _read_json(root / "correctness-summary.json")
-    rounds = _read_jsonl(root / "selector-rounds.jsonl")
-    samples = _read_jsonl(root / "samples.jsonl")
-    decisions = _read_jsonl(root / "selector-decisions.jsonl")
-    inventory = _read_json(root / "workload-inventory.json")
-    alignment = _read_json(root / "offline-online-selector-summary.json")
-    _validate(manifest, "phase2d1b-manifest.schema.json")
-    _validate(summary, "phase2d1b-summary.schema.json")
-    for row in rounds:
-        _validate(row, "phase2d1b-round.schema.json")
-    for row in samples:
-        _validate(row, "phase2d1b-sample.schema.json")
-    if manifest["status"] != "ok":
-        raise ValueError("Phase 2D.1B manifest is not successful")
-    if manifest["selector_config_hash"] != frozen["config_sha256"]:
-        raise ValueError("manifest/frozen selector hash mismatch")
+def _validate_correctness(correctness: dict, cross_run: dict) -> None:
     if not correctness["all_checks_passed"] or not correctness[
         "target_blind_invariants_passed"
     ]:
         raise ValueError("Phase 2D.1B correctness or target-blind invariant failed")
+    if not correctness.get("actual_execution_correctness_passed", False):
+        raise ValueError("Phase 2D.1B actual execution correctness failed")
+    if not correctness.get("actual_output_exactness_required", False):
+        raise ValueError("Phase 2D.1B did not require actual output exactness")
     if any(
         not row.get("phase2d1b_online_correctness_passed", False)
         for row in correctness["records"]
@@ -94,6 +69,46 @@ def check_output(output_dir: Path) -> dict:
         )
     ):
         raise ValueError("cross-run/reference/control output stability failed")
+
+
+def check_output(output_dir: Path) -> dict:
+    root = output_dir.expanduser().resolve()
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError("Phase 2D.1B output has no manifest.json")
+    manifest = _read_json(manifest_path)
+    if manifest.get("status") != "ok":
+        error = manifest.get("error")
+        raise ValueError(
+            "Phase 2D.1B run is incomplete or unsuccessful: "
+            f"status={manifest.get('status')!r} error={error!r}"
+        )
+    missing = [
+        name
+        for name in (*ROOT_ARTIFACTS, *PHASE2C_DIAGNOSTIC_ARTIFACTS)
+        if not (root / name).is_file()
+    ]
+    if missing:
+        raise ValueError(f"Phase 2D.1B output lacks artifacts: {missing}")
+    frozen = validate_frozen_selector(_read_json(root / "frozen-selector.json"))
+    summary = _read_json(root / "selector-summary.json")
+    comparison = _read_json(root / "selector-comparison.json")
+    cross_run = _read_json(root / "cross-run-comparison.json")
+    correctness = _read_json(root / "correctness-summary.json")
+    rounds = _read_jsonl(root / "selector-rounds.jsonl")
+    samples = _read_jsonl(root / "samples.jsonl")
+    decisions = _read_jsonl(root / "selector-decisions.jsonl")
+    inventory = _read_json(root / "workload-inventory.json")
+    alignment = _read_json(root / "offline-online-selector-summary.json")
+    _validate(manifest, "phase2d1b-manifest.schema.json")
+    _validate(summary, "phase2d1b-summary.schema.json")
+    for row in rounds:
+        _validate(row, "phase2d1b-round.schema.json")
+    for row in samples:
+        _validate(row, "phase2d1b-sample.schema.json")
+    if manifest["selector_config_hash"] != frozen["config_sha256"]:
+        raise ValueError("manifest/frozen selector hash mismatch")
+    _validate_correctness(correctness, cross_run)
     for row in rounds:
         if row["committed_token_count"] != 1 + row["accepted_draft_token_count"]:
             raise ValueError("accepted/committed accounting invariant failed")
@@ -151,7 +166,23 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args(argv)
-    print(json.dumps(check_output(args.output_dir), indent=2, sort_keys=True))
+    try:
+        result = check_output(args.output_dir)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "fail",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 

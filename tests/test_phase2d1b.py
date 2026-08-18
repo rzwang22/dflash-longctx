@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import math
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -32,6 +34,7 @@ from dflash.phase2d1.runtime import (
 )
 from dflash.phase2d1b.alignment import build_offline_online_alignment
 from dflash.phase2d1b.cohort import build_selector_inventory
+from dflash.phase2d1b.correctness import classify_actual_execution_correctness
 from dflash.phase2d1b.metrics import (
     aggregate_selector_results,
     build_decision,
@@ -47,6 +50,13 @@ from experiments.phase2d1b_online_selector import (
     _tree_sample,
     parse_args,
 )
+from scripts.check_phase2d1b_acceptance import (
+    _validate_correctness,
+)
+from scripts.check_phase2d1b_acceptance import (
+    check_output as check_phase2d1b_output,
+)
+from scripts.check_phase2d1b_acceptance import main as phase2d1b_checker_main
 from tests.test_phase2d1 import _selector_events
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -436,6 +446,130 @@ class MetricsAndAlignmentTests(unittest.TestCase):
         self.assertEqual(summary["different_round_segmentation_forced_matches"], 0)
 
 
+class ActualExecutionCorrectnessTests(unittest.TestCase):
+    def _correctness(self, **updates: object) -> dict:
+        value = {
+            "reference_output_ids_equal": True,
+            "original_dflash_reference_tree_output_ids_equal": True,
+            "control_profile_output_ids_equal": True,
+            "gold_output_ids_equal": True,
+            "top1_round_exact_equal": True,
+            "gold_status": "fail_semantic",
+            "gold_failure_class": "numerical_backend_variation",
+            "gold_uncompleted_checks": [],
+            "output_divergence_failure_class": None,
+        }
+        value.update(updates)
+        return value
+
+    def test_numerical_backend_variation_without_actual_consequence_passes(
+        self,
+    ) -> None:
+        result = classify_actual_execution_correctness(
+            self._correctness(),
+            gold_logits=[
+                {
+                    "round_index": 0,
+                    "structural_status": "pass",
+                    "semantic_status": "pass",
+                    "numerical_status": "outside_strict_thresholds",
+                    "argmax_equal": True,
+                    "top8_ordered_equal": False,
+                }
+            ],
+            gold_kv=[
+                {
+                    "round_index": 0,
+                    "structural_status": "pass",
+                    "semantic_status": "pass",
+                    "numerical_status": "within_strict_thresholds",
+                }
+            ],
+            traversal_checks=[
+                {
+                    "round_index": 0,
+                    "status": "pass",
+                    "checks": {"all_checks_passed": True},
+                }
+            ],
+            gold_checks_requested=True,
+        )
+        self.assertTrue(result["actual_execution_correctness_passed"])
+        self.assertTrue(result["diagnostic_numerical_variation_observed"])
+        self.assertTrue(result["gold_fail_semantic_treated_as_diagnostic"])
+        self.assertEqual(result["hard_correctness_failure_reasons"], [])
+        self.assertTrue(
+            _phase2d1b_subrun_correctness(
+                {
+                    "all_checks_passed": True,
+                    "actual_execution_correctness_passed": result[
+                        "actual_execution_correctness_passed"
+                    ],
+                    "all_required_token_exact_checks_passed": True,
+                    "observed_native_output_divergence": False,
+                }
+            )
+        )
+
+    def test_actual_output_or_structural_failure_remains_hard(self) -> None:
+        output = classify_actual_execution_correctness(
+            self._correctness(
+                original_dflash_reference_tree_output_ids_equal=False,
+                gold_output_ids_equal=False,
+            ),
+            gold_logits=[],
+            gold_kv=[],
+            traversal_checks=[],
+            gold_checks_requested=True,
+        )
+        self.assertFalse(output["actual_execution_correctness_passed"])
+        structural = classify_actual_execution_correctness(
+            self._correctness(),
+            gold_logits=[
+                {
+                    "round_index": 2,
+                    "structural_status": "fail",
+                    "semantic_status": "pass",
+                }
+            ],
+            gold_kv=[],
+            traversal_checks=[],
+            gold_checks_requested=True,
+        )
+        self.assertFalse(structural["actual_execution_correctness_passed"])
+        semantic = classify_actual_execution_correctness(
+            self._correctness(),
+            gold_logits=[
+                {
+                    "round_index": 3,
+                    "structural_status": "pass",
+                    "semantic_status": "fail",
+                }
+            ],
+            gold_kv=[],
+            traversal_checks=[],
+            gold_checks_requested=True,
+        )
+        self.assertFalse(semantic["actual_execution_correctness_passed"])
+
+    def test_acceptance_checker_rejects_reference_tree_output_mismatch(self) -> None:
+        correctness = {
+            "all_checks_passed": True,
+            "target_blind_invariants_passed": True,
+            "actual_execution_correctness_passed": True,
+            "actual_output_exactness_required": True,
+            "records": [{"phase2d1b_online_correctness_passed": True}],
+        }
+        cross_run = {
+            "all_control_profile_output_ids_equal": True,
+            "all_original_dflash_reference_tree_output_ids_equal": False,
+            "reference_output_stable_across_subruns": True,
+            "tree_output_stable_across_subruns": True,
+        }
+        with self.assertRaisesRegex(ValueError, "output stability"):
+            _validate_correctness(correctness, cross_run)
+
+
 class RunnerContractTests(unittest.TestCase):
     def test_cli_defaults_and_overrides_are_lazy(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -576,6 +710,7 @@ class RunnerContractTests(unittest.TestCase):
             _phase2d1b_subrun_correctness(
                 {
                     "all_checks_passed": True,
+                    "actual_execution_correctness_passed": False,
                     "all_required_token_exact_checks_passed": True,
                     "observed_native_output_divergence": True,
                 }
@@ -585,6 +720,7 @@ class RunnerContractTests(unittest.TestCase):
             _phase2d1b_subrun_correctness(
                 {
                     "all_checks_passed": True,
+                    "actual_execution_correctness_passed": True,
                     "all_required_token_exact_checks_passed": True,
                     "observed_native_output_divergence": False,
                 }
@@ -609,6 +745,23 @@ class RunnerContractTests(unittest.TestCase):
                     for name in required - initialized_elsewhere
                 )
             )
+
+    def test_checker_reports_started_run_before_schema_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            (output / "manifest.json").write_text(
+                json.dumps({"schema_version": "1.0", "status": "started"})
+            )
+            with self.assertRaisesRegex(ValueError, "incomplete.*status='started'"):
+                check_phase2d1b_output(output)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                return_code = phase2d1b_checker_main(
+                    ["--output-dir", str(output)]
+                )
+            self.assertEqual(return_code, 1)
+            self.assertNotIn("Traceback", stderr.getvalue())
+            self.assertIn('"status": "fail"', stderr.getvalue())
 
 
 if __name__ == "__main__":

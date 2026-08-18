@@ -210,7 +210,11 @@ def _append_option(command: list[str], name: str, value: Any) -> None:
 
 
 def _common_phase2c_command(args: argparse.Namespace, output: Path) -> list[str]:
-    command = [sys.executable, str(REPO_ROOT / "experiments/phase2c_online_tree.py")]
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "experiments/phase2c_online_tree.py"),
+        "--phase2d1b-actual-execution-correctness",
+    ]
     for name, value in (
         ("--target-model", args.target_model),
         ("--target-revision", args.target_revision),
@@ -592,6 +596,7 @@ def _phase2d1b_subrun_correctness(value: dict[str, Any]) -> bool:
     """Require token-exact online behavior even when Phase 2C runs in shadow mode."""
     return bool(
         value["all_checks_passed"]
+        and value["actual_execution_correctness_passed"]
         and value["all_required_token_exact_checks_passed"]
         and not value["observed_native_output_divergence"]
     )
@@ -609,6 +614,11 @@ def _initialize_semantic_artifacts(output: Path) -> None:
             "schema_version": "1.0",
             "status": "started",
             "all_checks_passed": False,
+            "actual_execution_correctness_passed": False,
+            "actual_output_exactness_required": True,
+            "diagnostic_numerical_variation_observed": False,
+            "diagnostic_numerical_variation_reasons": [],
+            "hard_failure_classes": [],
         },
         "offline-online-selector-summary.json": {
             "schema_version": "1.0",
@@ -695,6 +705,12 @@ def main(argv: list[str] | None = None) -> int:
         },
         "formal_latency_source": "unprofiled_control_cpu_wall_including_selector_and_gpu_sync",
         "component_timing_source": "separate_profiling_path",
+        "correctness_gate": {
+            "actual_execution_is_semantic_oracle": True,
+            "original_dflash_tree_output_exactness_required": True,
+            "structural_kv_traversal_failures_are_hard": True,
+            "consequence_free_numerical_backend_variation_is_diagnostic": True,
+        },
         "subruns": [],
         "artifacts": list(ROOT_ARTIFACTS + PHASE2C_DIAGNOSTIC_ARTIFACTS),
         "error": None,
@@ -768,10 +784,25 @@ def main(argv: list[str] | None = None) -> int:
                         "observed_native_output_divergence": child_correctness[
                             "observed_native_output_divergence"
                         ],
+                        "actual_execution_correctness_passed": child_correctness[
+                            "actual_execution_correctness_passed"
+                        ],
+                        "actual_output_exactness_required": child_correctness[
+                            "actual_output_exactness_required"
+                        ],
+                        "diagnostic_numerical_variation_observed": child_correctness[
+                            "diagnostic_numerical_variation_observed"
+                        ],
+                        "diagnostic_numerical_variation_reasons": child_correctness.get(
+                            "diagnostic_numerical_variation_reasons", []
+                        ),
                         "phase2d1b_online_correctness_passed": (
                             _phase2d1b_subrun_correctness(child_correctness)
                         ),
                         "failure_class": child_correctness.get("failure_class"),
+                        "hard_failure_class": child_correctness.get(
+                            "hard_failure_class"
+                        ),
                     }
                 )
                 provenance.append(_read_json(subrun["output_dir"] / "source-provenance.json"))
@@ -819,6 +850,30 @@ def main(argv: list[str] | None = None) -> int:
                 "schema_version": "1.0",
                 "status": "pass" if correctness_passed else "fail",
                 "all_checks_passed": correctness_passed,
+                "actual_execution_correctness_passed": (
+                    phase2c_correctness_passed
+                ),
+                "actual_output_exactness_required": True,
+                "diagnostic_numerical_variation_observed": any(
+                    row["diagnostic_numerical_variation_observed"]
+                    for row in correctness_records
+                ),
+                "diagnostic_numerical_variation_reasons": sorted(
+                    {
+                        reason
+                        for row in correctness_records
+                        for reason in row[
+                            "diagnostic_numerical_variation_reasons"
+                        ]
+                    }
+                ),
+                "hard_failure_classes": sorted(
+                    {
+                        row["hard_failure_class"]
+                        for row in correctness_records
+                        if row["hard_failure_class"] is not None
+                    }
+                ),
                 "records": correctness_records,
                 "phase2c_correctness_passed": phase2c_correctness_passed,
                 "target_blind_invariants_passed": target_blind_invariants_passed,
