@@ -118,6 +118,15 @@ def _write_subrun(
     tree = reference if actual_equal else [10, 20, 30, tree_tail]
     target = list(reference)
     manifest_status = "ok" if return_code == 0 else "failed"
+    reported_failure_class = (
+        failure_class_override
+        if failure_class_override is not None
+        else "numerical_backend_decision_divergence"
+        if not actual_equal
+        else "numerical_backend_variation"
+        if replay_mismatch
+        else None
+    )
     _write_json(
         root / "manifest.json",
         {
@@ -141,15 +150,7 @@ def _write_subrun(
         root / "correctness-summary.json",
         {
             "gold_status": "fail_semantic" if replay_mismatch else "pass_exact",
-            "failure_class": (
-                failure_class_override
-                if failure_class_override is not None
-                else "numerical_backend_decision_divergence"
-                if not actual_equal
-                else "numerical_backend_variation"
-                if replay_mismatch
-                else None
-            ),
+            "failure_class": reported_failure_class,
             "uncompleted_checks": (
                 ["kv_compaction", "kv_next_step_logits"]
                 if downstream_gold_skip_reason is not None
@@ -171,13 +172,13 @@ def _write_subrun(
             "actual_execution_semantic_failure": not actual_equal,
             "diagnostic_numerical_variation_observed": replay_mismatch,
             "diagnostic_numerical_variation_reasons": (
-                ["gold_semantic_failure:numerical_backend_variation"]
+                [f"gold_semantic_failure:{reported_failure_class}"]
                 if replay_mismatch
                 else []
             ),
             "replay_semantic_variation_with_actual_consequence": not actual_equal,
             "hard_correctness_failure_reasons": (
-                ["gold_semantic_failure:numerical_backend_variation"]
+                [f"gold_semantic_failure:{reported_failure_class}"]
                 if replay_mismatch
                 else []
             ),
@@ -575,6 +576,7 @@ class Phase2D1BNRTests(unittest.TestCase):
         )
         self.assertFalse(result["actual_execution_semantic_failure"])
         self.assertTrue(result["replay_only_variation_observed"])
+        self.assertTrue(result["diagnostic_classification_evidence_sufficient"])
         self.assertTrue(result["diagnostic_numerical_variation_observed"])
         self.assertTrue(result["replay_semantic_mismatch_observed"])
         self.assertEqual(
@@ -606,6 +608,39 @@ class Phase2D1BNRTests(unittest.TestCase):
             result["downstream_gold_checks_skipped_after_confirmed_replay_variation"]
         )
 
+    def test_real_shape_exact_output_gold_semantic_variation_continues(self) -> None:
+        identity = _identity(experiment="cohort", mode="global_fixed", budget=32)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(
+                root,
+                identity,
+                replay_mismatch=True,
+                return_code=1,
+                downstream_gold_skip_reason="prior_logits_gold_failure",
+            )
+            gold_logits = [
+                json.loads(line)
+                for line in (root / "gold-logit-checks.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if json.loads(line)["comparison_mode"] == "native"
+            ]
+            _write_jsonl(root / "gold-logit-checks.jsonl", gold_logits)
+            _write_jsonl(root / "tree-traversal-checks.jsonl", [])
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        _validate(result, "phase2d1bnr-subrun.schema.json")
+        self.assertEqual(
+            result["outcome_category"], "diagnostic_only_numerical_variation"
+        )
+        self.assertTrue(result["actual_reference_tree_output_ids_equal"])
+        self.assertTrue(result["replay_only_variation_observed"])
+        self.assertTrue(result["replay_structural_evidence_passed"])
+        self.assertTrue(result["diagnostic_classification_evidence_sufficient"])
+        self.assertFalse(result["gold_evidence_complete"])
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+        self.assertTrue(result["subprocess_nonzero_retained_as_diagnostic"])
+
     def test_exact_output_with_missing_replay_evidence_remains_incomplete(self) -> None:
         identity = _identity()
         with tempfile.TemporaryDirectory() as temporary:
@@ -616,7 +651,7 @@ class Phase2D1BNRTests(unittest.TestCase):
                 for line in (root / "gold-logit-checks.jsonl")
                 .read_text(encoding="utf-8")
                 .splitlines()
-                if json.loads(line)["comparison_mode"] != "math"
+                if json.loads(line)["comparison_mode"] != "native"
             ]
             _write_jsonl(root / "gold-logit-checks.jsonl", rows)
             result = classify_subrun_artifacts(root, identity=identity, return_code=1)
@@ -633,6 +668,16 @@ class Phase2D1BNRTests(unittest.TestCase):
                 return_code=1,
                 failure_class_override="unknown_gold_failure",
             )
+            rows = [
+                json.loads(line)
+                for line in (root / "gold-logit-checks.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            for row in rows:
+                row["numerical_status"] = "within_strict_thresholds"
+                row["top8_ordered_equal"] = True
+            _write_jsonl(root / "gold-logit-checks.jsonl", rows)
             result = classify_subrun_artifacts(root, identity=identity, return_code=1)
         self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
 
@@ -938,6 +983,16 @@ class Phase2D1BNRTests(unittest.TestCase):
                         else None
                     ),
                 )
+                if replay_only:
+                    gold_logits = [
+                        json.loads(line)
+                        for line in (subrun / "gold-logit-checks.jsonl")
+                        .read_text(encoding="utf-8")
+                        .splitlines()
+                        if json.loads(line)["comparison_mode"] == "native"
+                    ]
+                    _write_jsonl(subrun / "gold-logit-checks.jsonl", gold_logits)
+                    _write_jsonl(subrun / "tree-traversal-checks.jsonl", [])
                 observation = classify_subrun_artifacts(
                     subrun,
                     identity=identity,

@@ -64,6 +64,12 @@ strict numerical variation. The observation explicitly records
 `replay_only_variation_observed=true`; Gold comparison mode, verifier decision,
 threshold, backend, dtype, and numerical evidence remain in
 `replay-semantic-events.jsonl`. This diagnostic result does not abort a cohort.
+`diagnostic_classification_evidence_sufficient` is separate from the stricter
+`gold_evidence_complete`: an output-exact observation may be conclusively
+diagnostic even when downstream Gold checks were skipped. It still requires a
+known numerical attribution, an actual replay record with passing structural
+status, stable actual-output evidence, round/stabilization records, no actual
+semantic consequence, and no unknown or unrelated Gold skip.
 
 Gold incompleteness is classified causally rather than by treating every
 `uncompleted_checks` entry alike. An actual numerical divergence may remain a
@@ -76,9 +82,10 @@ observation preserves the skipped checks and reasons in
 `downstream_gold_skipped_checks` and `downstream_gold_skip_reasons`. Unknown
 reasons, unrelated skipped checks, absent comparison modes, or incomplete
 traversal remain `incomplete_correctness_evidence` and stop the study.
-The same narrowly bounded downstream-skip rule applies to an output-exact
-replay variation: the first replay variation must carry native, same-mask, and
-math evidence and complete structural/traversal checks through that round.
+The native/same-mask/math and traversal-through-variation requirements remain
+the stricter test for declaring the Gold evidence itself complete. They are not
+used to mislabel otherwise sufficient output-exact diagnostic evidence as
+genuinely incomplete.
 
 ## Artifacts
 

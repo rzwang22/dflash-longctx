@@ -184,13 +184,27 @@ def _validate_observations(
                 )
             if row.get("replay_only_variation_observed") is not True:
                 raise ValueError("diagnostic-only variation lacks replay evidence")
+            if row.get("replay_structural_evidence_passed") is not True:
+                raise ValueError(
+                    "diagnostic-only variation lacks passing replay structure"
+                )
             if row.get("diagnostic_numerical_variation_observed") is not True:
                 raise ValueError("diagnostic-only variation lacks numerical evidence")
+            if row.get("known_numerical_variation_evidence") is not True:
+                raise ValueError(
+                    "diagnostic-only variation lacks recognized numerical evidence"
+                )
+            if row.get("diagnostic_classification_evidence_sufficient") is not True:
+                raise ValueError(
+                    "diagnostic-only variation lacks sufficient classification evidence"
+                )
+            if row.get("diagnostic_skip_evidence_supported") is not True:
+                raise ValueError("diagnostic-only variation has unsupported Gold skips")
             if row.get("structural_correctness_passed") is not True:
                 raise ValueError("diagnostic-only variation has a structural failure")
-            if row.get("gold_evidence_complete") is not True:
+            if row.get("genuinely_incomplete_correctness_evidence") is not False:
                 raise ValueError(
-                    "diagnostic-only variation has incomplete Gold evidence"
+                    "diagnostic-only variation was also marked genuinely incomplete"
                 )
         if row.get("downstream_gold_checks_skipped_after_confirmed_divergence"):
             if outcome != "actual_numerical_decision_divergence":
