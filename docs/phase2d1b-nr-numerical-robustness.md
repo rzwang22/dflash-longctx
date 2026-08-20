@@ -56,6 +56,18 @@ Every process receives exactly one category:
 Categories 2–4 remain study data and execution continues. Categories 5–6 stop
 the current stage and leave the NR root explicitly incomplete.
 
+Gold incompleteness is classified causally rather than by treating every
+`uncompleted_checks` entry alike. An actual numerical divergence may remain a
+complete NR observation when `kv_compaction`/`kv_next_step_logits` were
+explicitly skipped with `prior_logits_gold_failure`, but only if the actual
+reference/tree mismatch and divergence attribution are complete, native,
+same-mask, and math Gold-logit records establish the first verifier-decision
+divergence, and traversal/structural checks pass through that round. The NR
+observation preserves the skipped checks and reasons in
+`downstream_gold_skipped_checks` and `downstream_gold_skip_reasons`. Unknown
+reasons, unrelated skipped checks, absent comparison modes, or incomplete
+traversal remain `incomplete_correctness_evidence` and stop the study.
+
 ## Artifacts
 
 The output root contains:
@@ -132,6 +144,35 @@ for path in schemas:
     Draft202012Validator.check_schema(json.loads(path.read_text()))
 print(f"validated {len(schemas)} Phase 2D.1B-NR schemas")
 PY
+```
+
+## Gate NR-1.5: one-repeat exact-case smoke
+
+A confirmed global-fixed numerical divergence is retained as data even when
+Phase 2C returns non-zero. Causally skipped downstream Gold-KV checks remain
+visible in `exact-case-repeats.jsonl`.
+
+```bash
+export NR_SMOKE_OUT=outputs/phase2d1b-nr-smoke-1repeat-fixed
+test ! -e "$NR_SMOKE_OUT"
+
+python experiments/phase2d1b_nr_numerical_robustness.py \
+  --target-model-path "$TARGET_MODEL_DIR" \
+  --materialized-draft-path "$DRAFT_MODEL_DIR" \
+  --longbench-root "$LONGBENCH_ROOT" \
+  --frozen-selector-config "$FROZEN_SELECTOR" \
+  --capture-dir "$CAPTURE_GOV" \
+  --exact-case-sample-id gov_report-fd287bbfd3bdbdc9 \
+  --exact-case-context-length 1K \
+  --exact-case-repeats 1 \
+  --modes top1_packed_tree,global_fixed \
+  --node-budgets 16,32 \
+  --max-new-tokens 32 \
+  --no-run-cohort \
+  --output-dir "$NR_SMOKE_OUT"
+
+python scripts/check_phase2d1b_nr_acceptance.py \
+  --output-dir "$NR_SMOKE_OUT"
 ```
 
 ## Gate NR-2: exact known-case reproducibility

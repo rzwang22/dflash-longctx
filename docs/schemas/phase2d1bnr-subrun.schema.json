@@ -43,12 +43,20 @@
     "source_provenance_status": {"enum": ["ok", "failed"]},
     "source_provenance_validation_passed": {"type": "boolean"},
     "source_provenance_validation_failures": {"type": "array", "items": {"type": "string"}},
-    "source_provenance_wrapper_failure_is_expected_correctness": {"type": "boolean"}
+    "source_provenance_wrapper_failure_is_expected_correctness": {"type": "boolean"},
+    "first_divergence_gold_comparison_modes_observed": {"type": "array", "items": {"enum": ["native", "equal_shape", "same_mask", "math"]}},
+    "first_divergence_replay_decision_mismatch_captured": {"type": "boolean"},
+    "structural_traversal_complete_through_first_divergence": {"type": "boolean"},
+    "downstream_gold_checks_skipped_after_confirmed_divergence": {"type": "boolean"},
+    "downstream_gold_skipped_checks": {"type": "array", "items": {"type": "string"}},
+    "downstream_gold_skip_reasons": {"type": "array", "items": {"type": "string"}},
+    "genuinely_incomplete_correctness_evidence": {"type": "boolean"},
+    "gold_incompleteness_reasons": {"type": "array", "items": {"type": "string"}}
   },
   "allOf": [
     {
       "if": {"properties": {"outcome_category": {"not": {"const": "infrastructure_failure"}}}},
-      "then": {"required": ["actual_reference_output_sha256", "actual_tree_output_sha256", "target_only_output_sha256", "actual_reference_output_ids", "actual_tree_output_ids", "target_only_output_ids", "actual_reference_tree_output_ids_equal", "gold_evidence_complete", "selector_target_blind", "target_forward_count_added", "actual_node_counts", "source_provenance_status", "source_provenance_validation_passed", "source_provenance_validation_failures", "source_provenance_wrapper_failure_is_expected_correctness"]}
+      "then": {"required": ["actual_reference_output_sha256", "actual_tree_output_sha256", "target_only_output_sha256", "actual_reference_output_ids", "actual_tree_output_ids", "target_only_output_ids", "actual_reference_tree_output_ids_equal", "gold_evidence_complete", "selector_target_blind", "target_forward_count_added", "actual_node_counts", "source_provenance_status", "source_provenance_validation_passed", "source_provenance_validation_failures", "source_provenance_wrapper_failure_is_expected_correctness", "first_divergence_gold_comparison_modes_observed", "first_divergence_replay_decision_mismatch_captured", "structural_traversal_complete_through_first_divergence", "downstream_gold_checks_skipped_after_confirmed_divergence", "downstream_gold_skipped_checks", "downstream_gold_skip_reasons", "genuinely_incomplete_correctness_evidence", "gold_incompleteness_reasons"]}
     },
     {
       "if": {"properties": {"outcome_category": {"const": "pass_actual_exact"}}},

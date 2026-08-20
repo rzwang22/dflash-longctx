@@ -23,7 +23,13 @@ from dflash.phase2d1bnr.aggregation import (
     build_margin_trigger_sweep,
 )
 from dflash.phase2d1bnr.decision import build_research_summary, choose_nr_decision
-from dflash.phase2d1bnr.parse import read_json, read_jsonl
+from dflash.phase2d1bnr.parse import (
+    CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS,
+    CONFIRMED_DIVERGENCE_SKIP_REASONS,
+    REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES,
+    read_json,
+    read_jsonl,
+)
 from experiments.phase2d1b_nr_numerical_robustness import ARTIFACTS
 
 
@@ -156,6 +162,36 @@ def _validate_observations(
             and not row["structural_correctness_passed"]
         ):
             raise ValueError("structural failure was relabeled as numerical")
+        if outcome == "actual_numerical_decision_divergence" and not row.get(
+            "gold_evidence_complete"
+        ):
+            raise ValueError(
+                "numerical divergence lacks complete classification evidence"
+            )
+        if row.get("downstream_gold_checks_skipped_after_confirmed_divergence"):
+            if outcome != "actual_numerical_decision_divergence":
+                raise ValueError("causal downstream Gold skip lacks actual divergence")
+            if row.get("genuinely_incomplete_correctness_evidence"):
+                raise ValueError("causal downstream skip was also marked incomplete")
+            skipped_checks = set(row.get("downstream_gold_skipped_checks", []))
+            skip_reasons = set(row.get("downstream_gold_skip_reasons", []))
+            if not skipped_checks or not skipped_checks <= (
+                CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS
+            ):
+                raise ValueError("causal downstream skip contains an unrelated check")
+            if (
+                not skip_reasons
+                or not skip_reasons <= CONFIRMED_DIVERGENCE_SKIP_REASONS
+            ):
+                raise ValueError("causal downstream skip has an unknown reason")
+            if not REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES <= set(
+                row.get("first_divergence_gold_comparison_modes_observed", [])
+            ):
+                raise ValueError("first divergence lacks required Gold-logit modes")
+            if not row.get("first_divergence_replay_decision_mismatch_captured"):
+                raise ValueError("first divergence lacks replay decision evidence")
+            if not row.get("structural_traversal_complete_through_first_divergence"):
+                raise ValueError("first divergence lacks complete traversal evidence")
         reference_stable = bool(
             row.get("reference_repeat_stable") is True
             and row.get("reference_profile_stable") is True

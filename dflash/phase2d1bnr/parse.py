@@ -28,6 +28,12 @@ OUTCOME_CATEGORIES = (
     "infrastructure_failure",
 )
 
+REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES = frozenset({"native", "same_mask", "math"})
+CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS = frozenset(
+    {"kv_compaction", "kv_next_step_logits"}
+)
+CONFIRMED_DIVERGENCE_SKIP_REASONS = frozenset({"prior_logits_gold_failure"})
+
 
 class ArtifactError(ValueError):
     """A subprocess output cannot support a valid NR observation."""
@@ -188,6 +194,178 @@ def _numerical_attribution(failure_class: str | None) -> bool:
     )
 
 
+def _traversal_complete_through_divergence(
+    rounds: list[dict[str, Any]],
+    traversal: list[dict[str, Any]],
+    *,
+    first_divergent_round: int | None,
+) -> bool:
+    if first_divergent_round is None:
+        return False
+    required_rounds = {
+        int(row["round_index"])
+        for row in rounds
+        if int(row.get("profiling_repeat", 0)) == 0
+        and int(row["round_index"]) <= first_divergent_round
+    }
+    required_rounds.add(first_divergent_round)
+    by_round = {int(row["round_index"]): row for row in traversal}
+    if not required_rounds <= set(by_round):
+        return False
+    for round_index in required_rounds:
+        row = by_round[round_index]
+        checks = row.get("checks", {})
+        if (
+            row.get("status") != "pass"
+            or checks.get("all_checks_passed") is not True
+            or checks.get("structural_checks_passed") is not True
+            or checks.get("traversal_checks_passed") is not True
+            or checks.get("kv_root_transition_checks_passed") is not True
+            or bool(row.get("structural_mask_issues"))
+        ):
+            return False
+    return True
+
+
+def _gold_evidence_assessment(
+    *,
+    correctness: dict[str, Any],
+    divergence: dict[str, Any],
+    rounds: list[dict[str, Any]],
+    stabilization: list[dict[str, Any]],
+    traversal: list[dict[str, Any]],
+    gold_logits: list[dict[str, Any]],
+    gold_kv: list[dict[str, Any]],
+    actual_equal: bool,
+    structural_failure: bool,
+    failure_class: str | None,
+) -> dict[str, Any]:
+    """Separate causally truncated downstream Gold from missing evidence."""
+
+    raw_uncompleted = correctness.get("uncompleted_checks") or []
+    raw_details = correctness.get("uncompleted_check_details") or []
+    if not isinstance(raw_uncompleted, list) or not all(
+        isinstance(value, str) for value in raw_uncompleted
+    ):
+        raise ArtifactError("correctness uncompleted_checks must be strings")
+    if not isinstance(raw_details, list) or not all(
+        isinstance(value, dict)
+        and isinstance(value.get("check"), str)
+        and isinstance(value.get("reason"), str)
+        for value in raw_details
+    ):
+        raise ArtifactError("correctness uncompleted_check_details are malformed")
+    uncompleted_checks = sorted(set(raw_uncompleted))
+    detail_checks = {str(row["check"]) for row in raw_details}
+    skip_reasons = sorted({str(row["reason"]) for row in raw_details})
+    divergence_uncompleted = [
+        row
+        for row in divergence.get("uncompleted_checks", [])
+        if row.get("check") != "target_only_precision_attribution"
+    ]
+    all_modes = {
+        str(row["comparison_mode"])
+        for row in gold_logits
+        if row.get("availability") == "available" and row.get("comparison_mode")
+    }
+    first_round_raw = divergence.get("divergent_tree_round_index")
+    first_round = int(first_round_raw) if first_round_raw is not None else None
+    first_round_logits = [
+        row
+        for row in gold_logits
+        if first_round is not None
+        and int(row.get("round_index", -1)) == first_round
+        and row.get("availability") == "available"
+    ]
+    first_round_modes = {
+        str(row["comparison_mode"])
+        for row in first_round_logits
+        if row.get("comparison_mode")
+    }
+    first_round_decision_mismatch = any(
+        row.get("semantic_status") == "fail"
+        or row.get("status") == "fail_semantic"
+        or row.get("verifier_decision_changed") is True
+        or row.get("argmax_equal") is False
+        for row in first_round_logits
+    )
+    traversal_complete = _traversal_complete_through_divergence(
+        rounds,
+        traversal,
+        first_divergent_round=first_round,
+    )
+    causal_skip_shape = bool(
+        uncompleted_checks
+        and set(uncompleted_checks) <= CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS
+        and detail_checks == set(uncompleted_checks)
+        and skip_reasons
+        and set(skip_reasons) <= CONFIRMED_DIVERGENCE_SKIP_REASONS
+        and any(
+            first_round is not None
+            and int(row.get("round_index", -1)) == first_round
+            and row.get("status") == "not_run"
+            and row.get("reason") in CONFIRMED_DIVERGENCE_SKIP_REASONS
+            for row in gold_kv
+        )
+    )
+    downstream_after_confirmed_divergence = bool(
+        causal_skip_shape
+        and not actual_equal
+        and divergence.get("classification", {}).get("evidence_complete") is True
+        and _numerical_attribution(failure_class)
+        and not structural_failure
+        and not divergence_uncompleted
+        and REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES <= first_round_modes
+        and first_round_decision_mismatch
+        and traversal_complete
+        and rounds
+        and stabilization
+    )
+    conventional_complete = bool(
+        correctness.get("gold_status") != "not_run"
+        and not uncompleted_checks
+        and not divergence_uncompleted
+        and REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES <= all_modes
+        and any(row.get("status") != "not_run" for row in gold_kv)
+        and rounds
+        and stabilization
+        and traversal
+    )
+    complete = conventional_complete or downstream_after_confirmed_divergence
+    incomplete_reasons = []
+    if not complete:
+        if uncompleted_checks:
+            incomplete_reasons.append("uncompleted_gold_checks_not_causally_exempt")
+        if divergence_uncompleted:
+            incomplete_reasons.append("uncompleted_output_divergence_checks")
+        if REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES - all_modes:
+            incomplete_reasons.append("required_gold_logit_modes_missing")
+        if not rounds or not stabilization or not traversal:
+            incomplete_reasons.append("round_or_traversal_diagnostics_missing")
+        if not any(row.get("status") != "not_run" for row in gold_kv):
+            incomplete_reasons.append("completed_gold_kv_evidence_missing")
+        if causal_skip_shape and not downstream_after_confirmed_divergence:
+            incomplete_reasons.append("causal_downstream_skip_preconditions_failed")
+        if not incomplete_reasons:
+            incomplete_reasons.append("gold_evidence_incomplete")
+    return {
+        "complete": complete,
+        "comparison_modes": sorted(all_modes),
+        "first_divergence_comparison_modes": sorted(first_round_modes),
+        "first_divergence_replay_decision_mismatch_captured": (
+            first_round_decision_mismatch
+        ),
+        "structural_traversal_complete_through_first_divergence": (traversal_complete),
+        "downstream_gold_checks_skipped_after_confirmed_divergence": (
+            downstream_after_confirmed_divergence
+        ),
+        "downstream_gold_skipped_checks": uncompleted_checks,
+        "downstream_gold_skip_reasons": skip_reasons,
+        "genuinely_incomplete_correctness_evidence": not complete,
+        "gold_incompleteness_reasons": incomplete_reasons,
+    }
+
+
 def _source_provenance_validation(
     provenance: dict[str, Any], *, expected_correctness_exit: bool
 ) -> tuple[bool, list[str]]:
@@ -312,28 +490,20 @@ def classify_subrun_artifacts(
         or correctness.get("failure_class")
         or sample.get("correctness", {}).get("gold_failure_class")
     )
-    comparison_modes = {
-        str(row["comparison_mode"])
-        for row in gold_logits
-        if row.get("availability") == "available" and row.get("comparison_mode")
-    }
-    required_modes = {"native", "same_mask", "math"}
-    divergence_uncompleted = [
-        row
-        for row in divergence.get("uncompleted_checks", [])
-        if row.get("check") != "target_only_precision_attribution"
-    ]
-    gold_complete = bool(
-        correctness.get("gold_status") != "not_run"
-        and not correctness.get("uncompleted_checks")
-        and not divergence_uncompleted
-        and required_modes <= comparison_modes
-        and any(row.get("status") != "not_run" for row in gold_kv)
-        and rounds
-        and stabilization
-        and traversal
-    )
     actual_equal = reference_tree.get("output_ids_equal") is True
+    gold_evidence = _gold_evidence_assessment(
+        correctness=correctness,
+        divergence=divergence,
+        rounds=rounds,
+        stabilization=stabilization,
+        traversal=traversal,
+        gold_logits=gold_logits,
+        gold_kv=gold_kv,
+        actual_equal=actual_equal,
+        structural_failure=structural_failure,
+        failure_class=str(failure_class) if failure_class is not None else None,
+    )
+    gold_complete = bool(gold_evidence["complete"])
     manifest_error = manifest.get("error")
     manifest_error_type = (
         manifest_error.get("type") if isinstance(manifest_error, dict) else None
@@ -486,7 +656,27 @@ def classify_subrun_artifacts(
         "replay_semantic_mismatch_observed": bool(replay_semantic_rounds),
         "replay_semantic_variation_rounds": replay_semantic_rounds,
         "gold_evidence_complete": gold_complete,
-        "gold_comparison_modes_observed": sorted(comparison_modes),
+        "gold_comparison_modes_observed": gold_evidence["comparison_modes"],
+        "first_divergence_gold_comparison_modes_observed": gold_evidence[
+            "first_divergence_comparison_modes"
+        ],
+        "first_divergence_replay_decision_mismatch_captured": gold_evidence[
+            "first_divergence_replay_decision_mismatch_captured"
+        ],
+        "structural_traversal_complete_through_first_divergence": gold_evidence[
+            "structural_traversal_complete_through_first_divergence"
+        ],
+        "downstream_gold_checks_skipped_after_confirmed_divergence": gold_evidence[
+            "downstream_gold_checks_skipped_after_confirmed_divergence"
+        ],
+        "downstream_gold_skipped_checks": gold_evidence[
+            "downstream_gold_skipped_checks"
+        ],
+        "downstream_gold_skip_reasons": gold_evidence["downstream_gold_skip_reasons"],
+        "genuinely_incomplete_correctness_evidence": gold_evidence[
+            "genuinely_incomplete_correctness_evidence"
+        ],
+        "gold_incompleteness_reasons": gold_evidence["gold_incompleteness_reasons"],
         "selected_frozen_policy_configs": selected_policies,
         "selected_frozen_policy_config": (
             selected_policies[0] if len(selected_policies) == 1 else None
