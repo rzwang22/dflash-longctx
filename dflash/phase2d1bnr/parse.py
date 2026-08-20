@@ -22,6 +22,7 @@ EXPECTED_ARTIFACTS = (
 OUTCOME_CATEGORIES = (
     "pass_actual_exact",
     "actual_numerical_decision_divergence",
+    "diagnostic_only_numerical_variation",
     "actual_structural_failure",
     "reference_instability",
     "incomplete_correctness_evidence",
@@ -113,6 +114,22 @@ def _structural_failure(
     return bool(reasons), reasons
 
 
+def _gold_row_has_semantic_mismatch(row: dict[str, Any]) -> bool:
+    return bool(
+        row.get("semantic_status") == "fail"
+        or row.get("status") == "fail_semantic"
+        or row.get("verifier_decision_changed") is True
+        or row.get("argmax_equal") is False
+    )
+
+
+def _gold_row_has_numerical_variation(row: dict[str, Any]) -> bool:
+    return bool(
+        row.get("numerical_status") == "outside_strict_thresholds"
+        or row.get("top8_ordered_equal") is False
+    )
+
+
 def replay_semantic_rows(
     identity: dict[str, Any],
     gold_logits: list[dict[str, Any]],
@@ -146,21 +163,17 @@ def replay_semantic_rows(
         "maximum_absolute_error",
         "mean_absolute_error",
         "p99_absolute_error",
+        "thresholds",
+        "backend",
+        "dtype",
+        "provenance",
         "warning",
         "reason",
     )
     for source, rows in (("gold_logit", gold_logits), ("gold_kv", gold_kv)):
         for row in rows:
-            semantic_mismatch = bool(
-                row.get("semantic_status") == "fail"
-                or row.get("status") == "fail_semantic"
-                or row.get("verifier_decision_changed") is True
-                or row.get("argmax_equal") is False
-            )
-            numerical_variation = bool(
-                row.get("numerical_status") == "outside_strict_thresholds"
-                or row.get("top8_ordered_equal") is False
-            )
+            semantic_mismatch = _gold_row_has_semantic_mismatch(row)
+            numerical_variation = _gold_row_has_numerical_variation(row)
             if not semantic_mismatch and not numerical_variation:
                 continue
             result.append(
@@ -194,21 +207,21 @@ def _numerical_attribution(failure_class: str | None) -> bool:
     )
 
 
-def _traversal_complete_through_divergence(
+def _traversal_complete_through_round(
     rounds: list[dict[str, Any]],
     traversal: list[dict[str, Any]],
     *,
-    first_divergent_round: int | None,
+    boundary_round: int | None,
 ) -> bool:
-    if first_divergent_round is None:
+    if boundary_round is None:
         return False
     required_rounds = {
         int(row["round_index"])
         for row in rounds
         if int(row.get("profiling_repeat", 0)) == 0
-        and int(row["round_index"]) <= first_divergent_round
+        and int(row["round_index"]) <= boundary_round
     }
-    required_rounds.add(first_divergent_round)
+    required_rounds.add(boundary_round)
     by_round = {int(row["round_index"]): row for row in traversal}
     if not required_rounds <= set(by_round):
         return False
@@ -283,17 +296,48 @@ def _gold_evidence_assessment(
         if row.get("comparison_mode")
     }
     first_round_decision_mismatch = any(
-        row.get("semantic_status") == "fail"
-        or row.get("status") == "fail_semantic"
-        or row.get("verifier_decision_changed") is True
-        or row.get("argmax_equal") is False
-        for row in first_round_logits
+        _gold_row_has_semantic_mismatch(row) for row in first_round_logits
     )
-    traversal_complete = _traversal_complete_through_divergence(
+    traversal_complete = _traversal_complete_through_round(
         rounds,
         traversal,
-        first_divergent_round=first_round,
+        boundary_round=first_round,
     )
+    variation_logits = [
+        row
+        for row in gold_logits
+        if row.get("availability") == "available"
+        and (
+            _gold_row_has_semantic_mismatch(row)
+            or _gold_row_has_numerical_variation(row)
+        )
+    ]
+    variation_rounds = sorted(
+        {int(row.get("round_index", -1)) for row in variation_logits}
+    )
+    first_variation_round = variation_rounds[0] if variation_rounds else None
+    first_variation_logits = [
+        row
+        for row in gold_logits
+        if first_variation_round is not None
+        and int(row.get("round_index", -1)) == first_variation_round
+        and row.get("availability") == "available"
+    ]
+    first_variation_modes = {
+        str(row["comparison_mode"])
+        for row in first_variation_logits
+        if row.get("comparison_mode")
+    }
+    first_variation_evidence = any(
+        _gold_row_has_semantic_mismatch(row) or _gold_row_has_numerical_variation(row)
+        for row in first_variation_logits
+    )
+    variation_traversal_complete = _traversal_complete_through_round(
+        rounds,
+        traversal,
+        boundary_round=first_variation_round,
+    )
+    causal_skip_anchor = first_round if not actual_equal else first_variation_round
     causal_skip_shape = bool(
         uncompleted_checks
         and set(uncompleted_checks) <= CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS
@@ -301,8 +345,8 @@ def _gold_evidence_assessment(
         and skip_reasons
         and set(skip_reasons) <= CONFIRMED_DIVERGENCE_SKIP_REASONS
         and any(
-            first_round is not None
-            and int(row.get("round_index", -1)) == first_round
+            causal_skip_anchor is not None
+            and int(row.get("round_index", -1)) == causal_skip_anchor
             and row.get("status") == "not_run"
             and row.get("reason") in CONFIRMED_DIVERGENCE_SKIP_REASONS
             for row in gold_kv
@@ -321,6 +365,19 @@ def _gold_evidence_assessment(
         and rounds
         and stabilization
     )
+    downstream_after_confirmed_replay_variation = bool(
+        causal_skip_shape
+        and actual_equal
+        and _numerical_attribution(failure_class)
+        and correctness.get("actual_execution_semantic_failure") is not True
+        and not structural_failure
+        and not divergence_uncompleted
+        and REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES <= first_variation_modes
+        and first_variation_evidence
+        and variation_traversal_complete
+        and rounds
+        and stabilization
+    )
     conventional_complete = bool(
         correctness.get("gold_status") != "not_run"
         and not uncompleted_checks
@@ -331,7 +388,11 @@ def _gold_evidence_assessment(
         and stabilization
         and traversal
     )
-    complete = conventional_complete or downstream_after_confirmed_divergence
+    complete = bool(
+        conventional_complete
+        or downstream_after_confirmed_divergence
+        or downstream_after_confirmed_replay_variation
+    )
     incomplete_reasons = []
     if not complete:
         if uncompleted_checks:
@@ -344,7 +405,10 @@ def _gold_evidence_assessment(
             incomplete_reasons.append("round_or_traversal_diagnostics_missing")
         if not any(row.get("status") != "not_run" for row in gold_kv):
             incomplete_reasons.append("completed_gold_kv_evidence_missing")
-        if causal_skip_shape and not downstream_after_confirmed_divergence:
+        if causal_skip_shape and not (
+            downstream_after_confirmed_divergence
+            or downstream_after_confirmed_replay_variation
+        ):
             incomplete_reasons.append("causal_downstream_skip_preconditions_failed")
         if not incomplete_reasons:
             incomplete_reasons.append("gold_evidence_incomplete")
@@ -356,8 +420,17 @@ def _gold_evidence_assessment(
             first_round_decision_mismatch
         ),
         "structural_traversal_complete_through_first_divergence": (traversal_complete),
+        "first_replay_variation_round": first_variation_round,
+        "first_replay_variation_comparison_modes": sorted(first_variation_modes),
+        "first_replay_variation_evidence_captured": first_variation_evidence,
+        "structural_traversal_complete_through_first_replay_variation": (
+            variation_traversal_complete
+        ),
         "downstream_gold_checks_skipped_after_confirmed_divergence": (
             downstream_after_confirmed_divergence
+        ),
+        "downstream_gold_checks_skipped_after_confirmed_replay_variation": (
+            downstream_after_confirmed_replay_variation
         ),
         "downstream_gold_skipped_checks": uncompleted_checks,
         "downstream_gold_skip_reasons": skip_reasons,
@@ -485,12 +558,20 @@ def classify_subrun_artifacts(
         gold_logits, gold_kv, traversal
     )
     classification = divergence.get("classification", {})
-    failure_class = (
-        classification.get("failure_class")
-        or correctness.get("failure_class")
-        or sample.get("correctness", {}).get("gold_failure_class")
+    gold_failure_class = correctness.get("failure_class") or sample.get(
+        "correctness", {}
+    ).get("gold_failure_class")
+    failure_class = classification.get("failure_class") or gold_failure_class
+    actual_output_relation = reference_tree.get("output_ids_equal")
+    reference_output_ids = reference_tree.get("left_output_ids")
+    tree_output_ids = reference_tree.get("right_output_ids")
+    actual_output_relation_reliable = bool(
+        isinstance(actual_output_relation, bool)
+        and isinstance(reference_output_ids, list)
+        and isinstance(tree_output_ids, list)
+        and actual_output_relation == (reference_output_ids == tree_output_ids)
     )
-    actual_equal = reference_tree.get("output_ids_equal") is True
+    actual_equal = actual_output_relation is True
     gold_evidence = _gold_evidence_assessment(
         correctness=correctness,
         divergence=divergence,
@@ -504,6 +585,29 @@ def classify_subrun_artifacts(
         failure_class=str(failure_class) if failure_class is not None else None,
     )
     gold_complete = bool(gold_evidence["complete"])
+    replay_rows = replay_semantic_rows(identity, gold_logits, gold_kv)
+    replay_semantic_rounds = sorted(
+        {int(row["round_index"]) for row in replay_rows if row["semantic_mismatch"]}
+    )
+    diagnostic_numerical_variation_observed = bool(
+        correctness.get("diagnostic_numerical_variation_observed", False)
+        or any(row["numerical_variation"] for row in replay_rows)
+        or (
+            replay_rows
+            and _numerical_attribution(
+                str(failure_class) if failure_class is not None else None
+            )
+        )
+    )
+    actual_execution_semantic_failure = bool(
+        correctness.get("actual_execution_semantic_failure", not actual_equal)
+    )
+    replay_semantic_variation_with_actual_consequence = bool(
+        correctness.get("replay_semantic_variation_with_actual_consequence", False)
+    )
+    replay_only_variation_observed = bool(
+        actual_equal and replay_rows and diagnostic_numerical_variation_observed
+    )
     manifest_error = manifest.get("error")
     manifest_error_type = (
         manifest_error.get("type") if isinstance(manifest_error, dict) else None
@@ -530,12 +634,25 @@ def classify_subrun_artifacts(
         outcome = "reference_instability"
     elif structural_failure:
         outcome = "actual_structural_failure"
+    elif not actual_output_relation_reliable:
+        outcome = "incomplete_correctness_evidence"
     elif not actual_equal:
         outcome = (
             "actual_numerical_decision_divergence"
             if gold_complete
             and classification.get("evidence_complete") is True
             and _numerical_attribution(str(failure_class))
+            else "incomplete_correctness_evidence"
+        )
+    elif replay_only_variation_observed:
+        outcome = (
+            "diagnostic_only_numerical_variation"
+            if gold_complete
+            and not actual_execution_semantic_failure
+            and not replay_semantic_variation_with_actual_consequence
+            and _numerical_attribution(
+                str(failure_class) if failure_class is not None else None
+            )
             else "incomplete_correctness_evidence"
         )
     elif not gold_complete:
@@ -547,6 +664,7 @@ def classify_subrun_artifacts(
         and outcome
         not in {
             "actual_numerical_decision_divergence",
+            "diagnostic_only_numerical_variation",
             "actual_structural_failure",
             "reference_instability",
             "incomplete_correctness_evidence",
@@ -554,10 +672,6 @@ def classify_subrun_artifacts(
     ):
         outcome = "infrastructure_failure"
 
-    replay_rows = replay_semantic_rows(identity, gold_logits, gold_kv)
-    replay_semantic_rounds = sorted(
-        {int(row["round_index"]) for row in replay_rows if row["semantic_mismatch"]}
-    )
     selector_records = [
         row["online_selector"] for row in rounds if row.get("online_selector")
     ]
@@ -608,6 +722,7 @@ def classify_subrun_artifacts(
             and outcome
             in {
                 "actual_numerical_decision_divergence",
+                "diagnostic_only_numerical_variation",
                 "actual_structural_failure",
                 "reference_instability",
             }
@@ -620,6 +735,7 @@ def classify_subrun_artifacts(
         "actual_tree_output_ids": reference_tree.get("right_output_ids"),
         "target_only_output_ids": target_reference.get("left_output_ids"),
         "actual_reference_tree_output_ids_equal": actual_equal,
+        "actual_output_relation_reliable": actual_output_relation_reliable,
         "target_only_reference_output_ids_equal": target_reference.get(
             "output_ids_equal"
         ),
@@ -645,13 +761,23 @@ def classify_subrun_artifacts(
         "actual_execution_correctness_passed": correctness.get(
             "actual_execution_correctness_passed"
         ),
-        "actual_execution_semantic_failure": correctness.get(
-            "actual_execution_semantic_failure"
-        ),
+        "actual_execution_semantic_failure": actual_execution_semantic_failure,
         "structural_correctness_passed": not structural_failure,
         "structural_failure_reasons": structural_reasons,
-        "diagnostic_numerical_variation_observed": correctness.get(
-            "diagnostic_numerical_variation_observed", False
+        "diagnostic_numerical_variation_observed": (
+            diagnostic_numerical_variation_observed
+        ),
+        "replay_only_variation_observed": replay_only_variation_observed,
+        "gold_status": correctness.get("gold_status"),
+        "gold_failure_class": gold_failure_class,
+        "hard_correctness_failure_reasons": list(
+            correctness.get("hard_correctness_failure_reasons") or []
+        ),
+        "diagnostic_numerical_variation_reasons": list(
+            correctness.get("diagnostic_numerical_variation_reasons") or []
+        ),
+        "replay_semantic_variation_with_actual_consequence": (
+            replay_semantic_variation_with_actual_consequence
         ),
         "replay_semantic_mismatch_observed": bool(replay_semantic_rounds),
         "replay_semantic_variation_rounds": replay_semantic_rounds,
@@ -666,9 +792,26 @@ def classify_subrun_artifacts(
         "structural_traversal_complete_through_first_divergence": gold_evidence[
             "structural_traversal_complete_through_first_divergence"
         ],
+        "first_replay_variation_round": gold_evidence["first_replay_variation_round"],
+        "first_replay_variation_gold_comparison_modes_observed": gold_evidence[
+            "first_replay_variation_comparison_modes"
+        ],
+        "first_replay_variation_evidence_captured": gold_evidence[
+            "first_replay_variation_evidence_captured"
+        ],
+        "structural_traversal_complete_through_first_replay_variation": (
+            gold_evidence[
+                "structural_traversal_complete_through_first_replay_variation"
+            ]
+        ),
         "downstream_gold_checks_skipped_after_confirmed_divergence": gold_evidence[
             "downstream_gold_checks_skipped_after_confirmed_divergence"
         ],
+        "downstream_gold_checks_skipped_after_confirmed_replay_variation": (
+            gold_evidence[
+                "downstream_gold_checks_skipped_after_confirmed_replay_variation"
+            ]
+        ),
         "downstream_gold_skipped_checks": gold_evidence[
             "downstream_gold_skipped_checks"
         ],

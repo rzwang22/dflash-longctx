@@ -155,8 +155,13 @@ def _validate_observations(
             raise ValueError("top1 packed-tree did not construct exactly 16 nodes")
         output_equal = row["actual_reference_tree_output_ids_equal"]
         outcome = row["outcome_category"]
-        if output_equal is False and outcome == "pass_actual_exact":
-            raise ValueError("actual output divergence was relabeled as pass")
+        if not row.get("actual_output_relation_reliable"):
+            raise ValueError("subrun lacks a reliable actual output relation")
+        if output_equal is not True and outcome in {
+            "pass_actual_exact",
+            "diagnostic_only_numerical_variation",
+        }:
+            raise ValueError("actual output divergence was relabeled as output-exact")
         if (
             outcome == "actual_numerical_decision_divergence"
             and not row["structural_correctness_passed"]
@@ -168,6 +173,25 @@ def _validate_observations(
             raise ValueError(
                 "numerical divergence lacks complete classification evidence"
             )
+        if outcome == "diagnostic_only_numerical_variation":
+            if row.get("actual_execution_semantic_failure") is not False:
+                raise ValueError(
+                    "diagnostic-only variation has an actual semantic failure"
+                )
+            if row.get("replay_semantic_variation_with_actual_consequence"):
+                raise ValueError(
+                    "diagnostic-only variation has an actual replay consequence"
+                )
+            if row.get("replay_only_variation_observed") is not True:
+                raise ValueError("diagnostic-only variation lacks replay evidence")
+            if row.get("diagnostic_numerical_variation_observed") is not True:
+                raise ValueError("diagnostic-only variation lacks numerical evidence")
+            if row.get("structural_correctness_passed") is not True:
+                raise ValueError("diagnostic-only variation has a structural failure")
+            if row.get("gold_evidence_complete") is not True:
+                raise ValueError(
+                    "diagnostic-only variation has incomplete Gold evidence"
+                )
         if row.get("downstream_gold_checks_skipped_after_confirmed_divergence"):
             if outcome != "actual_numerical_decision_divergence":
                 raise ValueError("causal downstream Gold skip lacks actual divergence")
@@ -192,6 +216,32 @@ def _validate_observations(
                 raise ValueError("first divergence lacks replay decision evidence")
             if not row.get("structural_traversal_complete_through_first_divergence"):
                 raise ValueError("first divergence lacks complete traversal evidence")
+        if row.get("downstream_gold_checks_skipped_after_confirmed_replay_variation"):
+            if outcome != "diagnostic_only_numerical_variation":
+                raise ValueError("causal replay Gold skip lacks diagnostic variation")
+            if row.get("genuinely_incomplete_correctness_evidence"):
+                raise ValueError("causal replay Gold skip was also marked incomplete")
+            skipped_checks = set(row.get("downstream_gold_skipped_checks", []))
+            skip_reasons = set(row.get("downstream_gold_skip_reasons", []))
+            if not skipped_checks or not skipped_checks <= (
+                CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS
+            ):
+                raise ValueError("causal replay Gold skip contains an unrelated check")
+            if (
+                not skip_reasons
+                or not skip_reasons <= CONFIRMED_DIVERGENCE_SKIP_REASONS
+            ):
+                raise ValueError("causal replay Gold skip has an unknown reason")
+            if not REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES <= set(
+                row.get("first_replay_variation_gold_comparison_modes_observed", [])
+            ):
+                raise ValueError("first replay variation lacks Gold-logit modes")
+            if not row.get("first_replay_variation_evidence_captured"):
+                raise ValueError("first replay variation lacks replay evidence")
+            if not row.get(
+                "structural_traversal_complete_through_first_replay_variation"
+            ):
+                raise ValueError("first replay variation lacks traversal evidence")
         reference_stable = bool(
             row.get("reference_repeat_stable") is True
             and row.get("reference_profile_stable") is True

@@ -111,6 +111,7 @@ def _write_subrun(
     tree_tail: int = 50,
     source_matches: bool = True,
     downstream_gold_skip_reason: str | None = None,
+    failure_class_override: str | None = None,
 ) -> None:
     root.mkdir()
     reference = [10, 20, 30, 40]
@@ -141,7 +142,9 @@ def _write_subrun(
         {
             "gold_status": "fail_semantic" if replay_mismatch else "pass_exact",
             "failure_class": (
-                "numerical_backend_decision_divergence"
+                failure_class_override
+                if failure_class_override is not None
+                else "numerical_backend_decision_divergence"
                 if not actual_equal
                 else "numerical_backend_variation"
                 if replay_mismatch
@@ -167,6 +170,17 @@ def _write_subrun(
             and not structural_failure,
             "actual_execution_semantic_failure": not actual_equal,
             "diagnostic_numerical_variation_observed": replay_mismatch,
+            "diagnostic_numerical_variation_reasons": (
+                ["gold_semantic_failure:numerical_backend_variation"]
+                if replay_mismatch
+                else []
+            ),
+            "replay_semantic_variation_with_actual_consequence": not actual_equal,
+            "hard_correctness_failure_reasons": (
+                ["gold_semantic_failure:numerical_backend_variation"]
+                if replay_mismatch
+                else []
+            ),
         },
     )
     pairwise = [
@@ -290,6 +304,10 @@ def _write_subrun(
                 "top8_ordered_equal": not (replay_mismatch and mode == "native"),
                 "max_abs_error": 1.0 if replay_mismatch else 0.0,
                 "mean_abs_error": 0.1 if replay_mismatch else 0.0,
+                "thresholds": {"max_abs_error": 0.5},
+                "backend": "configured_sdpa",
+                "dtype": "bfloat16",
+                "provenance": {"execution": "diagnostic_replay"},
             }
         )
     _write_jsonl(root / "gold-logit-checks.jsonl", gold)
@@ -546,16 +564,29 @@ class Phase2D1BNRTests(unittest.TestCase):
         )
         self.assertTrue(result["genuinely_incomplete_correctness_evidence"])
 
-    def test_top1_exact_and_replay_only_variation_pass(self) -> None:
+    def test_output_exact_replay_only_variation_continues(self) -> None:
         identity = _identity(mode="top1_packed_tree")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "subrun"
             _write_subrun(root, identity, replay_mismatch=True)
             result = classify_subrun_artifacts(root, identity=identity, return_code=0)
-        self.assertEqual(result["outcome_category"], "pass_actual_exact")
+        self.assertEqual(
+            result["outcome_category"], "diagnostic_only_numerical_variation"
+        )
+        self.assertFalse(result["actual_execution_semantic_failure"])
+        self.assertTrue(result["replay_only_variation_observed"])
+        self.assertTrue(result["diagnostic_numerical_variation_observed"])
         self.assertTrue(result["replay_semantic_mismatch_observed"])
+        self.assertEqual(
+            result["_replay_rows"][0]["thresholds"], {"max_abs_error": 0.5}
+        )
+        self.assertEqual(result["_replay_rows"][0]["backend"], "configured_sdpa")
+        self.assertEqual(
+            result["diagnostic_numerical_variation_reasons"],
+            ["gold_semantic_failure:numerical_backend_variation"],
+        )
 
-    def test_nonzero_replay_only_exit_is_infrastructure_failure(self) -> None:
+    def test_nonzero_replay_only_exit_is_retained_and_continues(self) -> None:
         identity = _identity(mode="top1_packed_tree")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "subrun"
@@ -564,9 +595,66 @@ class Phase2D1BNRTests(unittest.TestCase):
                 identity,
                 replay_mismatch=True,
                 return_code=1,
+                downstream_gold_skip_reason="prior_logits_gold_failure",
             )
             result = classify_subrun_artifacts(root, identity=identity, return_code=1)
-        self.assertEqual(result["outcome_category"], "infrastructure_failure")
+        self.assertEqual(
+            result["outcome_category"], "diagnostic_only_numerical_variation"
+        )
+        self.assertTrue(result["subprocess_nonzero_retained_as_diagnostic"])
+        self.assertTrue(
+            result["downstream_gold_checks_skipped_after_confirmed_replay_variation"]
+        )
+
+    def test_exact_output_with_missing_replay_evidence_remains_incomplete(self) -> None:
+        identity = _identity()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(root, identity, replay_mismatch=True, return_code=1)
+            rows = [
+                json.loads(line)
+                for line in (root / "gold-logit-checks.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if json.loads(line)["comparison_mode"] != "math"
+            ]
+            _write_jsonl(root / "gold-logit-checks.jsonl", rows)
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
+
+    def test_exact_output_with_unknown_failure_reason_remains_incomplete(self) -> None:
+        identity = _identity()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(
+                root,
+                identity,
+                replay_mismatch=True,
+                return_code=1,
+                failure_class_override="unknown_gold_failure",
+            )
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
+
+    def test_missing_actual_output_relation_remains_incomplete(self) -> None:
+        identity = _identity()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(root, identity, replay_mismatch=True, return_code=1)
+            artifact = json.loads(
+                (root / "output-divergence.json").read_text(encoding="utf-8")
+            )
+            record = artifact["records"][0]
+            pair = next(
+                row
+                for row in record["pairwise_comparisons"]
+                if row["left_name"] == "original_dflash_reference"
+            )
+            pair.pop("output_ids_equal")
+            _write_json(root / "output-divergence.json", artifact)
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
+        self.assertFalse(result["actual_output_relation_reliable"])
 
     def test_incomplete_gold_evidence_is_not_numerical_divergence(self) -> None:
         identity = _identity()
@@ -837,20 +925,23 @@ class Phase2D1BNRTests(unittest.TestCase):
                 identity = _identity(mode=mode)
                 subrun = raw / mode
                 divergent = mode == "global_fixed"
+                replay_only = mode == "top1_packed_tree"
                 _write_subrun(
                     subrun,
                     identity,
                     actual_equal=not divergent,
-                    replay_mismatch=divergent,
-                    return_code=1 if divergent else 0,
+                    replay_mismatch=divergent or replay_only,
+                    return_code=1,
                     downstream_gold_skip_reason=(
-                        "prior_logits_gold_failure" if divergent else None
+                        "prior_logits_gold_failure"
+                        if divergent or replay_only
+                        else None
                     ),
                 )
                 observation = classify_subrun_artifacts(
                     subrun,
                     identity=identity,
-                    return_code=1 if divergent else 0,
+                    return_code=1,
                 )
                 observations.append(observation)
                 rounds.extend(extract_round_margin_events(observation))

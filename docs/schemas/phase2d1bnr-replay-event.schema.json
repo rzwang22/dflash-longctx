@@ -24,6 +24,10 @@
     "verifier_decision_changed": {"type": ["boolean", "null"]},
     "argmax_equal": {"type": ["boolean", "null"]},
     "top8_ordered_equal": {"type": ["boolean", "null"]},
+    "thresholds": {"type": ["object", "null"]},
+    "backend": {"type": ["string", "null"]},
+    "dtype": {"type": ["string", "null"]},
+    "provenance": {"type": ["object", "null"]},
     "semantic_mismatch": {"type": "boolean"},
     "numerical_variation": {"type": "boolean"},
     "variation_kind": {"enum": ["semantic_mismatch", "numerical_variation_without_semantic_mismatch"]}

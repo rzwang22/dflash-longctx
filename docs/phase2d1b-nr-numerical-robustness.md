@@ -48,13 +48,22 @@ Every process receives exactly one category:
 
 1. `pass_actual_exact`
 2. `actual_numerical_decision_divergence`
-3. `actual_structural_failure`
-4. `reference_instability`
-5. `incomplete_correctness_evidence`
-6. `infrastructure_failure`
+3. `diagnostic_only_numerical_variation`
+4. `actual_structural_failure`
+5. `reference_instability`
+6. `incomplete_correctness_evidence`
+7. `infrastructure_failure`
 
-Categories 2–4 remain study data and execution continues. Categories 5–6 stop
+Categories 2–5 remain study data and execution continues. Categories 6–7 stop
 the current stage and leave the NR root explicitly incomplete.
+
+`diagnostic_only_numerical_variation` means the actual Original-DFlash and tree
+outputs remain token exact while a replay/Gold comparison records semantic or
+strict numerical variation. The observation explicitly records
+`actual_execution_semantic_failure=false` and
+`replay_only_variation_observed=true`; Gold comparison mode, verifier decision,
+threshold, backend, dtype, and numerical evidence remain in
+`replay-semantic-events.jsonl`. This diagnostic result does not abort a cohort.
 
 Gold incompleteness is classified causally rather than by treating every
 `uncompleted_checks` entry alike. An actual numerical divergence may remain a
@@ -67,6 +76,9 @@ observation preserves the skipped checks and reasons in
 `downstream_gold_skipped_checks` and `downstream_gold_skip_reasons`. Unknown
 reasons, unrelated skipped checks, absent comparison modes, or incomplete
 traversal remain `incomplete_correctness_evidence` and stop the study.
+The same narrowly bounded downstream-skip rule applies to an output-exact
+replay variation: the first replay variation must carry native, same-mask, and
+math evidence and complete structural/traversal checks through that round.
 
 ## Artifacts
 
