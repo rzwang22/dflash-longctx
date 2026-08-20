@@ -42,6 +42,7 @@ from .phase1_observability import (
 from .phase2c_gold import (
     classify_comparison_matrix,
     expected_node_alignment,
+    kv_cache_shape_metadata,
     structural_alignment_issues,
     summarize_comparison_mode,
     validate_gold_modes,
@@ -1496,22 +1497,32 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "all_dense_layers_equal_expected": bool(dense_lengths)
             and all(length == expected_next for length in dense_lengths),
         }
-        canonical_source = (
-            compaction.get("committed_cache_source") == "canonical_recheck"
-        )
-        sibling_nodes_discarded = (
-            compaction["discarded_tree_node_count"] >= 0
-            and expected_compacted < compaction["temporary_layer_lengths"][0]
-            if compaction["discarded_tree_node_count"]
-            else True
-        )
+        committed_cache_source = compaction.get("committed_cache_source")
+        linear_commit_source = committed_cache_source in {
+            "canonical_recheck",
+            "phase2d2_q1_replay",
+        }
+        if committed_cache_source == "phase2d2_q1_replay":
+            sibling_nodes_discarded = bool(
+                compaction.get("packed_temporary_kv_discarded")
+            ) and all(
+                length == expected_compacted
+                for length in compaction["temporary_layer_lengths"]
+            )
+        else:
+            sibling_nodes_discarded = (
+                compaction["discarded_tree_node_count"] >= 0
+                and expected_compacted < compaction["temporary_layer_lengths"][0]
+                if compaction["discarded_tree_node_count"]
+                else True
+            )
         committed_indices = [
             int(value)
             for value in compaction["committed_node_indices"].detach().cpu().tolist()
         ]
         expected_gather = (
             list(range(next_root_index))
-            if canonical_source
+            if linear_commit_source
             else [
                 *range(next_root_index - len(committed_indices)),
                 *(
@@ -1532,6 +1543,22 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             len(compacted_cache.layers) == len(dense_committed_cache.layers)
             and len(compacted_cache.layers) > 0
         )
+        shape_metadata = kv_cache_shape_metadata(
+            candidate_shape=[
+                {
+                    "k": list(layer.keys.shape),
+                    "v": list(layer.values.shape),
+                }
+                for layer in compacted_cache.layers
+            ],
+            reference_shape=[
+                {
+                    "k": list(layer.keys.shape),
+                    "v": list(layer.values.shape),
+                }
+                for layer in dense_committed_cache.layers
+            ],
+        )
         structural_status = (
             all(length_checks.values())
             and sibling_nodes_discarded
@@ -1539,6 +1566,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             and actual_gather == expected_gather
             and committed_path_is_valid
             and layer_count_matches
+            and shape_metadata["all_layer_shapes_match"]
         )
         layer_records = []
         for layer_index, (packed_layer, dense_layer) in enumerate(
@@ -1549,6 +1577,14 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     "layer_index": layer_index,
                     "cache_sequence_length": int(packed_layer.get_seq_length()),
                     "expected_committed_length": next_root_index,
+                    "candidate_shape": {
+                        "k": list(packed_layer.keys.shape),
+                        "v": list(packed_layer.values.shape),
+                    },
+                    "reference_shape": {
+                        "k": list(dense_layer.keys.shape),
+                        "v": list(dense_layer.values.shape),
+                    },
                     "k": self._phase2c_tensor_error_stats(
                         packed_layer.keys, dense_layer.keys
                     ),
@@ -1602,6 +1638,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             == list(range(next_root_index - len(committed_indices))),
             "root_and_accepted_path_order_valid": committed_path_is_valid,
             "target_layer_count_matches_dense_reference": layer_count_matches,
+            **shape_metadata,
             "correction_or_bonus_absent_from_persistent_cache": not compaction[
                 "correction_or_bonus_written"
             ],
@@ -1620,8 +1657,10 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "layers": layer_records,
             "provenance": {
                 "compacted_source": (
-                    "canonical linear selected-path cache crop"
-                    if canonical_source
+                    "shape-stable q_len=1 authoritative replay cache"
+                    if committed_cache_source == "phase2d2_q1_replay"
+                    else "canonical linear selected-path cache crop"
+                    if committed_cache_source == "canonical_recheck"
                     else "path-aware gathered packed-tree cache"
                 ),
                 "dense_source": "full committed token sequence recomputation",
@@ -3829,6 +3868,18 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             ],
                             "initial_parallel_draft_forward_count": 1,
                             "conditional_refinement_forward_count": conditional_forward_count,
+                            "base_only_conditional_refinement_bypassed": (
+                                phase2d2_merge_mode == "base_only"
+                                and conditional_forward_count == 0
+                            ),
+                            "actual_verification_tree_source": (
+                                "phase2c_frozen_selector_seed_tree"
+                                if phase2d2_merge_mode == "base_only"
+                                else "phase2d2_refined_tree"
+                            ),
+                            "refined_tree_replaced_seed_tree": (
+                                phase2d2_merge_mode != "base_only"
+                            ),
                             "external_request_batch_size": 1,
                             "internal_branch_batch_size": internal_branch_batch_size,
                             "conditional_input_token_ids": conditional_rows,

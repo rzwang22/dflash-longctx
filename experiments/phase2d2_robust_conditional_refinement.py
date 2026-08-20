@@ -64,6 +64,7 @@ from scripts.collect_environment import collect_environment
 SCHEMA_VERSION = "1.0"
 BASELINE_SHA = "1ba29e8ce4a165c03af997c2f3b3b595ab79c1d2"
 BRANCH = "codex/phase2d2a-robust-conditional-remask"
+BASE_CONTROL_SELECTOR_MODE = "top1_packed_tree"
 ROOT_ARTIFACTS = (
     "manifest.json",
     "environment.json",
@@ -114,8 +115,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--online-selector-mode",
-        choices=("global_fixed", "context_rule", "decision_stump"),
-        default="global_fixed",
+        choices=(
+            "top1_packed_tree",
+            "global_fixed",
+            "context_rule",
+            "decision_stump",
+        ),
+        default=BASE_CONTROL_SELECTOR_MODE,
+        help=(
+            "Frozen-selector mode. The default preserves the validated Phase 2C "
+            "Top-1 packed-tree base control; pass another mode explicitly for a "
+            "frozen-selector experiment."
+        ),
     )
     parser.add_argument("--node-budget", type=int, choices=(16, 32), default=16)
     parser.add_argument(
@@ -398,6 +409,34 @@ def _generated_ids(tensor: Any, prompt_length: int) -> list[int]:
     return [int(value) for value in tensor[0, prompt_length:].detach().cpu().tolist()]
 
 
+def _output_relations(
+    *,
+    target_generated: list[int],
+    reference_generated: list[int],
+    formal_generated: list[int],
+    profile_generated: list[int],
+    diagnostic_generated: list[int],
+    formal_repeat_output_ids_equal: bool,
+) -> dict[str, bool]:
+    """Name every control relation instead of inferring the third side."""
+
+    return {
+        # Backward-compatible name: target-only versus the formal tree output.
+        "target_only_output_ids_equal": target_generated == formal_generated,
+        "target_only_original_dflash_reference_output_ids_equal": (
+            target_generated == reference_generated
+        ),
+        "original_dflash_reference_output_ids_equal": (
+            reference_generated == formal_generated
+        ),
+        "formal_repeat_output_ids_equal": formal_repeat_output_ids_equal,
+        "control_profile_output_ids_equal": formal_generated == profile_generated,
+        "control_diagnostic_output_ids_equal": (
+            formal_generated == diagnostic_generated
+        ),
+    }
+
+
 def _configuration_id(args: argparse.Namespace) -> str:
     return (
         f"{args.candidate_merge_mode}-d{args.refine_depth}-"
@@ -589,14 +628,14 @@ def _run_one(
     formal_generated = _generated_ids(formal_ids, prompt_length)
     profile_generated = _generated_ids(profile_ids, prompt_length)
     diagnostic_generated = _generated_ids(diagnostic_ids, prompt_length)
-    relations = {
-        "target_only_output_ids_equal": target_generated == formal_generated,
-        "formal_repeat_output_ids_equal": formal_equal,
-        "control_profile_output_ids_equal": formal_generated == profile_generated,
-        "control_diagnostic_output_ids_equal": formal_generated == diagnostic_generated,
-        "original_dflash_reference_output_ids_equal": reference_generated
-        == formal_generated,
-    }
+    relations = _output_relations(
+        target_generated=target_generated,
+        reference_generated=reference_generated,
+        formal_generated=formal_generated,
+        profile_generated=profile_generated,
+        diagnostic_generated=diagnostic_generated,
+        formal_repeat_output_ids_equal=formal_equal,
+    )
     structural_reasons = []
     rounds = []
     for row in diagnostic["rounds"]:
@@ -687,15 +726,43 @@ def _run_one(
         if row.get("status") == "fail"
         or row.get("checks", {}).get("all_checks_passed") is False
     )
+    required_relations = {
+        "target_only_output_ids_equal",
+        "formal_repeat_output_ids_equal",
+        "control_profile_output_ids_equal",
+        "control_diagnostic_output_ids_equal",
+    }
+    if args.candidate_merge_mode == "base_only":
+        required_relations.update(
+            {
+                "target_only_original_dflash_reference_output_ids_equal",
+                "original_dflash_reference_output_ids_equal",
+            }
+        )
     hard_reasons = [
         name
-        for name, passed in relations.items()
-        if name != "original_dflash_reference_output_ids_equal" and not passed
+        for name in sorted(required_relations)
+        if not relations[name]
     ]
     hard_reasons.extend(structural_reasons)
     correctness = {
         "target_only_is_authoritative_greedy_oracle": True,
         "original_dflash_reference_is_recorded_control": True,
+        "base_only_three_way_output_exactness_required": (
+            args.candidate_merge_mode == "base_only"
+        ),
+        "base_only_phase2c_output_ids_equal": (
+            all(
+                relations[name]
+                for name in (
+                    "target_only_output_ids_equal",
+                    "target_only_original_dflash_reference_output_ids_equal",
+                    "original_dflash_reference_output_ids_equal",
+                )
+            )
+            if args.candidate_merge_mode == "base_only"
+            else None
+        ),
         **relations,
         "structural_checks_passed": not structural_reasons,
         "structural_failure_reasons": structural_reasons,
@@ -749,6 +816,13 @@ def _run_one(
         "correctness": correctness,
     }
     pairwise = [
+        output_pair_comparison(
+            left_name="target_only",
+            left_ids=target_generated,
+            right_name="original_dflash_reference",
+            right_ids=reference_generated,
+            prompt_length=prompt_length,
+        ),
         output_pair_comparison(
             left_name="target_only",
             left_ids=target_generated,
@@ -855,6 +929,11 @@ def _comparison(
             != args.frozen_selector["config_sha256"]
         ):
             raise ValueError("fixed-budget comparison selector hashes differ")
+        if (
+            manifest["phase2d2"].get("online_selector_mode")
+            != args.online_selector_mode
+        ):
+            raise ValueError("fixed-budget comparison selector modes differ")
         base_samples = _load_jsonl(root / "samples.jsonl")
         base_identities = {
             (
@@ -1117,6 +1196,24 @@ def _persist(
                 row["correctness"]["target_only_output_ids_equal"] for row in samples
             )
         ),
+        "all_target_only_original_dflash_reference_output_ids_equal": bool(
+            samples
+            and all(
+                row["correctness"][
+                    "target_only_original_dflash_reference_output_ids_equal"
+                ]
+                for row in samples
+            )
+        ),
+        "all_original_dflash_reference_output_ids_equal": bool(
+            samples
+            and all(
+                row["correctness"][
+                    "original_dflash_reference_output_ids_equal"
+                ]
+                for row in samples
+            )
+        ),
         "structural_correctness_passed": all(
             row["correctness"]["structural_checks_passed"] for row in samples
         ),
@@ -1129,12 +1226,24 @@ def _persist(
         "records": [row["correctness"] for row in samples],
     }
     pairwise = [row for item in evidence for row in item["pairwise"]]
+    base_only_present = any(
+        row["candidate_merge_mode"] == "base_only" for row in samples
+    )
+    output_relations_passed = correctness["all_target_only_output_ids_equal"] and (
+        not base_only_present
+        or (
+            correctness[
+                "all_target_only_original_dflash_reference_output_ids_equal"
+            ]
+            and correctness["all_original_dflash_reference_output_ids_equal"]
+        )
+    )
     output_divergence = {
         "schema_version": SCHEMA_VERSION,
-        "status": "pass"
-        if correctness["all_target_only_output_ids_equal"]
-        else "failed",
-        "authoritative_relation": "target_only_vs_refined_tree",
+        "status": "pass" if output_relations_passed else "failed",
+        "authoritative_relation": (
+            "target_only_original_dflash_reference_and_tree"
+        ),
         "records": pairwise,
     }
     gold_logits = [row for item in evidence for row in item["gold_logits"]]
@@ -1250,6 +1359,7 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
         "refinement_weight": args.refinement_weight,
         "node_budget": args.node_budget,
         "verification_mode": args.verification_mode,
+        "online_selector_mode": args.online_selector_mode,
         "gold_checks_enabled": args.enable_gold_checks,
         "gold_comparison_modes": list(args.gold_comparison_modes),
         "gold_max_rounds": args.gold_max_rounds,
@@ -1303,6 +1413,26 @@ def main(argv: list[str] | None = None) -> int:
                 "conditional_cache": "deep-copied round-entry draft cache, internal batch expanded, never committed",
                 "position_ids": "persistent draft cache offset through target_hidden injection plus 16-token block",
                 "conditional_logits": "last 15 hidden positions predict draft positions 1..15",
+                "generation_control_paths": {
+                    "target_only": (
+                        "target.generate with explicit all-ones attention mask, "
+                        "greedy decoding, and inactive sampling arguments suppressed"
+                    ),
+                    "original_dflash_reference": (
+                        "unchanged draft.spec_generate at temperature zero without "
+                        "online-tree or Phase 2D.2 generation options"
+                    ),
+                    "base_only_tree": (
+                        "frozen-selector Phase 2C packed-tree construction; the "
+                        "default selector mode is top1_packed_tree, conditional "
+                        "refinement forward count is zero, and no refined tree "
+                        "replaces the seed tree"
+                    ),
+                    "verification_mode_effect": (
+                        "packed_native commits packed traversal/cache; always_replay "
+                        "commits the shape-stable q_len=1 authoritative path"
+                    ),
+                },
             },
             "measurement_policy": {
                 "formal_end_to_end": "unprofiled control repeats",

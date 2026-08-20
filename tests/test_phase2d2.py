@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from jsonschema import Draft202012Validator
 
+from dflash.phase2c.gold import kv_cache_shape_metadata
 from dflash.phase2d2.freeze import (
     freeze_refinement_config,
     validate_frozen_refinement,
@@ -34,9 +35,12 @@ from dflash.phase2d2.robustness import (
 )
 from dflash.phase2d2.tensor import repeat_dynamic_cache_batch
 from experiments.phase2d2_robust_conditional_refinement import (
+    BASE_CONTROL_SELECTOR_MODE,
     GOLD_ARTIFACTS,
     ROOT_ARTIFACTS,
     _comparison,
+    _generation_options,
+    _output_relations,
     _persist,
     _sample_timing_row,
     build_parser,
@@ -379,6 +383,32 @@ class CacheAndGuardTests(unittest.TestCase):
                 calibration_validated=False,
             )
 
+    def test_always_replay_kv_gold_shape_metadata_is_explicit(self) -> None:
+        candidate = [
+            {"k": [1, 8, 1024, 128], "v": [1, 8, 1024, 128]},
+            {"k": [1, 8, 1024, 128], "v": [1, 8, 1024, 128]},
+        ]
+        metadata = kv_cache_shape_metadata(
+            candidate_shape=candidate,
+            reference_shape=deepcopy(candidate),
+        )
+        self.assertTrue(metadata["shape_metadata_available"])
+        self.assertTrue(metadata["shape_layer_count_matches"])
+        self.assertTrue(metadata["all_layer_shapes_match"])
+        self.assertEqual(metadata["candidate_shape"], candidate)
+        self.assertEqual(metadata["reference_shape"], candidate)
+        self.assertTrue(
+            all(row["k"] and row["v"] for row in metadata["layer_shape_matches"])
+        )
+
+    def test_kv_shape_mismatch_remains_structural_evidence(self) -> None:
+        metadata = kv_cache_shape_metadata(
+            candidate_shape=[{"k": [1, 8, 1024, 128], "v": [1, 8, 1024, 128]}],
+            reference_shape=[{"k": [1, 8, 1025, 128], "v": [1, 8, 1025, 128]}],
+        )
+        self.assertFalse(metadata["all_layer_shapes_match"])
+        self.assertFalse(metadata["layer_shape_matches"][0]["k"])
+
     def test_calibration_provenance_and_hash_are_strict(self) -> None:
         provenance = {
             "gpu_name": "NVIDIA H100 PCIe",
@@ -432,6 +462,7 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
         self.assertEqual(defaults.refinement_weight, 0.5)
         self.assertEqual(defaults.node_budget, 16)
         self.assertEqual(defaults.verification_mode, "always_replay")
+        self.assertEqual(defaults.online_selector_mode, BASE_CONTROL_SELECTOR_MODE)
 
         overridden = build_parser().parse_args(
             [
@@ -465,6 +496,71 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
         self.assertEqual(overridden.node_budget, 32)
         self.assertEqual(overridden.verification_mode, "packed_native")
 
+    def test_base_only_uses_phase2c_top1_control_configuration(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--longbench-root",
+                "/datasets/LongBench",
+                "--materialized-draft-path",
+                "/models/instrumented",
+                "--frozen-selector-config",
+                "/outputs/frozen-selector.json",
+                "--candidate-merge-mode",
+                "base_only",
+                "--verification-mode",
+                "packed_native",
+            ]
+        )
+        args.nr_calibration = None
+        args.frozen_selector = {"config_sha256": "selector"}
+        args.gold_comparison_modes = ("native",)
+        args.gold_thresholds = {
+            "maximum_absolute_error": 0.5,
+            "mean_absolute_error": 0.02,
+            "relative_error_epsilon": 1.0e-6,
+            "layer_localization_p99_error": 0.1,
+        }
+        options = _generation_options(
+            args,
+            profiling=False,
+            gold=False,
+            shadow_replay=False,
+            context_length=1024,
+        )
+        self.assertEqual(options["online_selector_mode"], "top1_packed_tree")
+        self.assertEqual(options["phase2d2_candidate_merge_mode"], "base_only")
+        self.assertEqual(options["phase2d2_verification_mode"], "packed_native")
+
+    def test_base_only_explicit_three_way_output_relation(self) -> None:
+        relations = _output_relations(
+            target_generated=[1, 2, 3],
+            reference_generated=[1, 2, 3],
+            formal_generated=[1, 2, 3],
+            profile_generated=[1, 2, 3],
+            diagnostic_generated=[1, 2, 3],
+            formal_repeat_output_ids_equal=True,
+        )
+        self.assertTrue(relations["target_only_output_ids_equal"])
+        self.assertTrue(
+            relations["target_only_original_dflash_reference_output_ids_equal"]
+        )
+        self.assertTrue(relations["original_dflash_reference_output_ids_equal"])
+
+    def test_target_reference_relation_is_not_inferred_from_tree(self) -> None:
+        relations = _output_relations(
+            target_generated=[1, 2, 3],
+            reference_generated=[1, 2, 4],
+            formal_generated=[1, 2, 3],
+            profile_generated=[1, 2, 3],
+            diagnostic_generated=[1, 2, 3],
+            formal_repeat_output_ids_equal=True,
+        )
+        self.assertTrue(relations["target_only_output_ids_equal"])
+        self.assertFalse(
+            relations["target_only_original_dflash_reference_output_ids_equal"]
+        )
+        self.assertFalse(relations["original_dflash_reference_output_ids_equal"])
+
     def test_candidate_quality_is_evaluation_only(self) -> None:
         row = {
             "phase2d2": {
@@ -495,6 +591,7 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
                     "node_budget": 16,
                     "candidate_merge_mode": "base_only",
                     "frozen_selector_hash": "selector",
+                    "online_selector_mode": "top1_packed_tree",
                 }
             }
             (root / "manifest.json").write_text(json.dumps(manifest))
@@ -520,6 +617,7 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
                 base_result_dir=[root],
                 node_budget=16,
                 frozen_selector={"config_sha256": "selector"},
+                online_selector_mode="top1_packed_tree",
             )
             current = {
                 "aggregates": [
@@ -737,6 +835,12 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
         self.assertIn('"query_length": 1', source)
         self.assertIn("conditional_forward_count = 1", source)
         self.assertIn("conditional_refinement_forward_count", source)
+        self.assertIn('"base_only_conditional_refinement_bypassed"', source)
+        self.assertIn('"phase2c_frozen_selector_seed_tree"', source)
+        self.assertIn('"phase2d2_q1_replay",', source)
+        self.assertIn('"packed_temporary_kv_discarded"', source)
+        self.assertIn('"candidate_shape": {', source)
+        self.assertIn('"reference_shape": {', source)
 
     def test_original_vendored_code_is_not_modified_by_phase2d2(self) -> None:
         changed = subprocess.run(

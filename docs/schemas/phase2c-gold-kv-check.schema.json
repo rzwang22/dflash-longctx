@@ -18,6 +18,12 @@
     "warning": {"type": ["string", "null"]},
     "reason": {"type": ["string", "null"]},
     "provenance": {"type": "object"},
+    "candidate_shape": {"type": "array"},
+    "reference_shape": {"type": "array"},
+    "shape_metadata_available": {"type": "boolean"},
+    "shape_layer_count_matches": {"type": "boolean"},
+    "layer_shape_matches": {"type": "array"},
+    "all_layer_shapes_match": {"type": "boolean"},
     "layers": {"type": "array"},
     "next_step_layer_lengths": {"type": "array", "items": {"type": "integer"}},
     "dense_reference_layer_lengths": {"type": "array", "items": {"type": "integer"}}

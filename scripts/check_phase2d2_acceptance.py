@@ -77,6 +77,8 @@ def check_output(output: Path) -> dict[str, Any]:
     robust_events = _jsonl(output / "robust-verification-events.jsonl")
     decision = _json(output / "phase2d2-decision.json")
     output_divergence = _json(output / "output-divergence.json")
+    gold_kv_path = output / "gold-kv-checks.jsonl"
+    gold_kv = _jsonl(gold_kv_path) if gold_kv_path.is_file() else []
     if manifest.get("status") not in {"ok", "failed", "error"}:
         raise ValueError(
             f"incomplete Phase 2D.2A manifest status: {manifest.get('status')!r}"
@@ -116,6 +118,12 @@ def check_output(output: Path) -> dict[str, Any]:
             raise ValueError("sample target-only/refined-tree token IDs differ")
         if not row["correctness"]["passed"]:
             raise ValueError("sample hard correctness record did not pass")
+        if row["candidate_merge_mode"] == "base_only" and not row[
+            "correctness"
+        ].get("base_only_phase2c_output_ids_equal"):
+            raise ValueError(
+                "base_only target/original-DFlash/tree outputs are not token exact"
+            )
     for row in rounds:
         _validate(row, "phase2d2-round.schema.json")
         phase = row["phase2d2"]
@@ -128,6 +136,13 @@ def check_output(output: Path) -> dict[str, Any]:
             and phase["conditional_refinement_forward_count"] != 0
         ):
             raise ValueError("base_only control executed a conditional forward")
+        if phase["candidate_merge_mode"] == "base_only" and (
+            not phase["base_only_conditional_refinement_bypassed"]
+            or phase["actual_verification_tree_source"]
+            != "phase2c_frozen_selector_seed_tree"
+            or phase["refined_tree_replaced_seed_tree"]
+        ):
+            raise ValueError("base_only did not preserve the Phase 2C seed-tree path")
         if phase["internal_branch_batch_size"] != len(
             phase.get("conditional_input_token_ids", [])
         ):
@@ -168,18 +183,62 @@ def check_output(output: Path) -> dict[str, Any]:
         _validate(row, "phase2d2-refined-tree-round.schema.json")
     for row in robust_events:
         _validate(row, "phase2d2-robust-verification-event.schema.json")
-    authoritative_pairs = [
-        row
-        for row in output_divergence["records"]
-        if row.get("left_name") == "target_only"
-        and row.get("right_name") == "refined_tree"
-    ]
-    if len(authoritative_pairs) != len(samples) or any(
-        not row.get("output_ids_equal") for row in authoritative_pairs
-    ):
-        raise ValueError("absolute-token output comparison is incomplete or divergent")
+    if manifest["phase2d2"].get("gold_checks_enabled"):
+        if not gold_kv:
+            raise ValueError("enabled Gold checks produced no KV evidence")
+        for row in gold_kv:
+            _validate(row, "phase2c-gold-kv-check.schema.json")
+            if (
+                row.get("availability") == "available"
+                and manifest["phase2d2"]["verification_mode"] == "always_replay"
+            ):
+                required_shape_fields = {
+                    "candidate_shape",
+                    "reference_shape",
+                    "shape_metadata_available",
+                    "shape_layer_count_matches",
+                    "layer_shape_matches",
+                    "all_layer_shapes_match",
+                }
+                missing_shape_fields = sorted(required_shape_fields - set(row))
+                if missing_shape_fields:
+                    raise ValueError(
+                        "always_replay KV Gold shape metadata is incomplete: "
+                        f"{missing_shape_fields}"
+                    )
+                if not row["shape_metadata_available"]:
+                    raise ValueError("always_replay KV Gold shapes are unavailable")
+    required_pairs = (
+        ("target_only", "original_dflash_reference"),
+        ("target_only", "refined_tree"),
+        ("original_dflash_reference", "refined_tree"),
+    )
+    for left_name, right_name in required_pairs:
+        matches = [
+            row
+            for row in output_divergence["records"]
+            if row.get("left_name") == left_name
+            and row.get("right_name") == right_name
+        ]
+        if len(matches) != len(samples):
+            raise ValueError(
+                f"absolute-token relation {left_name}/{right_name} is incomplete"
+            )
+        if any(not row.get("output_ids_equal") for row in matches) and any(
+            sample["candidate_merge_mode"] == "base_only" for sample in samples
+        ):
+            raise ValueError(
+                f"base_only absolute-token relation {left_name}/{right_name} diverged"
+            )
     if not correctness.get("all_target_only_output_ids_equal"):
         raise ValueError("target-only/refined-tree output token mismatch")
+    if any(row["candidate_merge_mode"] == "base_only" for row in samples):
+        if not correctness.get(
+            "all_target_only_original_dflash_reference_output_ids_equal"
+        ):
+            raise ValueError("target-only/original-DFlash output token mismatch")
+        if not correctness.get("all_original_dflash_reference_output_ids_equal"):
+            raise ValueError("original-DFlash/base-only-tree output token mismatch")
     if not correctness.get("structural_correctness_passed"):
         raise ValueError(
             "structural correctness failed: "

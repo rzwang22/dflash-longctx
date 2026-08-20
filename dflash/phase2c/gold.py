@@ -24,6 +24,67 @@ DEFAULT_GOLD_THRESHOLDS = {
 }
 
 
+def kv_cache_shape_metadata(
+    *,
+    candidate_shape: list[dict[str, list[int]]],
+    reference_shape: list[dict[str, list[int]]],
+) -> dict[str, Any]:
+    """Build explicit, JSON-safe per-layer KV shape evidence.
+
+    Phase 2D.2 authoritative replay commits a linear cache rather than gathering
+    the temporary packed cache.  Shape evidence therefore has to describe the
+    cache tensors themselves; a missing shape must never be interpreted as a
+    numerical mismatch or silently accepted as structurally comparable.
+    """
+
+    def normalize(
+        name: str, value: list[dict[str, list[int]]]
+    ) -> list[dict[str, list[int]]]:
+        normalized = []
+        for layer_index, layer in enumerate(value):
+            if set(layer) != {"k", "v"}:
+                raise ValueError(
+                    f"{name} layer {layer_index} must contain exactly k/v shapes"
+                )
+            current: dict[str, list[int]] = {}
+            for kind in ("k", "v"):
+                dimensions = layer[kind]
+                if not isinstance(dimensions, (list, tuple)) or not dimensions:
+                    raise ValueError(
+                        f"{name} layer {layer_index} {kind} shape is unavailable"
+                    )
+                current[kind] = [int(dimension) for dimension in dimensions]
+                if any(dimension < 0 for dimension in current[kind]):
+                    raise ValueError("KV shape dimensions cannot be negative")
+            normalized.append(current)
+        if not normalized:
+            raise ValueError(f"{name} must contain at least one KV layer")
+        return normalized
+
+    candidate = normalize("candidate_shape", candidate_shape)
+    reference = normalize("reference_shape", reference_shape)
+    layer_count_matches = len(candidate) == len(reference)
+    layer_shape_matches = [
+        {
+            "layer_index": layer_index,
+            "k": candidate_layer["k"] == reference_layer["k"],
+            "v": candidate_layer["v"] == reference_layer["v"],
+        }
+        for layer_index, (candidate_layer, reference_layer) in enumerate(
+            zip(candidate, reference)
+        )
+    ]
+    return {
+        "candidate_shape": candidate,
+        "reference_shape": reference,
+        "shape_metadata_available": True,
+        "shape_layer_count_matches": layer_count_matches,
+        "layer_shape_matches": layer_shape_matches,
+        "all_layer_shapes_match": layer_count_matches
+        and all(row["k"] and row["v"] for row in layer_shape_matches),
+    }
+
+
 def validate_gold_thresholds(thresholds: dict[str, float]) -> dict[str, float]:
     """Return a named, finite threshold set without silently changing values."""
 

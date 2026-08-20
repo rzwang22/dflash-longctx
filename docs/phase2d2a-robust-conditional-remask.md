@@ -41,6 +41,17 @@ then lexicographic token-ID prefix. At most 1, 2, or 4 are retained. No target
 token, logits, accepted depth, reference output, oracle label, or Gold result is
 accepted by the selection API.
 
+The `base_only` CLI control defaults to the previously validated Phase 2C
+`top1_packed_tree` selector mode. `global_fixed`, `context_rule`, and
+`decision_stump` remain available as explicit frozen-selector experiments, but
+are not silently substituted for that base control. Target-only generation uses
+an explicit all-ones attention mask and greedy `generate` with inactive sampling
+arguments suppressed; Original DFlash uses the unchanged
+`spec_generate(temperature=0)` call. Both receive the same chat-templated input
+IDs, EOS ID, maximum token count, target instance, dtype, and cache semantics.
+Every run records all three pairwise relations among target-only, Original
+DFlash, and the tree output; `base_only` requires all three to be token exact.
+
 For each selected prefix, one internal-batch conditional pass computes full
 vocabulary logits. Only bounded IDs are retained, but both the base and
 conditional full-vocabulary log probability are gathered for every retained ID.
@@ -80,6 +91,14 @@ The diagnostic run can execute a non-authoritative shadow replay above the guard
 threshold to measure false positives/negatives. Formal latency, component
 profiling, and Gold/shadow diagnostics are separate generations. The guard is an
 empirical H100 control, not a formal numerical error bound.
+
+The Q1 replay cache is a linear authoritative commit source, not a gathered
+packed-cache source. Gold KV validation checks its storage indices as the full
+contiguous committed prefix and requires the packed temporary KV to be marked
+discarded. Each available Gold row records non-null candidate and dense-reference
+K/V shapes for every target layer, layer-count/shape equality, the existing
+length invariants, and numerical error reductions. Missing or incompatible shape
+metadata remains a structural failure.
 
 Target-only greedy output is the Phase 2D.2A hard token-exact oracle. Original
 DFlash remains a recorded third control. Refinement may alter accepted depth,

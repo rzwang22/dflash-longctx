@@ -12,7 +12,7 @@
     "repository": {"type": "object"},
     "configuration": {"type": "object"},
     "workload": {"type": "object"},
-    "phase2d2": {"type": "object", "required": ["configuration_id", "candidate_merge_mode", "node_budget", "verification_mode", "frozen_selector_hash", "evidence_role"]},
+    "phase2d2": {"type": "object", "required": ["configuration_id", "candidate_merge_mode", "node_budget", "verification_mode", "online_selector_mode", "frozen_selector_hash", "evidence_role"]},
     "materialization": {"type": "object", "required": ["id", "instrumented_custom_code_changed", "independent_new_directory_required"]},
     "source_audit": {"type": "object"},
     "measurement_policy": {"type": "object"},

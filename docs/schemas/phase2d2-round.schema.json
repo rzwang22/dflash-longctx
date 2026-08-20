@@ -9,10 +9,13 @@
     "round_index": {"type": "integer", "minimum": 0},
     "phase2d2": {
       "type": "object",
-      "required": ["candidate_merge_mode", "initial_parallel_draft_forward_count", "conditional_refinement_forward_count", "external_request_batch_size", "internal_branch_batch_size", "conditional_input_token_ids", "temporary_refinement_state_committed", "selected_tree_node_count", "actual_verified_node_count", "root_count", "fixed_root_inclusive_node_budget", "node_budget_invariant_passed", "verification_mode", "fallback_replay_executed", "fallback_query_lengths", "authoritative_committed_cache_length", "authoritative_committed_target_kv_layer_lengths", "correction_or_bonus_committed_in_current_round", "sibling_kv_removed_from_committed_cache", "final_output_source"],
+      "required": ["candidate_merge_mode", "initial_parallel_draft_forward_count", "conditional_refinement_forward_count", "base_only_conditional_refinement_bypassed", "actual_verification_tree_source", "refined_tree_replaced_seed_tree", "external_request_batch_size", "internal_branch_batch_size", "conditional_input_token_ids", "temporary_refinement_state_committed", "selected_tree_node_count", "actual_verified_node_count", "root_count", "fixed_root_inclusive_node_budget", "node_budget_invariant_passed", "verification_mode", "fallback_replay_executed", "fallback_query_lengths", "authoritative_committed_cache_length", "authoritative_committed_target_kv_layer_lengths", "correction_or_bonus_committed_in_current_round", "sibling_kv_removed_from_committed_cache", "final_output_source"],
       "properties": {
         "initial_parallel_draft_forward_count": {"const": 1},
         "conditional_refinement_forward_count": {"type": "integer", "minimum": 0, "maximum": 1},
+        "base_only_conditional_refinement_bypassed": {"type": "boolean"},
+        "actual_verification_tree_source": {"enum": ["phase2c_frozen_selector_seed_tree", "phase2d2_refined_tree"]},
+        "refined_tree_replaced_seed_tree": {"type": "boolean"},
         "external_request_batch_size": {"const": 1},
         "conditional_input_token_ids": {"type": "array"},
         "temporary_refinement_state_committed": {"const": false},
