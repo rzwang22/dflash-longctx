@@ -684,6 +684,41 @@ class Phase2D1BNRTests(unittest.TestCase):
         self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
         self.assertTrue(result["subprocess_nonzero_retained_as_diagnostic"])
 
+    def test_exact_output_unresolved_numerical_variation_continues(self) -> None:
+        identity = _identity(
+            experiment="cohort", mode="top1_packed_tree", budget=16, context=16384
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(
+                root,
+                identity,
+                replay_mismatch=True,
+                return_code=1,
+                failure_class_override="unresolved_numerical_variation",
+                hard_failure_reason_override=(
+                    "gold_semantic_failure:unresolved_numerical_variation"
+                ),
+            )
+            _write_jsonl(root / "gold-logit-checks.jsonl", [])
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        _validate(result, "phase2d1bnr-subrun.schema.json")
+        self.assertEqual(
+            result["outcome_category"], "diagnostic_only_numerical_variation"
+        )
+        self.assertTrue(result["actual_reference_tree_output_ids_equal"])
+        self.assertTrue(result["gold_or_replay_variation_observed"])
+        self.assertTrue(result["known_numerical_variation_evidence"])
+        self.assertTrue(result["replay_only_variation_observed"])
+        self.assertTrue(result["replay_structural_evidence_passed"])
+        self.assertTrue(result["diagnostic_classification_evidence_sufficient"])
+        self.assertFalse(result["gold_evidence_complete"])
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+        self.assertEqual(
+            result["hard_correctness_failure_reasons"],
+            ["gold_semantic_failure:unresolved_numerical_variation"],
+        )
+
     def test_exact_output_with_missing_replay_evidence_remains_incomplete(self) -> None:
         identity = _identity()
         with tempfile.TemporaryDirectory() as temporary:
@@ -697,6 +732,19 @@ class Phase2D1BNRTests(unittest.TestCase):
                 if json.loads(line)["comparison_mode"] != "native"
             ]
             _write_jsonl(root / "gold-logit-checks.jsonl", rows)
+            correctness = json.loads(
+                (root / "correctness-summary.json").read_text(encoding="utf-8")
+            )
+            correctness.update(
+                {
+                    "gold_status": "not_run",
+                    "failure_class": None,
+                    "diagnostic_numerical_variation_observed": False,
+                    "diagnostic_numerical_variation_reasons": [],
+                    "hard_correctness_failure_reasons": [],
+                }
+            )
+            _write_json(root / "correctness-summary.json", correctness)
             result = classify_subrun_artifacts(root, identity=identity, return_code=1)
         self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
 

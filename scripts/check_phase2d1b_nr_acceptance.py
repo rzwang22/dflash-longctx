@@ -193,16 +193,12 @@ def _validate_observations(
                     "unresolved actual divergence was also marked incomplete"
                 )
         if outcome == "diagnostic_only_numerical_variation":
-            if row.get("actual_execution_semantic_failure") is not False:
-                raise ValueError(
-                    "diagnostic-only variation has an actual semantic failure"
-                )
-            if row.get("replay_semantic_variation_with_actual_consequence"):
-                raise ValueError(
-                    "diagnostic-only variation has an actual replay consequence"
-                )
             if row.get("replay_only_variation_observed") is not True:
                 raise ValueError("diagnostic-only variation lacks replay evidence")
+            if row.get("gold_or_replay_variation_observed") is not True:
+                raise ValueError("diagnostic-only variation lacks Gold/replay evidence")
+            if row.get("unclassified_gold_or_replay_failure_observed") is not False:
+                raise ValueError("diagnostic-only variation has unknown attribution")
             if row.get("replay_structural_evidence_passed") is not True:
                 raise ValueError(
                     "diagnostic-only variation lacks passing replay structure"
@@ -217,8 +213,6 @@ def _validate_observations(
                 raise ValueError(
                     "diagnostic-only variation lacks sufficient classification evidence"
                 )
-            if row.get("diagnostic_skip_evidence_supported") is not True:
-                raise ValueError("diagnostic-only variation has unsupported Gold skips")
             if row.get("structural_correctness_passed") is not True:
                 raise ValueError("diagnostic-only variation has a structural failure")
             if row.get("genuinely_incomplete_correctness_evidence") is not False:

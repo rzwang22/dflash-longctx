@@ -76,9 +76,12 @@ threshold, backend, dtype, and numerical evidence remain in
 `diagnostic_classification_evidence_sufficient` is separate from the stricter
 `gold_evidence_complete`: an output-exact observation may be conclusively
 diagnostic even when downstream Gold checks were skipped. It still requires a
-known numerical attribution, an actual replay record with passing structural
-status, stable actual-output evidence, round/stabilization records, no actual
-semantic consequence, and no unknown or unrelated Gold skip.
+known numerical attribution or numerical Gold/replay signal, a reliable exact
+actual-output relation, and no structural failure. Both
+`numerical_backend_variation` and `unresolved_numerical_variation` are known
+diagnostic numerical classes. Missing comparison modes, downstream Gold skips,
+or absent optional replay rows remain visible but do not turn an otherwise
+conclusive output-exact observation into an incomplete one.
 
 Gold incompleteness is classified causally rather than by treating every
 `uncompleted_checks` entry alike. An actual numerical divergence may remain a

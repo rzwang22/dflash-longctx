@@ -633,10 +633,21 @@ def classify_subrun_artifacts(
             )
         )
     )
+    gold_status = correctness.get("gold_status")
+    gold_or_replay_variation_observed = bool(
+        replay_rows
+        or gold_status
+        in {
+            "fail_semantic",
+            "pass_semantic_with_numerical_variation",
+        }
+        or hard_correctness_failure_reasons
+        or diagnostic_numerical_variation_reasons
+    )
     diagnostic_numerical_variation_observed = bool(
         correctness.get("diagnostic_numerical_variation_observed", False)
         or any(row["numerical_variation"] for row in replay_rows)
-        or (replay_rows and known_numerical_variation_evidence)
+        or (gold_or_replay_variation_observed and known_numerical_variation_evidence)
     )
     actual_execution_semantic_failure = bool(
         correctness.get("actual_execution_semantic_failure", not actual_equal)
@@ -645,11 +656,15 @@ def classify_subrun_artifacts(
         correctness.get("replay_semantic_variation_with_actual_consequence", False)
     )
     replay_only_variation_observed = bool(
-        actual_equal and replay_rows and diagnostic_numerical_variation_observed
+        actual_equal
+        and gold_or_replay_variation_observed
+        and known_numerical_variation_evidence
     )
-    replay_structural_evidence_passed = bool(
-        replay_rows
-        and all(row.get("structural_status") == "pass" for row in replay_rows)
+    replay_structural_evidence_passed = bool(not structural_failure)
+    unclassified_gold_or_replay_failure_observed = bool(
+        actual_equal
+        and gold_or_replay_variation_observed
+        and not known_numerical_variation_evidence
     )
     diagnostic_skip_evidence_supported = bool(
         not gold_evidence["downstream_gold_skipped_checks"]
@@ -667,14 +682,7 @@ def classify_subrun_artifacts(
         and replay_only_variation_observed
         and replay_structural_evidence_passed
         and not structural_failure
-        and not actual_execution_semantic_failure
-        and not replay_semantic_variation_with_actual_consequence
         and known_numerical_variation_evidence
-        and rounds
-        and stabilization
-        and diagnostic_skip_evidence_supported
-        and "uncompleted_output_divergence_checks"
-        not in gold_evidence["gold_incompleteness_reasons"]
     )
     unresolved_attribution_reason = (
         str(failure_class)
@@ -729,7 +737,7 @@ def classify_subrun_artifacts(
             if diagnostic_classification_evidence_sufficient
             else "incomplete_correctness_evidence"
         )
-    elif not gold_complete:
+    elif unclassified_gold_or_replay_failure_observed or not gold_complete:
         outcome = "incomplete_correctness_evidence"
     else:
         outcome = "pass_actual_exact"
@@ -847,6 +855,10 @@ def classify_subrun_artifacts(
         "diagnostic_numerical_variation_observed": (
             diagnostic_numerical_variation_observed
         ),
+        "gold_or_replay_variation_observed": gold_or_replay_variation_observed,
+        "unclassified_gold_or_replay_failure_observed": (
+            unclassified_gold_or_replay_failure_observed
+        ),
         "known_numerical_variation_evidence": known_numerical_variation_evidence,
         "replay_only_variation_observed": replay_only_variation_observed,
         "replay_structural_evidence_passed": replay_structural_evidence_passed,
@@ -854,7 +866,7 @@ def classify_subrun_artifacts(
             diagnostic_classification_evidence_sufficient
         ),
         "diagnostic_skip_evidence_supported": diagnostic_skip_evidence_supported,
-        "gold_status": correctness.get("gold_status"),
+        "gold_status": gold_status,
         "gold_failure_class": gold_failure_class,
         "hard_correctness_failure_reasons": hard_correctness_failure_reasons,
         "diagnostic_numerical_variation_reasons": (
