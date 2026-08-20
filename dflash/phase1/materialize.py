@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -183,6 +184,9 @@ def _effective_sources(implementation: str) -> dict[str, Path]:
             REPO_ROOT / "dflash" / "phase2d2" / "refinement.py"
         )
         sources["phase2d2_tensor.py"] = REPO_ROOT / "dflash" / "phase2d2" / "tensor.py"
+        sources["phase2d2_robustness.py"] = (
+            REPO_ROOT / "dflash" / "phase2d2" / "robustness.py"
+        )
     sources["LICENSE"] = VENDOR_ROOT / "LICENSE"
     return sources
 
@@ -218,6 +222,56 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 def _materialization_id(payload: dict[str, Any]) -> str:
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _relative_import_names(module_file: Path) -> set[str]:
+    """Match the static relative-import scan used by Transformers 4.57."""
+
+    content = module_file.read_text(encoding="utf-8")
+    names = re.findall(r"^\s*import\s+\.(\S+)\s*$", content, flags=re.MULTILINE)
+    names += re.findall(r"^\s*from\s+\.(\S+)\s+import", content, flags=re.MULTILINE)
+    return set(names)
+
+
+def dynamic_module_dependency_record(
+    model_path: Path, *, entrypoint: str = "dflash.py"
+) -> dict[str, Any]:
+    """Resolve and hash the exact local files copied by HF dynamic loading.
+
+    The traversal intentionally follows static source imports, including imports
+    in inactive branches, because that is how ``get_relative_import_files`` in
+    Transformers 4.57 discovers custom-code dependencies.
+    """
+
+    root = model_path.expanduser().resolve()
+    entrypoint_path = root / entrypoint
+    if not entrypoint_path.is_file():
+        raise RuntimeError(f"Dynamic-module entrypoint is missing: {entrypoint_path}")
+    pending = [entrypoint_path]
+    visited = {entrypoint_path}
+    dependencies: set[Path] = set()
+    while pending:
+        module_file = pending.pop()
+        for module_name in sorted(_relative_import_names(module_file)):
+            dependency = root / f"{module_name}.py"
+            if not dependency.is_file():
+                raise RuntimeError(
+                    "Hugging Face dynamic-module dependency is missing: "
+                    f"{dependency.name} (imported by {module_file.name})"
+                )
+            dependencies.add(dependency)
+            if dependency not in visited:
+                visited.add(dependency)
+                pending.append(dependency)
+    filenames = sorted(path.name for path in dependencies)
+    return {
+        "entrypoint": entrypoint,
+        "resolver": "transformers_4_57_static_relative_import_scan",
+        "relative_import_files": filenames,
+        "relative_import_sha256": {
+            filename: sha256_file(root / filename) for filename in filenames
+        },
+    }
 
 
 def materialize_draft(
@@ -285,6 +339,8 @@ def materialize_draft(
         if sha256_file(output_dir / filename) != effective_hashes[filename]:
             raise RuntimeError(f"Materialized source hash mismatch for {filename}")
 
+    dynamic_module_dependencies = dynamic_module_dependency_record(output_dir)
+
     for weight in weight_provenance:
         source = Path(weight["source_path"])
         destination = output_dir / weight["filename"]
@@ -306,6 +362,7 @@ def materialize_draft(
         "created_at_utc": created_at,
         **identity,
         "upstream_custom_code_sha256": source_provenance["upstream_source_hashes"],
+        "dynamic_module_dependencies": dynamic_module_dependencies,
     }
     _write_json_atomic(manifest_path, manifest)
     return manifest
@@ -366,6 +423,13 @@ def verify_materialization(
         if actual_hash != expected_hash:
             raise RuntimeError(
                 f"Materialized {filename} hash {actual_hash} does not match {expected_hash}"
+            )
+    expected_dynamic_dependencies = manifest.get("dynamic_module_dependencies")
+    if expected_dynamic_dependencies is not None:
+        actual_dynamic_dependencies = dynamic_module_dependency_record(model_path)
+        if actual_dynamic_dependencies != expected_dynamic_dependencies:
+            raise RuntimeError(
+                "Materialized Hugging Face dynamic-module dependency closure changed"
             )
     for weight in manifest["weight_provenance"]:
         materialized = model_path / weight["filename"]

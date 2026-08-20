@@ -6,12 +6,29 @@ passes its already imported ``torch`` module explicitly.
 
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any
 
-try:
-    from .refinement import MAXIMUM_DRAFT_DEPTH
-except ImportError:  # Materialized remote-code filename.
-    from .phase2d2_refinement import MAXIMUM_DRAFT_DEPTH
+
+def _refinement_module() -> Any:
+    """Resolve the local-package or materialized remote-code module name.
+
+    Transformers statically scans every ``from .name import ...`` occurrence,
+    including imports inside ``try`` blocks.  Using ``import_module`` here avoids
+    advertising the repository-only ``refinement.py`` name to the Hugging Face
+    dynamic-module copier while retaining normal ``dflash.phase2d2`` imports.
+    """
+
+    materialized_name = f"{__package__}.phase2d2_refinement"
+    try:
+        return import_module(materialized_name)
+    except ModuleNotFoundError as exc:
+        if exc.name != materialized_name:
+            raise
+        return import_module(f"{__package__}.refinement")
+
+
+MAXIMUM_DRAFT_DEPTH = _refinement_module().MAXIMUM_DRAFT_DEPTH
 
 
 def repeat_dynamic_cache_batch(cache: Any, repeats: int) -> Any:

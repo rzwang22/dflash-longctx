@@ -87,12 +87,19 @@ from .phase2d2_refinement import (
     select_refinement_prefixes,
     validate_refinement_options,
 )
+from .phase2d2_robustness import (
+    validate_nr_calibration as _phase2d2_validate_nr_calibration_dependency,
+)
 from .phase2d2_tensor import (
     conditional_candidate_records,
     pack_refined_tree_tensors,
     repeat_dynamic_cache_batch,
 )
 from .utils import build_target_layer_ids, extract_context_feature, sample
+
+_PHASE2D2_DYNAMIC_MODULE_PROVENANCE_SYMBOLS = (
+    _phase2d2_validate_nr_calibration_dependency,
+)
 
 
 class _Phase2CNoopTimer:

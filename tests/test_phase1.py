@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 from dflash.phase1.materialize import (
     DRAFT_REVISION,
     VENDOR_ROOT,
+    dynamic_module_dependency_record,
     materialize_draft,
     verify_materialization,
 )
@@ -130,6 +132,30 @@ class Phase1Tests(unittest.TestCase):
             )
             self.assertIn("phase2c_online.py", verified["effective_custom_code_sha256"])
             self.assertIn("phase2c_gold.py", verified["effective_custom_code_sha256"])
+            self.assertIn(
+                "phase2d2_refinement.py",
+                verified["effective_custom_code_sha256"],
+            )
+            self.assertIn(
+                "phase2d2_tensor.py", verified["effective_custom_code_sha256"]
+            )
+            self.assertIn(
+                "phase2d2_robustness.py",
+                verified["effective_custom_code_sha256"],
+            )
+            dependencies = verified["dynamic_module_dependencies"]
+            self.assertEqual(
+                dependencies,
+                dynamic_module_dependency_record(output),
+            )
+            self.assertTrue(
+                {
+                    "phase2d2_refinement.py",
+                    "phase2d2_tensor.py",
+                    "phase2d2_robustness.py",
+                }.issubset(dependencies["relative_import_files"])
+            )
+            self.assertNotIn("refinement.py", dependencies["relative_import_files"])
             with self.assertRaisesRegex(RuntimeError, "separate output directory"):
                 materialize_draft(
                     source_model_path=source,
@@ -140,6 +166,119 @@ class Phase1Tests(unittest.TestCase):
             (output / "dflash.py").write_text("tampered\n", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "hash"):
                 verify_materialization(output)
+
+    def test_dynamic_module_resolution_rejects_inactive_missing_import(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "dflash.py").write_text(
+                "from .phase2d2_tensor import helper\n", encoding="utf-8"
+            )
+            (root / "phase2d2_tensor.py").write_text(
+                "try:\n"
+                "    from .refinement import helper\n"
+                "except ImportError:\n"
+                "    from .phase2d2_refinement import helper\n",
+                encoding="utf-8",
+            )
+            (root / "phase2d2_refinement.py").write_text(
+                "helper = object()\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RuntimeError, "refinement.py"):
+                dynamic_module_dependency_record(root)
+
+    def test_original_dynamic_module_closure_has_no_phase2d2_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _make_weight_source(root)
+            output = root / "original"
+            manifest = materialize_draft(
+                source_model_path=source,
+                output_dir=output,
+                implementation="original",
+            )
+            dependencies = manifest["dynamic_module_dependencies"]
+            self.assertIn("utils.py", dependencies["relative_import_files"])
+            self.assertFalse(
+                any(
+                    filename.startswith("phase2")
+                    for filename in dependencies["relative_import_files"]
+                )
+            )
+
+    def test_legacy_manifest_without_dependency_record_still_verifies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _make_weight_source(root)
+            output = root / "instrumented"
+            manifest = materialize_draft(
+                source_model_path=source,
+                output_dir=output,
+                implementation="instrumented",
+            )
+            manifest.pop("dynamic_module_dependencies")
+            (output / "materialization.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            verified = verify_materialization(
+                output, expected_implementation="instrumented"
+            )
+            self.assertNotIn("dynamic_module_dependencies", verified)
+
+    def test_real_auto_model_resolves_materialized_phase2d2_offline(self) -> None:
+        try:
+            import datasets  # noqa: F401
+            import torch  # noqa: F401
+            import transformers
+            from transformers import AutoModel
+            from transformers.modeling_utils import PreTrainedModel
+        except ImportError:
+            self.skipTest(
+                "Torch/Transformers/datasets unavailable for offline AutoModel test"
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = _make_weight_source(root)
+            output = root / "instrumented"
+            materialize_draft(
+                source_model_path=source,
+                output_dir=output,
+                implementation="instrumented",
+            )
+            sentinel = object()
+            module_cache = root / "hf-modules"
+            with (
+                patch.dict(
+                    os.environ,
+                    {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"},
+                ),
+                patch.object(
+                    transformers.dynamic_module_utils,
+                    "HF_MODULES_CACHE",
+                    str(module_cache),
+                ),
+                patch.object(
+                    PreTrainedModel,
+                    "from_pretrained",
+                    return_value=sentinel,
+                ) as from_pretrained,
+            ):
+                loaded = AutoModel.from_pretrained(
+                    str(output),
+                    trust_remote_code=True,
+                    local_files_only=True,
+                )
+            self.assertIs(loaded, sentinel)
+            self.assertTrue(from_pretrained.called)
+            cached_files = {path.name for path in module_cache.rglob("*.py")}
+            self.assertTrue(
+                {
+                    "phase2d2_refinement.py",
+                    "phase2d2_tensor.py",
+                    "phase2d2_robustness.py",
+                }.issubset(cached_files)
+            )
 
     def test_materialization_rejects_custom_code_hash_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
