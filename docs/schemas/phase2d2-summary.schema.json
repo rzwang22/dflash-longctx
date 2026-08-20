@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-summary.schema.json",
+  "title": "Phase 2D.2A refinement summary",
+  "type": "object",
+  "required": ["schema_version", "status", "sample_count", "round_count", "aggregates", "metrics_reported_per_generation_round_returned_and_committed_token"],
+  "properties": {"schema_version": {"const": "1.0"}, "aggregates": {"type": "array"}}
+}

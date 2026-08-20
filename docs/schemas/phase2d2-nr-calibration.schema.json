@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-nr-calibration.schema.json",
+  "title": "Phase 2D.2A NR margin calibration",
+  "type": "object",
+  "required": ["schema_version", "source_phase", "independent_calibration_cohort", "decision_margin_threshold", "source_artifacts", "provenance", "evaluation_outputs_used_to_choose_threshold", "formal_error_bound_claimed", "empirically_validated_guard_only", "calibration_sha256"],
+  "properties": {
+    "schema_version": {"const": "phase2d2a-nr-calibration-v1"},
+    "source_phase": {"const": "2D.1B-NR"},
+    "independent_calibration_cohort": {"const": true},
+    "decision_margin_threshold": {"type": "number", "minimum": 0},
+    "source_artifacts": {"type": "object"},
+    "provenance": {"type": "object"},
+    "evaluation_outputs_used_to_choose_threshold": {"const": false},
+    "formal_error_bound_claimed": {"const": false},
+    "empirically_validated_guard_only": {"const": true},
+    "calibration_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

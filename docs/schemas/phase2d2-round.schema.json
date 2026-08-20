@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-round.schema.json",
+  "title": "Phase 2D.2A refinement round",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "round_index", "accepted_draft_token_count", "committed_token_count", "phase2d2", "candidate_quality"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "round_index": {"type": "integer", "minimum": 0},
+    "phase2d2": {
+      "type": "object",
+      "required": ["candidate_merge_mode", "initial_parallel_draft_forward_count", "conditional_refinement_forward_count", "external_request_batch_size", "internal_branch_batch_size", "conditional_input_token_ids", "temporary_refinement_state_committed", "selected_tree_node_count", "actual_verified_node_count", "root_count", "fixed_root_inclusive_node_budget", "node_budget_invariant_passed", "verification_mode", "fallback_replay_executed", "fallback_query_lengths", "authoritative_committed_cache_length", "authoritative_committed_target_kv_layer_lengths", "correction_or_bonus_committed_in_current_round", "sibling_kv_removed_from_committed_cache", "final_output_source"],
+      "properties": {
+        "initial_parallel_draft_forward_count": {"const": 1},
+        "conditional_refinement_forward_count": {"type": "integer", "minimum": 0, "maximum": 1},
+        "external_request_batch_size": {"const": 1},
+        "conditional_input_token_ids": {"type": "array"},
+        "temporary_refinement_state_committed": {"const": false},
+        "root_count": {"const": 1},
+        "fixed_root_inclusive_node_budget": {"enum": [16, 32]},
+        "node_budget_invariant_passed": {"const": true},
+        "fallback_query_lengths": {"type": "array", "items": {"const": 1}},
+        "authoritative_committed_target_kv_layer_lengths": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}},
+        "correction_or_bonus_committed_in_current_round": {"const": false},
+        "sibling_kv_removed_from_committed_cache": {"const": true}
+      }
+    }
+  }
+}

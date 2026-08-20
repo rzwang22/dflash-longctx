@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-frozen-refinement.schema.json",
+  "title": "Phase 2D.2A frozen refinement configs",
+  "type": "object",
+  "required": ["schema_version", "source_artifacts", "selection_rule", "configurations", "maximum_selected_configuration_count", "target_outputs_used_for_final_online_selection", "held_out_evaluation_results_used", "manual_override_used", "config_sha256"],
+  "properties": {
+    "schema_version": {"const": "phase2d2a-frozen-refinement-v1"},
+    "source_artifacts": {"type": "array"},
+    "selection_rule": {"type": "string"},
+    "configurations": {"type": "array", "maxItems": 3},
+    "maximum_selected_configuration_count": {"const": 3},
+    "target_outputs_used_for_final_online_selection": {"const": false},
+    "held_out_evaluation_results_used": {"const": false},
+    "manual_override_used": {"const": false},
+    "config_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

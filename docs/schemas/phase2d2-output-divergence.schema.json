@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-output-divergence.schema.json",
+  "title": "Phase 2D.2A output divergence",
+  "type": "object",
+  "required": ["schema_version", "status", "authoritative_relation", "records"],
+  "properties": {"schema_version": {"const": "1.0"}, "status": {"enum": ["pass", "failed"]}, "authoritative_relation": {"const": "target_only_vs_refined_tree"}, "records": {"type": "array"}}
+}

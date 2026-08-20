@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-candidate-merge-event.schema.json",
+  "title": "Phase 2D.2A candidate merge event",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "round_index", "token_id", "position_index", "candidate_provenance", "base_log_probability"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "candidate_provenance": {"enum": ["base_only", "refined_only", "base_and_refined"]},
+    "base_log_probability": {"type": "number"},
+    "conditional_log_probability": {"type": ["number", "null"]}
+  }
+}

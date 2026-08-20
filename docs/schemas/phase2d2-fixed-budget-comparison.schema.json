@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-fixed-budget-comparison.schema.json",
+  "title": "Phase 2D.2A fixed budget comparison",
+  "type": "object",
+  "required": ["schema_version", "status", "reason", "same_root_inclusive_node_budget_required", "rows"],
+  "properties": {"schema_version": {"const": "1.0"}, "status": {"enum": ["ok", "unavailable"]}, "same_root_inclusive_node_budget_required": {"const": true}, "rows": {"type": "array"}}
+}

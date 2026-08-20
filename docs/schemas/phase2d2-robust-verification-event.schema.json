@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-robust-verification-event.schema.json",
+  "title": "Phase 2D.2A robust verification event",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "round_index", "verification_mode", "guard_triggered", "fallback_replay_executed", "fallback_replay_token_count", "packed_temporary_kv_discarded", "authoritative_committed_cache_length", "final_output_source", "guard_false_positive", "guard_false_negative", "packed_numerical_decision_divergence", "verifier_relevant_argmax_flip"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "verification_mode": {"enum": ["packed_native", "always_replay", "margin_guarded_replay"]},
+    "fallback_replay_token_count": {"type": "integer", "minimum": 0},
+    "final_output_source": {"enum": ["packed_native", "shape_stable_q1_replay"]}
+  }
+}

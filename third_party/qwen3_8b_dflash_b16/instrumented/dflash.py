@@ -81,6 +81,17 @@ from .phase2d1_tree_policies import (
     score_beam_tree,
     top1_chain_tree,
 )
+from .phase2d2_refinement import (
+    build_conditional_remask_inputs,
+    build_refined_tree,
+    select_refinement_prefixes,
+    validate_refinement_options,
+)
+from .phase2d2_tensor import (
+    conditional_candidate_records,
+    pack_refined_tree_tensors,
+    repeat_dynamic_cache_batch,
+)
 from .utils import build_target_layer_ids, extract_context_feature, sample
 
 
@@ -429,6 +440,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         online_selector_config: dict | None = None,
         online_selector_config_hash: str | None = None,
         online_selector_context_length: int | None = None,
+        enable_phase2d2_refinement: bool = False,
+        phase2d2_candidate_merge_mode: str = "base_only",
+        phase2d2_base_top_m: int = 16,
+        phase2d2_conditional_top_r: int = 2,
+        phase2d2_refine_depth: int = 2,
+        phase2d2_refined_prefix_budget: int = 2,
+        phase2d2_refinement_weight: float = 0.5,
+        phase2d2_verification_mode: str = "packed_native",
+        phase2d2_calibration_validated: bool = False,
+        phase2d2_calibration_hash: str | None = None,
+        phase2d2_shadow_replay: bool = False,
     ):
         """Generate with the pinned behavior; diagnostics are strictly opt-in."""
 
@@ -465,10 +487,27 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         )
         if online_tree_gold_max_rounds < 1:
             raise ValueError("online_tree_gold_max_rounds must be positive")
+        configured_phase2d2 = validate_refinement_options(
+            enabled=enable_phase2d2_refinement,
+            merge_mode=phase2d2_candidate_merge_mode,
+            base_top_m=phase2d2_base_top_m,
+            conditional_top_r=phase2d2_conditional_top_r,
+            refine_depth=phase2d2_refine_depth,
+            refined_prefix_budget=phase2d2_refined_prefix_budget,
+            refinement_weight=phase2d2_refinement_weight,
+            node_budget=online_tree_node_budget,
+            block_size=self.block_size,
+            external_batch_size=int(input_ids.shape[0]),
+            verification_mode=phase2d2_verification_mode,
+            calibration_validated=phase2d2_calibration_validated,
+        )
         configured_stabilization, configured_margin_threshold = (
             validate_decision_stabilization(
                 decision_stabilization, decision_margin_threshold
             )
+        )
+        configured_phase2d2["decision_margin_threshold"] = (
+            configured_margin_threshold
         )
         configured_selector = None
         if online_selector_mode is not None:
@@ -481,6 +520,20 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 raise ValueError("online selector expected config hash mismatch")
             if online_selector_context_length is None:
                 raise ValueError("online selector requires nominal context length")
+        if enable_phase2d2_refinement:
+            if configured_selector is None:
+                raise ValueError(
+                    "Phase 2D.2A refinement requires the frozen Phase 2D.1 selector"
+                )
+            if decision_stabilization != "off":
+                raise ValueError(
+                    "Phase 2D.2A robust verification is separate from Phase 2C "
+                    "decision stabilization"
+                )
+            if phase2d2_base_top_m != online_tree_draft_top_k:
+                raise ValueError("Phase 2D.2A base Top-M must equal online draft Top-K")
+            if phase2d2_calibration_validated and not phase2d2_calibration_hash:
+                raise ValueError("validated Phase 2D.2A calibration requires its hash")
         if online_tree_gold_layer_localization and not enable_online_tree_gold_checks:
             raise ValueError("gold layer localization requires gold checks")
         if enable_online_tree_divergence_diagnostics and not (
@@ -554,6 +607,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 selector_mode=online_selector_mode,
                 selector_config=configured_selector,
                 selector_context_length=online_selector_context_length,
+                phase2d2_config=configured_phase2d2,
+                phase2d2_calibration_hash=phase2d2_calibration_hash,
+                phase2d2_shadow_replay=phase2d2_shadow_replay,
             )
         if not any(
             (
@@ -2096,6 +2152,213 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "effective_kv_length": context_length_before + block_size,
         }
 
+    def _phase2d2_q1_authoritative_replay(
+        self,
+        *,
+        target,
+        prefix_cache,
+        tree,
+        native_traversal,
+        context_length_before,
+    ):
+        """Verify the selected tree with shape-stable sequential q_len=1 forwards."""
+
+        current_node = 0
+        accepted_indices = []
+        decision_records = []
+        hidden_steps = []
+        input_tokens = []
+        current_token = tree["token_ids"][0]
+        maximum_depth = min(15, int(tree["maximum_depth"]))
+        next_root_token = None
+        next_root_is_bonus = None
+        for decision_depth in range(maximum_depth + 1):
+            position = context_length_before + decision_depth
+            token_input = current_token.reshape(1, 1)
+            position_tensor = torch.tensor(
+                [[position]], dtype=torch.long, device=token_input.device
+            )
+            attention_mask = torch.ones(
+                (1, position + 1), dtype=torch.long, device=token_input.device
+            )
+            output = target(
+                token_input,
+                attention_mask=attention_mask,
+                position_ids=position_tensor,
+                cache_position=position_tensor[0],
+                past_key_values=prefix_cache,
+                use_cache=True,
+                logits_to_keep=1,
+                output_hidden_states=True,
+            )
+            logits = output.logits[0, -1]
+            top2 = torch.topk(logits.float(), k=2, dim=-1)
+            target_token = top2.indices[0]
+            margin = top2.values[0] - top2.values[1]
+            hidden_steps.append(
+                extract_context_feature(output.hidden_states, self.target_layer_ids)
+            )
+            input_tokens.append(int(current_token.item()))
+            children = torch.nonzero(
+                tree["parent_indices"] == current_node, as_tuple=True
+            )[0]
+            matching = children[
+                tree["token_ids"].index_select(0, children) == target_token
+            ]
+            selected_child = int(matching[0].item()) if int(matching.numel()) else None
+            selected_tree_record = (
+                tree.get("phase2d2_tree_spec", {}).get("nodes", [])[selected_child]
+                if selected_child is not None
+                and selected_child
+                < len(tree.get("phase2d2_tree_spec", {}).get("nodes", []))
+                else {}
+            )
+            sibling_rank = (
+                int((children == selected_child).nonzero(as_tuple=True)[0][0].item())
+                + 1
+                if selected_child is not None
+                else None
+            )
+            decision_records.append(
+                {
+                    "decision_depth": decision_depth,
+                    "parent_node_index": current_node,
+                    "parent_token_id": int(current_token.item()),
+                    "top1_token_id": int(target_token.item()),
+                    "top2_token_id": int(top2.indices[1].item()),
+                    "top1_top2_margin": float(margin.item()),
+                    "accepted_candidate_token": (
+                        int(tree["token_ids"][selected_child].item())
+                        if selected_child is not None
+                        else None
+                    ),
+                    "accepted_candidate_tree_sibling_rank": sibling_rank,
+                    "accepted_candidate_base_rank": selected_tree_record.get(
+                        "base_rank"
+                    ),
+                    "accepted_candidate_conditional_rank": selected_tree_record.get(
+                        "conditional_rank"
+                    ),
+                    "selected_child_node_index": selected_child,
+                    "decision_kind": (
+                        "accept_candidate"
+                        if selected_child is not None
+                        else "bonus"
+                        if int(children.numel()) == 0
+                        else "correction"
+                    ),
+                    "query_length": 1,
+                    "attention_mask_shape": [1, position + 1],
+                    "explicit_attention_mask": True,
+                    "sampling": "greedy_argmax",
+                }
+            )
+            if selected_child is None:
+                next_root_token = target_token
+                next_root_is_bonus = int(children.numel()) == 0
+                break
+            accepted_indices.append(selected_child)
+            current_node = selected_child
+            current_token = tree["token_ids"][selected_child]
+        if next_root_token is None:
+            raise RuntimeError("q_len=1 replay did not produce a root transition")
+
+        accepted_tensor = torch.tensor(
+            accepted_indices, dtype=torch.long, device=tree["token_ids"].device
+        )
+        committed_indices = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.long, device=tree["token_ids"].device),
+                accepted_tensor,
+            ]
+        )
+        committed_tokens = tree["token_ids"].index_select(0, committed_indices)
+        expected_length = context_length_before + int(committed_tokens.shape[0])
+        cache_lengths = dynamic_cache_lengths(prefix_cache)
+        if not cache_lengths or any(length != expected_length for length in cache_lengths):
+            raise RuntimeError("q_len=1 replay cache length invariant failed")
+        target_hidden = torch.cat(hidden_steps, dim=1)
+        native_indices = [
+            int(value)
+            for value in native_traversal["accepted_node_indices"]
+            .detach()
+            .cpu()
+            .tolist()
+        ]
+        decision_changed = bool(
+            native_indices != accepted_indices
+            or int(native_traversal["next_root_token_id"].item())
+            != int(next_root_token.item())
+            or bool(native_traversal["next_root_is_bonus"].item())
+            != bool(next_root_is_bonus)
+        )
+        first_changed_depth = None
+        if decision_changed:
+            for offset, (native, replay) in enumerate(
+                zip(native_indices, accepted_indices), start=1
+            ):
+                if native != replay:
+                    first_changed_depth = offset
+                    break
+            if first_changed_depth is None:
+                first_changed_depth = min(len(native_indices), len(accepted_indices)) + 1
+        compaction = {
+            "committed_cache_source": "phase2d2_q1_replay",
+            "prefix_length": context_length_before,
+            "temporary_layer_lengths": cache_lengths,
+            "compacted_layer_lengths": cache_lengths,
+            "expected_compacted_length": expected_length,
+            "committed_node_indices": committed_indices,
+            "gather_indices": torch.arange(
+                expected_length, dtype=torch.long, device=tree["token_ids"].device
+            ),
+            "discarded_tree_node_count": max(
+                0, int(tree["actual_total_node_count"]) - len(committed_indices)
+            ),
+            "discarded_canonical_tail_count": 0,
+            "correction_or_bonus_written": False,
+            "canonical_linear_query_length": 1,
+            "canonical_cache_length": expected_length,
+            "packed_temporary_kv_discarded": True,
+        }
+        return {
+            "accepted_draft_token_count": len(accepted_indices),
+            "accepted_draft_token_ids": [
+                int(tree["token_ids"][index].item()) for index in accepted_indices
+            ],
+            "accepted_node_indices": accepted_tensor,
+            "committed_node_indices": committed_indices,
+            "committed_tokens": committed_tokens,
+            "committed_token_count": int(committed_tokens.shape[0]),
+            "past_key_values": prefix_cache,
+            "target_hidden": target_hidden,
+            "compaction": compaction,
+            "next_root_token_id": int(next_root_token.item()),
+            "next_root_token_tensor": next_root_token,
+            "next_root_is_bonus": bool(next_root_is_bonus),
+            "next_root_is_bonus_tensor": torch.tensor(
+                bool(next_root_is_bonus),
+                dtype=torch.bool,
+                device=tree["token_ids"].device,
+            ),
+            "next_root_kind": "bonus" if next_root_is_bonus else "correction",
+            "decision_changed": decision_changed,
+            "first_corrected_depth": first_changed_depth,
+            "decision_records": decision_records,
+            "canonical_parent_argmax_token_ids": torch.tensor(
+                [row["top1_token_id"] for row in decision_records],
+                dtype=torch.long,
+                device=tree["token_ids"].device,
+            ),
+            "input_token_ids": torch.tensor(
+                [input_tokens], dtype=torch.long, device=tree["token_ids"].device
+            ),
+            "query_length": 1,
+            "query_lengths": [1] * len(decision_records),
+            "round_entry_kv_length": context_length_before,
+            "effective_kv_length": expected_length,
+        }
+
     @torch.inference_mode()
     def _spec_generate_online_tree(
         self,
@@ -2125,6 +2388,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         selector_mode: str | None,
         selector_config: dict | None,
         selector_context_length: int | None,
+        phase2d2_config: dict,
+        phase2d2_calibration_hash: str | None,
+        phase2d2_shadow_replay: bool,
     ):
         """Run opt-in online marginal-tree drafting with packed target verification."""
 
@@ -2263,8 +2529,25 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         :,
                         past_key_values_draft.get_seq_length() : start + block_size,
                     ]
-
+                    phase2d2_enabled = bool(phase2d2_config.get("enabled"))
+                    phase2d2_merge_mode = phase2d2_config.get(
+                        "merge_mode", "base_only"
+                    )
                     total_draft_pair = timer.start()
+                    refinement_cache_snapshot_pair = None
+                    refinement_round_entry_cache = None
+                    if phase2d2_enabled and phase2d2_merge_mode != "base_only":
+                        refinement_cache_snapshot_pair = timer.start()
+                        with nvtx_range(
+                            torch,
+                            "phase2d2.refinement_cache_snapshot",
+                            enable_profiling,
+                        ):
+                            refinement_round_entry_cache = clone_dynamic_cache(
+                                past_key_values_draft
+                            )
+                        timer.stop(refinement_cache_snapshot_pair)
+
                     draft_pair = timer.start()
                     with nvtx_range(torch, "phase2c.draft", enable_profiling):
                         draft_hidden = self(
@@ -2454,9 +2737,115 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             "canonical_policy_construction_cpu_ms"
                         ] = (time.perf_counter() - construction_started) * 1000.0
 
+                    conditional_pair = None
+                    conditional_candidates = {}
+                    conditional_rows = []
+                    selected_refinement_prefixes = []
+                    phase2d2_tree_spec = None
+                    conditional_forward_count = 0
+                    internal_branch_batch_size = 0
+                    if phase2d2_enabled:
+                        if selected_nodes is None:
+                            raise RuntimeError(
+                                "Phase 2D.2A requires a frozen-selector seed tree"
+                            )
+                        selected_refinement_prefixes = select_refinement_prefixes(
+                            seed_nodes=selected_nodes,
+                            base_positions=selector_positions,
+                            refine_depth=phase2d2_config["refine_depth"],
+                            prefix_budget=phase2d2_config[
+                                "refined_prefix_budget"
+                            ],
+                        )
+                        prefix_tuples = [
+                            tuple(row["prefix_token_ids"])
+                            for row in selected_refinement_prefixes
+                        ]
+                        if phase2d2_merge_mode != "base_only" and prefix_tuples:
+                            if refinement_round_entry_cache is None:
+                                raise RuntimeError(
+                                    "conditional-remask lost its isolated round-entry cache"
+                                )
+                            internal_branch_batch_size = len(prefix_tuples)
+                            conditional_pair = timer.start()
+                            with nvtx_range(
+                                torch,
+                                "phase2d2.conditional_remask",
+                                enable_profiling,
+                            ):
+                                conditional_rows = build_conditional_remask_inputs(
+                                    root_token_id=int(block_output_ids[0, 0].item()),
+                                    prefixes=prefix_tuples,
+                                    mask_token_id=int(self.mask_token_id),
+                                    block_size=block_size,
+                                )
+                                conditional_ids = torch.tensor(
+                                    conditional_rows,
+                                    dtype=torch.long,
+                                    device=target.device,
+                                )
+                                branch_cache = repeat_dynamic_cache_batch(
+                                    refinement_round_entry_cache,
+                                    internal_branch_batch_size,
+                                )
+                                conditional_hidden = self(
+                                    target_hidden=target_hidden.expand(
+                                        internal_branch_batch_size, -1, -1
+                                    ),
+                                    noise_embedding=target.model.embed_tokens(
+                                        conditional_ids
+                                    ),
+                                    position_ids=draft_position_ids.expand(
+                                        internal_branch_batch_size, -1
+                                    ),
+                                    past_key_values=branch_cache,
+                                    use_cache=True,
+                                    is_causal=False,
+                                )
+                                conditional_logits = target.lm_head(
+                                    conditional_hidden[:, -block_size + 1 :, :]
+                                )
+                                conditional_candidates = conditional_candidate_records(
+                                    torch,
+                                    base_logits=draft_logits,
+                                    conditional_logits=conditional_logits,
+                                    prefixes=prefix_tuples,
+                                    base_top_m=phase2d2_config["base_top_m"],
+                                    conditional_top_r=phase2d2_config[
+                                        "conditional_top_r"
+                                    ],
+                                    merge_mode=phase2d2_merge_mode,
+                                )
+                                conditional_forward_count = 1
+                                del branch_cache, conditional_hidden, conditional_logits
+                            timer.stop(conditional_pair)
+                        phase2d2_tree_spec = build_refined_tree(
+                            seed_nodes=selected_nodes,
+                            base_positions=selector_positions,
+                            selected_prefixes=selected_refinement_prefixes,
+                            conditional_candidates=conditional_candidates,
+                            merge_mode=phase2d2_merge_mode,
+                            refinement_weight=phase2d2_config["refinement_weight"],
+                            node_budget=node_budget,
+                        )
+
                     tree_build_pair = timer.start()
                     with nvtx_range(torch, "phase2c.tree_build", enable_profiling):
-                        if selector_mode is None:
+                        if phase2d2_enabled and phase2d2_merge_mode != "base_only":
+                            pack_started = time.perf_counter()
+                            tree = pack_refined_tree_tensors(
+                                torch,
+                                tree_spec=phase2d2_tree_spec,
+                                root_token_id=block_output_ids[0, 0],
+                                device=target.device,
+                            )
+                            selector_cpu_timing[
+                                "tree_tensor_pack_host_to_device_cpu_ms"
+                            ] = (time.perf_counter() - pack_started) * 1000.0
+                            selector_cpu_timing[
+                                "host_to_device_transfer_occurred"
+                            ] = bool(input_ids.is_cuda)
+                        elif selector_mode is None:
                             tree = build_online_tree_tensors(
                                 torch,
                                 candidates=candidates,
@@ -2484,6 +2873,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                                 "host_to_device_transfer_occurred"
                             ] = bool(input_ids.is_cuda)
                     timer.stop(tree_build_pair)
+                    if phase2d2_enabled:
+                        tree["phase2d2_tree_spec"] = phase2d2_tree_spec
                     if selector_record is not None:
                         selector_record["runtime_features"] = selector_runtime_features
                         selector_record["feature_rows"] = selector_feature_rows
@@ -2494,7 +2885,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         selector_record["node_budget_cap"] = node_budget
                         selector_record["selected_policy_matches_tree"] = (
                             tree["policy"] == effective_tree_policy
+                            if phase2d2_merge_mode == "base_only"
+                            else None
                         )
+                        selector_record[
+                            "selected_policy_matches_tree_unavailable_reason"
+                        ] = (
+                            None
+                            if phase2d2_merge_mode == "base_only"
+                            else "refined_parent_conditioned_tree_rebuilt_from_seed"
+                        )
+                        selector_record["selected_policy_matches_seed_tree"] = True
                         selector_record["target_forward_count_added"] = 0
                     if (
                         enable_reference_state_diagnostics
@@ -2555,7 +2956,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     )
                     snapshot_pair = None
                     stabilization_prefix_cache = None
-                    if decision_stabilization != "off":
+                    phase2d2_verification_mode = phase2d2_config.get(
+                        "verification_mode", "packed_native"
+                    )
+                    phase2d2_replay_capable = bool(
+                        phase2d2_enabled
+                        and (
+                            phase2d2_verification_mode != "packed_native"
+                            or phase2d2_shadow_replay
+                        )
+                    )
+                    if decision_stabilization != "off" or phase2d2_replay_capable:
                         snapshot_pair = timer.start()
                         with nvtx_range(
                             torch, "phase2c.stabilization_cache_snapshot", enable_profiling
@@ -2624,7 +3035,11 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     path_margins_tensor = None
                     path_margins = None
                     minimum_path_margin = None
-                    if return_diagnostics or decision_stabilization == "margin":
+                    if (
+                        return_diagnostics
+                        or decision_stabilization == "margin"
+                        or phase2d2_verification_mode == "margin_guarded_replay"
+                    ):
                         path_logits = packed_output.logits[0].index_select(
                             0, native_path_decision_indices
                         )
@@ -2636,25 +3051,73 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         ]
                         minimum_path_margin = min(path_margins)
 
-                    recheck_triggered = should_recheck(
-                        decision_stabilization,
-                        minimum_path_margin,
-                        decision_margin_threshold,
-                    )
-                    trigger_reason = (
-                        "mode_always"
-                        if decision_stabilization == "always"
-                        else "shadow_oracle"
-                        if decision_stabilization == "shadow"
-                        else "minimum_path_margin_at_or_below_threshold"
-                        if recheck_triggered
-                        else "minimum_path_margin_above_threshold"
-                        if decision_stabilization == "margin"
-                        else "disabled"
-                    )
+                    phase2d2_guard_triggered = False
+                    phase2d2_authoritative_replay_required = False
+                    if phase2d2_enabled:
+                        if phase2d2_verification_mode == "always_replay":
+                            phase2d2_authoritative_replay_required = True
+                            trigger_reason = "phase2d2_mode_always_replay"
+                        elif phase2d2_verification_mode == "margin_guarded_replay":
+                            threshold = float(
+                                phase2d2_config["decision_margin_threshold"]
+                            )
+                            phase2d2_guard_triggered = bool(
+                                minimum_path_margin is None
+                                or minimum_path_margin <= threshold
+                            )
+                            phase2d2_authoritative_replay_required = (
+                                phase2d2_guard_triggered
+                            )
+                            trigger_reason = (
+                                "phase2d2_required_margin_unobservable"
+                                if minimum_path_margin is None
+                                else "phase2d2_margin_at_or_below_calibrated_threshold"
+                                if phase2d2_guard_triggered
+                                else "phase2d2_margin_above_calibrated_threshold"
+                            )
+                        else:
+                            trigger_reason = "phase2d2_packed_native"
+                        recheck_triggered = phase2d2_authoritative_replay_required
+                    else:
+                        recheck_triggered = should_recheck(
+                            decision_stabilization,
+                            minimum_path_margin,
+                            decision_margin_threshold,
+                        )
+                        trigger_reason = (
+                            "mode_always"
+                            if decision_stabilization == "always"
+                            else "shadow_oracle"
+                            if decision_stabilization == "shadow"
+                            else "minimum_path_margin_at_or_below_threshold"
+                            if recheck_triggered
+                            else "minimum_path_margin_above_threshold"
+                            if decision_stabilization == "margin"
+                            else "disabled"
+                        )
                     canonical_pair = None
                     canonical = None
-                    if recheck_triggered:
+                    phase2d2_replay_executed = bool(
+                        phase2d2_enabled
+                        and (
+                            phase2d2_authoritative_replay_required
+                            or phase2d2_shadow_replay
+                        )
+                    )
+                    if phase2d2_replay_executed:
+                        canonical_pair = timer.start()
+                        with nvtx_range(
+                            torch, "phase2d2.q1_replay", enable_profiling
+                        ):
+                            canonical = self._phase2d2_q1_authoritative_replay(
+                                target=target,
+                                prefix_cache=stabilization_prefix_cache,
+                                tree=tree,
+                                native_traversal=traversal,
+                                context_length_before=context_length_before,
+                            )
+                        timer.stop(canonical_pair)
+                    elif recheck_triggered:
                         canonical_pair = timer.start()
                         with nvtx_range(
                             torch, "phase2c.canonical_recheck", enable_profiling
@@ -2669,8 +3132,13 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             )
                         timer.stop(canonical_pair)
 
-                    selected_commit_source = stabilization_commit_source(
-                        decision_stabilization, recheck_triggered
+                    selected_commit_source = (
+                        "canonical_recheck"
+                        if phase2d2_enabled
+                        and phase2d2_authoritative_replay_required
+                        else stabilization_commit_source(
+                            decision_stabilization, recheck_triggered
+                        )
                     )
                     use_canonical_commit = bool(
                         canonical is not None
@@ -3215,6 +3683,328 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             else "canonical_recheck_not_triggered"
                         ),
                     }
+                    phase2d2_record = None
+                    if phase2d2_enabled:
+                        candidate_merge_events = []
+                        if conditional_candidates:
+                            for prefix, per_position in sorted(
+                                conditional_candidates.items()
+                            ):
+                                selection = next(
+                                    row
+                                    for row in selected_refinement_prefixes
+                                    if tuple(row["prefix_token_ids"]) == prefix
+                                )
+                                for position_index, candidate_rows in enumerate(
+                                    per_position, start=1
+                                ):
+                                    for candidate in candidate_rows:
+                                        candidate_active = position_index > len(prefix)
+                                        positional_merged_score = (
+                                            (1.0 - phase2d2_config["refinement_weight"])
+                                            * candidate["base_log_probability"]
+                                            + phase2d2_config["refinement_weight"]
+                                            * candidate["conditional_log_probability"]
+                                            if candidate_active
+                                            else None
+                                        )
+                                        candidate_merge_events.append(
+                                            {
+                                                **candidate,
+                                                "parent_refined_prefix": list(prefix),
+                                                "position_index": position_index,
+                                                "refine_depth": len(prefix),
+                                                "refined_prefix_selection_rank": selection[
+                                                    "refined_prefix_selection_rank"
+                                                ],
+                                                "candidate_active_after_refined_prefix": candidate_active,
+                                                "merged_score": positional_merged_score,
+                                                "merged_score_unavailable_reason": (
+                                                    None
+                                                    if candidate_active
+                                                    else "position_is_fixed_refinement_prefix"
+                                                ),
+                                                "merged_score_semantics": (
+                                                    "target-blind positional weighted base/conditional log probability"
+                                                ),
+                                                "candidate_provenance": (
+                                                    "base_and_refined"
+                                                    if candidate["base_rank"] is not None
+                                                    and candidate[
+                                                        "conditional_rank"
+                                                    ]
+                                                    is not None
+                                                    else "base_only"
+                                                    if candidate["base_rank"] is not None
+                                                    else "refined_only"
+                                                ),
+                                            }
+                                        )
+                        else:
+                            for position in selector_positions:
+                                for candidate in position["candidates"]:
+                                    candidate_merge_events.append(
+                                        {
+                                            "token_id": int(candidate["token_id"]),
+                                            "base_rank": int(candidate["rank"]),
+                                            "conditional_rank": None,
+                                            "base_log_probability": float(
+                                                candidate["log_probability"]
+                                            ),
+                                            "conditional_log_probability": None,
+                                            "conditional_log_probability_unavailable_reason": (
+                                                "conditional_forward_not_run_for_base_only"
+                                            ),
+                                            "candidate_active_after_refined_prefix": True,
+                                            "merged_score": float(
+                                                candidate["log_probability"]
+                                            ),
+                                            "merged_score_unavailable_reason": None,
+                                            "merged_score_semantics": (
+                                                "base positional log probability control"
+                                            ),
+                                            "parent_refined_prefix": None,
+                                            "position_index": int(
+                                                position["position_index"]
+                                            ),
+                                            "refine_depth": None,
+                                            "refined_prefix_selection_rank": None,
+                                            "candidate_provenance": "base_only",
+                                        }
+                                    )
+                        packed_tentative_tokens = [
+                            *[
+                                int(value)
+                                for value in native_committed_tokens.detach()
+                                .cpu()
+                                .tolist()
+                            ],
+                            int(traversal["next_root_token_id"].item()),
+                        ]
+                        replay_tokens = (
+                            [
+                                *[
+                                    int(value)
+                                    for value in canonical["committed_tokens"]
+                                    .detach()
+                                    .cpu()
+                                    .tolist()
+                                ],
+                                int(canonical["next_root_token_id"]),
+                            ]
+                            if canonical_available
+                            else None
+                        )
+                        first_divergent_decision_depth = (
+                            canonical["first_corrected_depth"] - 1
+                            if canonical_available
+                            and canonical["first_corrected_depth"] is not None
+                            else None
+                        )
+                        refined_paths = {
+                            tuple(row["path"])
+                            for row in phase2d2_tree_spec["nodes"]
+                        }
+                        phase2d2_record = {
+                            "schema_version": "1.0",
+                            "enabled": True,
+                            "candidate_merge_mode": phase2d2_merge_mode,
+                            "base_top_m": phase2d2_config["base_top_m"],
+                            "conditional_top_r": phase2d2_config[
+                                "conditional_top_r"
+                            ],
+                            "refine_depth": phase2d2_config["refine_depth"],
+                            "refined_prefix_budget": phase2d2_config[
+                                "refined_prefix_budget"
+                            ],
+                            "refinement_weight": phase2d2_config[
+                                "refinement_weight"
+                            ],
+                            "initial_parallel_draft_forward_count": 1,
+                            "conditional_refinement_forward_count": conditional_forward_count,
+                            "external_request_batch_size": 1,
+                            "internal_branch_batch_size": internal_branch_batch_size,
+                            "conditional_input_token_ids": conditional_rows,
+                            "conditional_input_semantics": (
+                                "[root, target-blind prefix at positions 1..d, "
+                                "MASK suffix]; temporary branch cache only"
+                            ),
+                            "conditional_attention_is_causal": False,
+                            "temporary_refinement_state_committed": False,
+                            "selected_refinement_prefixes": selected_refinement_prefixes,
+                            "candidate_refinement_changed_tree": refined_paths
+                            != set(selected_nodes),
+                            "candidate_refinement_improved_coverage": None,
+                            "candidate_refinement_improved_coverage_unavailable_reason": (
+                                "target-dependent coverage is computed by the evaluation runner"
+                            ),
+                            "available_candidate_count": phase2d2_tree_spec[
+                                "available_candidate_count"
+                            ],
+                            "merged_candidate_count": phase2d2_tree_spec[
+                                "merged_candidate_count"
+                            ],
+                            "selected_tree_node_count": phase2d2_tree_spec[
+                                "actual_total_node_count"
+                            ],
+                            "actual_verified_node_count": int(
+                                tree["actual_total_node_count"]
+                            ),
+                            "root_count": phase2d2_tree_spec["root_count"],
+                            "unused_node_budget": phase2d2_tree_spec[
+                                "unused_node_budget"
+                            ],
+                            "unused_node_budget_reason": phase2d2_tree_spec[
+                                "unused_node_budget_reason"
+                            ],
+                            "refined_only_nodes_selected": phase2d2_tree_spec[
+                                "refined_only_nodes_selected"
+                            ],
+                            "refined_only_nodes_verified": phase2d2_tree_spec[
+                                "refined_only_nodes_selected"
+                            ],
+                            "fixed_root_inclusive_node_budget": node_budget,
+                            "node_budget_invariant_passed": bool(
+                                tree["actual_total_node_count"] <= node_budget
+                            ),
+                            "tree_spec": phase2d2_tree_spec,
+                            "candidate_merge_events": candidate_merge_events,
+                            "verification_mode": phase2d2_verification_mode,
+                            "nr_calibration_hash": phase2d2_calibration_hash,
+                            "nr_calibration_validated": phase2d2_config.get(
+                                "calibration_validated", False
+                            ),
+                            "decision_margin_threshold": phase2d2_config[
+                                "decision_margin_threshold"
+                            ],
+                            "packed_tentative_output_token_ids": packed_tentative_tokens,
+                            "replay_authoritative_output_token_ids": replay_tokens,
+                            "packed_replay_decision_equal": native_canonical_equal,
+                            "first_packed_replay_divergent_decision_depth": (
+                                first_divergent_decision_depth
+                            ),
+                            "first_packed_replay_divergent_absolute_generated_offset": (
+                                generated_prefix_before
+                                + first_divergent_decision_depth
+                                + 1
+                                if first_divergent_decision_depth is not None
+                                else None
+                            ),
+                            "packed_verifier_margins": path_margins,
+                            "guard_triggered": phase2d2_guard_triggered,
+                            "authoritative_replay_required_by_mode": (
+                                phase2d2_authoritative_replay_required
+                            ),
+                            "guard_trigger": trigger_reason,
+                            "fallback_replay_executed": bool(
+                                phase2d2_authoritative_replay_required
+                                and canonical_available
+                            ),
+                            "fallback_replay_token_count": (
+                                len(canonical["decision_records"])
+                                if phase2d2_authoritative_replay_required
+                                and canonical_available
+                                else 0
+                            ),
+                            "fallback_query_lengths": (
+                                canonical["query_lengths"]
+                                if phase2d2_authoritative_replay_required
+                                and canonical_available
+                                else []
+                            ),
+                            "diagnostic_shadow_replay_executed": bool(
+                                canonical_available and not use_canonical_commit
+                            ),
+                            "diagnostic_shadow_replay_query_lengths": (
+                                canonical["query_lengths"]
+                                if canonical_available and not use_canonical_commit
+                                else []
+                            ),
+                            "packed_temporary_kv_discarded": bool(
+                                use_canonical_commit
+                            ),
+                            "authoritative_committed_cache_length": start,
+                            "authoritative_committed_target_kv_layer_lengths": (
+                                dynamic_cache_lengths(past_key_values_target)
+                            ),
+                            "authoritative_committed_token_ids": [
+                                int(value)
+                                for value in committed_tokens.detach().cpu().tolist()
+                            ],
+                            "authoritative_accepted_draft_token_ids": [
+                                int(value)
+                                for value in committed_tokens[1:].detach().cpu().tolist()
+                            ],
+                            "authoritative_next_root_token_id": int(
+                                effective_traversal["next_root_token_id"].item()
+                            ),
+                            "authoritative_next_root_kind": (
+                                "bonus"
+                                if bool(
+                                    effective_traversal["next_root_is_bonus"].item()
+                                )
+                                else "correction"
+                            ),
+                            "correction_or_bonus_committed_in_current_round": False,
+                            "sibling_kv_removed_from_committed_cache": bool(
+                                all(
+                                    length == start
+                                    for length in dynamic_cache_lengths(
+                                        past_key_values_target
+                                    )
+                                )
+                            ),
+                            "terminal_round": accounting["stop_reason"] != "continue",
+                            "truncated_round": accounting["truncated_token_count"] > 0,
+                            "final_output_source": (
+                                "shape_stable_q1_replay"
+                                if use_canonical_commit
+                                else "packed_native"
+                            ),
+                            "guard_prevented_output_divergence": bool(
+                                phase2d2_verification_mode
+                                == "margin_guarded_replay"
+                                and use_canonical_commit
+                                and canonical_available
+                                and canonical["decision_changed"]
+                            ),
+                            "guard_false_positive": bool(
+                                phase2d2_verification_mode
+                                == "margin_guarded_replay"
+                                and phase2d2_guard_triggered
+                                and canonical_available
+                                and not canonical["decision_changed"]
+                            ),
+                            "guard_false_negative": bool(
+                                phase2d2_verification_mode
+                                == "margin_guarded_replay"
+                                and not phase2d2_guard_triggered
+                                and canonical_available
+                                and canonical["decision_changed"]
+                            ),
+                            "packed_numerical_decision_divergence": bool(
+                                canonical_available and canonical["decision_changed"]
+                            ),
+                            "verifier_relevant_argmax_flip": bool(
+                                canonical_available and canonical["decision_changed"]
+                            ),
+                            "replay_decisions": (
+                                canonical["decision_records"]
+                                if canonical_available
+                                else []
+                            ),
+                            "formal_target_forward_count": 1
+                            + (
+                                len(canonical["decision_records"])
+                                if use_canonical_commit
+                                else 0
+                            ),
+                            "diagnostic_shadow_target_forward_count": (
+                                len(canonical["decision_records"])
+                                if canonical_available and not use_canonical_commit
+                                else 0
+                            ),
+                        }
                     round_record = {
                         "schema_version": "1.0",
                         **accounting,
@@ -3241,6 +4031,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         },
                         "cache_compaction": compaction,
                         "decision_stabilization": stabilization_record,
+                        "phase2d2": phase2d2_record,
                         "gold_check_status": current_gold_status,
                         "output_ids_equal_reference": None,
                         "offline_comparison_status": "not_requested",
@@ -3255,6 +4046,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         {
                             "record": round_record,
                             "draft": draft_pair,
+                            "refinement_cache_snapshot": refinement_cache_snapshot_pair,
+                            "conditional_remask": conditional_pair,
                             "topk": topk_pair,
                             "tree_build": tree_build_pair,
                             "mask_build": mask_pair,
@@ -3291,6 +4084,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
 
         component_totals = {
             "draft_hidden_logits_cuda_elapsed_ms": 0.0,
+            "refinement_cache_snapshot_cuda_elapsed_ms": 0.0,
+            "conditional_remask_cuda_elapsed_ms": 0.0,
             "topk_cuda_elapsed_ms": 0.0,
             "tree_construction_cuda_elapsed_ms": 0.0,
             "mask_construction_cuda_elapsed_ms": 0.0,
@@ -3307,6 +4102,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         component_observed = {field: 0 for field in component_totals}
         pair_to_field = {
             "draft": "draft_hidden_logits_cuda_elapsed_ms",
+            "refinement_cache_snapshot": "refinement_cache_snapshot_cuda_elapsed_ms",
+            "conditional_remask": "conditional_remask_cuda_elapsed_ms",
             "topk": "topk_cuda_elapsed_ms",
             "tree_build": "tree_construction_cuda_elapsed_ms",
             "mask_build": "mask_construction_cuda_elapsed_ms",
@@ -3427,6 +4224,37 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     "committed_token_count": record["committed_token_count"],
                 }
             )
+            if record.get("phase2d2") is not None:
+                record["phase2d2"].update(
+                    {
+                        "initial_parallel_draft_cuda_elapsed_ms": record["timing"][
+                            "draft_hidden_logits_cuda_elapsed_ms"
+                        ],
+                        "conditional_remask_cuda_elapsed_ms": record["timing"][
+                            "conditional_remask_cuda_elapsed_ms"
+                        ],
+                        "refinement_cache_snapshot_cuda_elapsed_ms": record[
+                            "timing"
+                        ]["refinement_cache_snapshot_cuda_elapsed_ms"],
+                        "packed_verification_cuda_elapsed_ms": record["timing"][
+                            "verification_cuda_elapsed_ms"
+                        ],
+                        "fallback_cuda_elapsed_ms": (
+                            canonical_ms
+                            if record["phase2d2"]["fallback_replay_executed"]
+                            else None
+                        ),
+                        "fallback_cuda_elapsed_unavailable_reason": (
+                            None
+                            if record["phase2d2"]["fallback_replay_executed"]
+                            else "fallback_replay_not_executed"
+                        ),
+                        "total_draft_cuda_elapsed_ms": record["timing"][
+                            "total_draft_cuda_elapsed_ms"
+                        ],
+                        "round_cuda_elapsed_ms": round_ms,
+                    }
+                )
             record["tree_metadata"] = tensor_tree_metadata(record["tree_metadata"])
             compaction = record["cache_compaction"]
             record["cache_compaction"] = {
@@ -3461,6 +4289,23 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 "tensor_comparison_scope": "bounded_stable_samples",
             },
             "rounds": rounds,
+            "phase2d2": {
+                "enabled": phase2d2_enabled,
+                "configuration": phase2d2_config if phase2d2_enabled else None,
+                "calibration_hash": phase2d2_calibration_hash,
+                "initial_parallel_draft_calls_per_round": 1,
+                "conditional_refinement_calls_per_round_maximum": (
+                    1 if phase2d2_enabled else 0
+                ),
+                "external_request_batch_size": 1,
+                "conditional_state_is_temporary": True,
+                "target_information_used_for_prefix_selection": False,
+                "verification_replay_query_length": (
+                    1 if phase2d2_enabled else None
+                ),
+                "packed_temporary_kv_discarded_when_replay_authoritative": True,
+                "formal_and_gold_target_forward_counts_separated": True,
+            },
             "phase2c": {
                 "enabled": True,
                 "tree_policy": (

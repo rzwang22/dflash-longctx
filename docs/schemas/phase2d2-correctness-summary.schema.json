@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-correctness-summary.schema.json",
+  "title": "Phase 2D.2A correctness summary",
+  "type": "object",
+  "required": ["schema_version", "status", "official_checker_passed", "target_only_output_exactness_required", "all_target_only_output_ids_equal", "structural_correctness_passed", "hard_correctness_failure_reasons", "gold_numerical_variation_preserved_as_diagnostics", "records"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["ok", "failed"]},
+    "official_checker_passed": {"type": "boolean"},
+    "target_only_output_exactness_required": {"const": true},
+    "all_target_only_output_ids_equal": {"type": "boolean"},
+    "structural_correctness_passed": {"type": "boolean"},
+    "hard_correctness_failure_reasons": {"type": "array", "items": {"type": "string"}},
+    "gold_numerical_variation_preserved_as_diagnostics": {"const": true},
+    "records": {"type": "array"}
+  }
+}

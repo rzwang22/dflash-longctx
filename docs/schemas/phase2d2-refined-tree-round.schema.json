@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-refined-tree-round.schema.json",
+  "title": "Phase 2D.2A refined tree round",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "round_index", "merge_mode", "requested_node_budget", "actual_total_node_count", "root_count", "unused_node_budget", "nodes"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "requested_node_budget": {"enum": [16, 32]},
+    "root_count": {"const": 1},
+    "nodes": {"type": "array", "minItems": 1}
+  }
+}

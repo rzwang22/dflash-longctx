@@ -179,6 +179,10 @@ def _effective_sources(implementation: str) -> dict[str, Path]:
         sources["phase2d1_tree_policies.py"] = (
             REPO_ROOT / "dflash" / "phase2b" / "tree.py"
         )
+        sources["phase2d2_refinement.py"] = (
+            REPO_ROOT / "dflash" / "phase2d2" / "refinement.py"
+        )
+        sources["phase2d2_tensor.py"] = REPO_ROOT / "dflash" / "phase2d2" / "tensor.py"
     sources["LICENSE"] = VENDOR_ROOT / "LICENSE"
     return sources
 

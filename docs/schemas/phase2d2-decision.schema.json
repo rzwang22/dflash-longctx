@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-decision.schema.json",
+  "title": "Phase 2D.2A automatic decision",
+  "type": "object",
+  "required": ["schema_version", "decision", "reason", "manual_override_used", "preregistered_priority_order_applied", "inputs"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "decision": {"enum": ["proceed_to_lightweight_causal_adapter", "proceed_with_conditional_remask", "refinement_benefit_but_guard_too_costly", "no_dependency_refinement_benefit", "numerical_safety_unresolved", "insufficient_evidence"]},
+    "reason": {"type": "string", "minLength": 1},
+    "manual_override_used": {"const": false},
+    "preregistered_priority_order_applied": {"const": true},
+    "inputs": {"type": "object"}
+  }
+}

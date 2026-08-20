@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-manifest.schema.json",
+  "title": "Phase 2D.2A manifest",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "baseline_sha", "repository", "configuration", "workload", "phase2d2", "materialization", "source_audit", "measurement_policy", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A"},
+    "status": {"enum": ["started", "ok", "failed", "error"]},
+    "baseline_sha": {"const": "1ba29e8ce4a165c03af997c2f3b3b595ab79c1d2"},
+    "repository": {"type": "object"},
+    "configuration": {"type": "object"},
+    "workload": {"type": "object"},
+    "phase2d2": {"type": "object", "required": ["configuration_id", "candidate_merge_mode", "node_budget", "verification_mode", "frozen_selector_hash", "evidence_role"]},
+    "materialization": {"type": "object", "required": ["id", "instrumented_custom_code_changed", "independent_new_directory_required"]},
+    "source_audit": {"type": "object"},
+    "measurement_policy": {"type": "object"},
+    "artifacts": {"type": "array", "items": {"type": "string"}},
+    "error": {"type": ["object", "null"]}
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-fallback-summary.schema.json",
+  "title": "Phase 2D.2A fallback summary",
+  "type": "object",
+  "required": ["schema_version", "round_count", "fallback_round_count", "fallback_rate", "fallback_replay_token_count", "guard_false_positive_count", "guard_false_negative_count"],
+  "properties": {"schema_version": {"const": "1.0"}}
+}

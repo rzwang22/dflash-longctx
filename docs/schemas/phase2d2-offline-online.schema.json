@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-offline-online.schema.json",
+  "title": "Phase 2D.2A offline/online labels",
+  "type": "object",
+  "required": ["schema_version", "status", "online_acceptance_measured", "offline_target_labels_not_used_at_runtime", "rows"],
+  "properties": {"schema_version": {"const": "1.0"}, "online_acceptance_measured": {"const": true}, "offline_target_labels_not_used_at_runtime": {"const": true}, "rows": {"type": "array"}}
+}

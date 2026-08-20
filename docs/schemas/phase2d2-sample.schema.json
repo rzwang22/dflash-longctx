@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-sample.schema.json",
+  "title": "Phase 2D.2A sample",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "actual_prompt_length", "configuration_id", "candidate_merge_mode", "verification_mode", "node_budget", "generated_token_count", "generated_output_token_ids", "target_only", "original_dflash_reference", "formal_timing_repeats", "profiling", "diagnostics", "correctness"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "actual_prompt_length": {"type": "integer", "minimum": 1},
+    "node_budget": {"enum": [16, 32]},
+    "generated_output_token_ids": {"type": "array", "items": {"type": "integer"}},
+    "correctness": {"type": "object", "required": ["target_only_output_ids_equal", "structural_checks_passed", "passed"]}
+  }
+}
