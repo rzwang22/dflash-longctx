@@ -28,7 +28,7 @@
     "raw_subrun_dir": {"type": "string", "minLength": 1},
     "subprocess_return_code": {"type": "integer"},
     "subprocess_nonzero_retained_as_diagnostic": {"type": "boolean"},
-    "outcome_category": {"enum": ["pass_actual_exact", "actual_numerical_decision_divergence", "diagnostic_only_numerical_variation", "actual_structural_failure", "reference_instability", "incomplete_correctness_evidence", "infrastructure_failure"]},
+    "outcome_category": {"enum": ["pass_actual_exact", "actual_numerical_decision_divergence", "actual_unresolved_semantic_divergence", "diagnostic_only_numerical_variation", "actual_structural_failure", "reference_instability", "incomplete_correctness_evidence", "infrastructure_failure"]},
     "actual_reference_output_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
     "actual_tree_output_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
     "target_only_output_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
@@ -37,6 +37,7 @@
     "target_only_output_ids": {"type": ["array", "null"], "items": {"type": "integer"}},
     "actual_reference_tree_output_ids_equal": {"type": ["boolean", "null"]},
     "actual_output_relation_reliable": {"type": "boolean"},
+    "actual_divergence_evidence_sufficient": {"type": "boolean"},
     "actual_execution_semantic_failure": {"type": "boolean"},
     "diagnostic_numerical_variation_observed": {"type": "boolean"},
     "known_numerical_variation_evidence": {"type": "boolean"},
@@ -46,6 +47,7 @@
     "diagnostic_skip_evidence_supported": {"type": "boolean"},
     "gold_status": {"type": ["string", "null"]},
     "gold_failure_class": {"type": ["string", "null"]},
+    "unresolved_attribution_reason": {"type": ["string", "null"]},
     "hard_correctness_failure_reasons": {"type": "array", "items": {"type": "string"}},
     "diagnostic_numerical_variation_reasons": {"type": "array", "items": {"type": "string"}},
     "replay_semantic_variation_with_actual_consequence": {"type": "boolean"},
@@ -74,7 +76,7 @@
   "allOf": [
     {
       "if": {"properties": {"outcome_category": {"not": {"const": "infrastructure_failure"}}}},
-      "then": {"required": ["actual_reference_output_sha256", "actual_tree_output_sha256", "target_only_output_sha256", "actual_reference_output_ids", "actual_tree_output_ids", "target_only_output_ids", "actual_reference_tree_output_ids_equal", "actual_output_relation_reliable", "actual_execution_semantic_failure", "diagnostic_numerical_variation_observed", "known_numerical_variation_evidence", "replay_only_variation_observed", "replay_structural_evidence_passed", "diagnostic_classification_evidence_sufficient", "diagnostic_skip_evidence_supported", "gold_status", "gold_failure_class", "hard_correctness_failure_reasons", "diagnostic_numerical_variation_reasons", "replay_semantic_variation_with_actual_consequence", "gold_evidence_complete", "selector_target_blind", "target_forward_count_added", "actual_node_counts", "source_provenance_status", "source_provenance_validation_passed", "source_provenance_validation_failures", "source_provenance_wrapper_failure_is_expected_correctness", "first_divergence_gold_comparison_modes_observed", "first_divergence_replay_decision_mismatch_captured", "structural_traversal_complete_through_first_divergence", "first_replay_variation_round", "first_replay_variation_gold_comparison_modes_observed", "first_replay_variation_evidence_captured", "structural_traversal_complete_through_first_replay_variation", "downstream_gold_checks_skipped_after_confirmed_divergence", "downstream_gold_checks_skipped_after_confirmed_replay_variation", "downstream_gold_skipped_checks", "downstream_gold_skip_reasons", "genuinely_incomplete_correctness_evidence", "gold_incompleteness_reasons"]}
+      "then": {"required": ["actual_reference_output_sha256", "actual_tree_output_sha256", "target_only_output_sha256", "actual_reference_output_ids", "actual_tree_output_ids", "target_only_output_ids", "actual_reference_tree_output_ids_equal", "actual_output_relation_reliable", "actual_divergence_evidence_sufficient", "actual_execution_semantic_failure", "diagnostic_numerical_variation_observed", "known_numerical_variation_evidence", "replay_only_variation_observed", "replay_structural_evidence_passed", "diagnostic_classification_evidence_sufficient", "diagnostic_skip_evidence_supported", "gold_status", "gold_failure_class", "unresolved_attribution_reason", "hard_correctness_failure_reasons", "diagnostic_numerical_variation_reasons", "replay_semantic_variation_with_actual_consequence", "gold_evidence_complete", "selector_target_blind", "target_forward_count_added", "actual_node_counts", "source_provenance_status", "source_provenance_validation_passed", "source_provenance_validation_failures", "source_provenance_wrapper_failure_is_expected_correctness", "first_divergence_gold_comparison_modes_observed", "first_divergence_replay_decision_mismatch_captured", "structural_traversal_complete_through_first_divergence", "first_replay_variation_round", "first_replay_variation_gold_comparison_modes_observed", "first_replay_variation_evidence_captured", "structural_traversal_complete_through_first_replay_variation", "downstream_gold_checks_skipped_after_confirmed_divergence", "downstream_gold_checks_skipped_after_confirmed_replay_variation", "downstream_gold_skipped_checks", "downstream_gold_skip_reasons", "genuinely_incomplete_correctness_evidence", "gold_incompleteness_reasons"]}
     },
     {
       "if": {"properties": {"outcome_category": {"const": "pass_actual_exact"}}},
@@ -83,6 +85,10 @@
     {
       "if": {"properties": {"outcome_category": {"const": "actual_numerical_decision_divergence"}}},
       "then": {"properties": {"actual_reference_tree_output_ids_equal": {"const": false}, "structural_correctness_passed": {"const": true}}}
+    },
+    {
+      "if": {"properties": {"outcome_category": {"const": "actual_unresolved_semantic_divergence"}}},
+      "then": {"properties": {"actual_reference_tree_output_ids_equal": {"const": false}, "actual_output_relation_reliable": {"const": true}, "actual_divergence_evidence_sufficient": {"const": true}, "unresolved_attribution_reason": {"type": "string", "minLength": 1}, "genuinely_incomplete_correctness_evidence": {"const": false}, "structural_correctness_passed": {"const": true}}}
     },
     {
       "if": {"properties": {"outcome_category": {"const": "diagnostic_only_numerical_variation"}}},

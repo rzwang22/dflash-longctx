@@ -22,6 +22,7 @@ EXPECTED_ARTIFACTS = (
 OUTCOME_CATEGORIES = (
     "pass_actual_exact",
     "actual_numerical_decision_divergence",
+    "actual_unresolved_semantic_divergence",
     "diagnostic_only_numerical_variation",
     "actual_structural_failure",
     "reference_instability",
@@ -34,6 +35,15 @@ CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS = frozenset(
     {"kv_compaction", "kv_next_step_logits"}
 )
 CONFIRMED_DIVERGENCE_SKIP_REASONS = frozenset({"prior_logits_gold_failure"})
+UNRESOLVED_SEMANTIC_ATTRIBUTIONS = frozenset(
+    {
+        "gold_output_ids_mismatch",
+        "unresolved_gold_mismatch",
+        "unresolved_layerwise_output_divergence",
+        "unresolved_numerical_variation",
+        "unresolved_reference_state_divergence",
+    }
+)
 
 
 class ArtifactError(ValueError):
@@ -205,6 +215,10 @@ def _numerical_attribution(failure_class: str | None) -> bool:
             "verifier_decision_divergence",
         )
     )
+
+
+def _unresolved_semantic_attribution(failure_class: str | None) -> bool:
+    return (failure_class or "").lower() in UNRESOLVED_SEMANTIC_ATTRIBUTIONS
 
 
 def _traversal_complete_through_round(
@@ -572,6 +586,17 @@ def classify_subrun_artifacts(
         and actual_output_relation == (reference_output_ids == tree_output_ids)
     )
     actual_equal = actual_output_relation is True
+    first_divergent_offset = divergence.get("first_divergent_generated_token_offset")
+    actual_divergence_evidence_sufficient = bool(
+        actual_output_relation_reliable
+        and not actual_equal
+        and type(first_divergent_offset) is int
+        and first_divergent_offset >= 0
+        and isinstance(reference_tree.get("left_output_sha256"), str)
+        and len(reference_tree["left_output_sha256"]) == 64
+        and isinstance(reference_tree.get("right_output_sha256"), str)
+        and len(reference_tree["right_output_sha256"]) == 64
+    )
     gold_evidence = _gold_evidence_assessment(
         correctness=correctness,
         divergence=divergence,
@@ -651,6 +676,14 @@ def classify_subrun_artifacts(
         and "uncompleted_output_divergence_checks"
         not in gold_evidence["gold_incompleteness_reasons"]
     )
+    unresolved_attribution_reason = (
+        str(failure_class)
+        if actual_divergence_evidence_sufficient
+        and _unresolved_semantic_attribution(
+            str(failure_class) if failure_class is not None else None
+        )
+        else None
+    )
     manifest_error = manifest.get("error")
     manifest_error_type = (
         manifest_error.get("type") if isinstance(manifest_error, dict) else None
@@ -680,13 +713,16 @@ def classify_subrun_artifacts(
     elif not actual_output_relation_reliable:
         outcome = "incomplete_correctness_evidence"
     elif not actual_equal:
-        outcome = (
-            "actual_numerical_decision_divergence"
-            if gold_complete
+        if (
+            gold_complete
             and classification.get("evidence_complete") is True
             and _numerical_attribution(str(failure_class))
-            else "incomplete_correctness_evidence"
-        )
+        ):
+            outcome = "actual_numerical_decision_divergence"
+        elif unresolved_attribution_reason is not None:
+            outcome = "actual_unresolved_semantic_divergence"
+        else:
+            outcome = "incomplete_correctness_evidence"
     elif replay_only_variation_observed:
         outcome = (
             "diagnostic_only_numerical_variation"
@@ -702,6 +738,7 @@ def classify_subrun_artifacts(
         and outcome
         not in {
             "actual_numerical_decision_divergence",
+            "actual_unresolved_semantic_divergence",
             "diagnostic_only_numerical_variation",
             "actual_structural_failure",
             "reference_instability",
@@ -760,6 +797,7 @@ def classify_subrun_artifacts(
             and outcome
             in {
                 "actual_numerical_decision_divergence",
+                "actual_unresolved_semantic_divergence",
                 "diagnostic_only_numerical_variation",
                 "actual_structural_failure",
                 "reference_instability",
@@ -774,6 +812,9 @@ def classify_subrun_artifacts(
         "target_only_output_ids": target_reference.get("left_output_ids"),
         "actual_reference_tree_output_ids_equal": actual_equal,
         "actual_output_relation_reliable": actual_output_relation_reliable,
+        "actual_divergence_evidence_sufficient": (
+            actual_divergence_evidence_sufficient
+        ),
         "target_only_reference_output_ids_equal": target_reference.get(
             "output_ids_equal"
         ),
@@ -796,6 +837,7 @@ def classify_subrun_artifacts(
         "tree_token_text": divergence.get("tree_token_text"),
         "divergence_failure_class": failure_class,
         "divergence_evidence_complete": classification.get("evidence_complete"),
+        "unresolved_attribution_reason": unresolved_attribution_reason,
         "actual_execution_correctness_passed": correctness.get(
             "actual_execution_correctness_passed"
         ),
@@ -861,6 +903,7 @@ def classify_subrun_artifacts(
         "genuinely_incomplete_correctness_evidence": bool(
             gold_evidence["genuinely_incomplete_correctness_evidence"]
             and not diagnostic_classification_evidence_sufficient
+            and unresolved_attribution_reason is None
         ),
         "gold_incompleteness_reasons": gold_evidence["gold_incompleteness_reasons"],
         "selected_frozen_policy_configs": selected_policies,

@@ -112,6 +112,7 @@ def _write_subrun(
     source_matches: bool = True,
     downstream_gold_skip_reason: str | None = None,
     failure_class_override: str | None = None,
+    hard_failure_reason_override: str | None = None,
 ) -> None:
     root.mkdir()
     reference = [10, 20, 30, 40]
@@ -126,6 +127,9 @@ def _write_subrun(
         else "numerical_backend_variation"
         if replay_mismatch
         else None
+    )
+    hard_failure_reason = hard_failure_reason_override or (
+        f"gold_semantic_failure:{reported_failure_class}" if replay_mismatch else None
     )
     _write_json(
         root / "manifest.json",
@@ -172,15 +176,11 @@ def _write_subrun(
             "actual_execution_semantic_failure": not actual_equal,
             "diagnostic_numerical_variation_observed": replay_mismatch,
             "diagnostic_numerical_variation_reasons": (
-                [f"gold_semantic_failure:{reported_failure_class}"]
-                if replay_mismatch
-                else []
+                [hard_failure_reason] if hard_failure_reason is not None else []
             ),
             "replay_semantic_variation_with_actual_consequence": not actual_equal,
             "hard_correctness_failure_reasons": (
-                [f"gold_semantic_failure:{reported_failure_class}"]
-                if replay_mismatch
-                else []
+                [hard_failure_reason] if hard_failure_reason is not None else []
             ),
         },
     )
@@ -213,8 +213,11 @@ def _write_subrun(
                     "classification": {
                         "failure_class": None
                         if actual_equal
-                        else "numerical_backend_decision_divergence",
-                        "evidence_complete": True,
+                        else reported_failure_class,
+                        "evidence_complete": not bool(
+                            reported_failure_class
+                            and reported_failure_class.startswith("unresolved_")
+                        ),
                     },
                     "uncompleted_checks": [],
                 }
@@ -494,6 +497,46 @@ class Phase2D1BNRTests(unittest.TestCase):
         )
         event = build_divergence_event(result)
         self.assertEqual(event["minimum_verifier_margin"], 0.0)
+
+    def test_actual_unresolved_semantic_divergence_is_retained(self) -> None:
+        identity = _identity(experiment="cohort", mode="global_fixed", budget=32)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(
+                root,
+                identity,
+                actual_equal=False,
+                replay_mismatch=True,
+                return_code=1,
+                failure_class_override="unresolved_layerwise_output_divergence",
+                hard_failure_reason_override=(
+                    "gold_semantic_failure:gold_output_ids_mismatch"
+                ),
+            )
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        _validate(result, "phase2d1bnr-subrun.schema.json")
+        self.assertEqual(
+            result["outcome_category"], "actual_unresolved_semantic_divergence"
+        )
+        self.assertFalse(result["actual_reference_tree_output_ids_equal"])
+        self.assertTrue(result["actual_divergence_evidence_sufficient"])
+        self.assertEqual(
+            result["divergence_failure_class"],
+            "unresolved_layerwise_output_divergence",
+        )
+        self.assertEqual(
+            result["unresolved_attribution_reason"],
+            "unresolved_layerwise_output_divergence",
+        )
+        self.assertEqual(result["gold_status"], "fail_semantic")
+        self.assertEqual(
+            result["hard_correctness_failure_reasons"],
+            ["gold_semantic_failure:gold_output_ids_mismatch"],
+        )
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+        self.assertTrue(result["subprocess_nonzero_retained_as_diagnostic"])
+        event = build_divergence_event(result)
+        self.assertEqual(event["first_divergent_generated_offset"], 3)
 
     def test_correctness_exit_does_not_hide_source_provenance_mismatch(self) -> None:
         identity = _identity()
@@ -980,6 +1023,14 @@ class Phase2D1BNRTests(unittest.TestCase):
                     downstream_gold_skip_reason=(
                         "prior_logits_gold_failure"
                         if divergent or replay_only
+                        else None
+                    ),
+                    failure_class_override=(
+                        "unresolved_layerwise_output_divergence" if divergent else None
+                    ),
+                    hard_failure_reason_override=(
+                        "gold_semantic_failure:gold_output_ids_mismatch"
+                        if divergent
                         else None
                     ),
                 )

@@ -27,6 +27,7 @@ from dflash.phase2d1bnr.parse import (
     CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS,
     CONFIRMED_DIVERGENCE_SKIP_REASONS,
     REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES,
+    UNRESOLVED_SEMANTIC_ATTRIBUTIONS,
     read_json,
     read_jsonl,
 )
@@ -173,6 +174,24 @@ def _validate_observations(
             raise ValueError(
                 "numerical divergence lacks complete classification evidence"
             )
+        if outcome == "actual_unresolved_semantic_divergence":
+            if output_equal is not False:
+                raise ValueError("unresolved actual divergence lacks output mismatch")
+            if row.get("actual_divergence_evidence_sufficient") is not True:
+                raise ValueError("unresolved actual divergence lacks token evidence")
+            if row.get("structural_correctness_passed") is not True:
+                raise ValueError("structural failure was relabeled as unresolved")
+            reason = row.get("unresolved_attribution_reason")
+            if reason not in UNRESOLVED_SEMANTIC_ATTRIBUTIONS:
+                raise ValueError("unresolved actual divergence has unknown attribution")
+            if row.get("divergence_failure_class") != reason:
+                raise ValueError(
+                    "unresolved attribution did not preserve failure class"
+                )
+            if row.get("genuinely_incomplete_correctness_evidence") is not False:
+                raise ValueError(
+                    "unresolved actual divergence was also marked incomplete"
+                )
         if outcome == "diagnostic_only_numerical_variation":
             if row.get("actual_execution_semantic_failure") is not False:
                 raise ValueError(

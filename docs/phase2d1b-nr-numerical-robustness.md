@@ -48,14 +48,23 @@ Every process receives exactly one category:
 
 1. `pass_actual_exact`
 2. `actual_numerical_decision_divergence`
-3. `diagnostic_only_numerical_variation`
-4. `actual_structural_failure`
-5. `reference_instability`
-6. `incomplete_correctness_evidence`
-7. `infrastructure_failure`
+3. `actual_unresolved_semantic_divergence`
+4. `diagnostic_only_numerical_variation`
+5. `actual_structural_failure`
+6. `reference_instability`
+7. `incomplete_correctness_evidence`
+8. `infrastructure_failure`
 
-Categories 2–5 remain study data and execution continues. Categories 6–7 stop
+Categories 2–6 remain study data and execution continues. Categories 7–8 stop
 the current stage and leave the NR root explicitly incomplete.
+
+`actual_unresolved_semantic_divergence` means stable, hashed reference/tree
+token lists establish an actual mismatch and its first divergent offset, while
+the available controls do not establish a numerical verifier attribution. The
+raw failure class is retained as `unresolved_attribution_reason`; this outcome
+remains diagnostic study data and does not abort the cohort. Missing output
+relations, missing first-divergence evidence, and unknown failure classes remain
+`incomplete_correctness_evidence`.
 
 `diagnostic_only_numerical_variation` means the actual Original-DFlash and tree
 outputs remain token exact while a replay/Gold comparison records semantic or
