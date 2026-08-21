@@ -23,7 +23,14 @@ from dflash.phase2d1bnr.aggregation import (
     build_margin_trigger_sweep,
 )
 from dflash.phase2d1bnr.decision import build_research_summary, choose_nr_decision
-from dflash.phase2d1bnr.parse import read_json, read_jsonl
+from dflash.phase2d1bnr.parse import (
+    CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS,
+    CONFIRMED_DIVERGENCE_SKIP_REASONS,
+    REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES,
+    UNRESOLVED_SEMANTIC_ATTRIBUTIONS,
+    read_json,
+    read_jsonl,
+)
 from experiments.phase2d1b_nr_numerical_robustness import ARTIFACTS
 
 
@@ -149,13 +156,119 @@ def _validate_observations(
             raise ValueError("top1 packed-tree did not construct exactly 16 nodes")
         output_equal = row["actual_reference_tree_output_ids_equal"]
         outcome = row["outcome_category"]
-        if output_equal is False and outcome == "pass_actual_exact":
-            raise ValueError("actual output divergence was relabeled as pass")
+        if not row.get("actual_output_relation_reliable"):
+            raise ValueError("subrun lacks a reliable actual output relation")
+        if output_equal is not True and outcome in {
+            "pass_actual_exact",
+            "diagnostic_only_numerical_variation",
+        }:
+            raise ValueError("actual output divergence was relabeled as output-exact")
         if (
             outcome == "actual_numerical_decision_divergence"
             and not row["structural_correctness_passed"]
         ):
             raise ValueError("structural failure was relabeled as numerical")
+        if outcome == "actual_numerical_decision_divergence" and not row.get(
+            "gold_evidence_complete"
+        ):
+            raise ValueError(
+                "numerical divergence lacks complete classification evidence"
+            )
+        if outcome == "actual_unresolved_semantic_divergence":
+            if output_equal is not False:
+                raise ValueError("unresolved actual divergence lacks output mismatch")
+            if row.get("actual_divergence_evidence_sufficient") is not True:
+                raise ValueError("unresolved actual divergence lacks token evidence")
+            if row.get("structural_correctness_passed") is not True:
+                raise ValueError("structural failure was relabeled as unresolved")
+            reason = row.get("unresolved_attribution_reason")
+            if reason not in UNRESOLVED_SEMANTIC_ATTRIBUTIONS:
+                raise ValueError("unresolved actual divergence has unknown attribution")
+            if row.get("divergence_failure_class") != reason:
+                raise ValueError(
+                    "unresolved attribution did not preserve failure class"
+                )
+            if row.get("genuinely_incomplete_correctness_evidence") is not False:
+                raise ValueError(
+                    "unresolved actual divergence was also marked incomplete"
+                )
+        if outcome == "diagnostic_only_numerical_variation":
+            if row.get("replay_only_variation_observed") is not True:
+                raise ValueError("diagnostic-only variation lacks replay evidence")
+            if row.get("gold_or_replay_variation_observed") is not True:
+                raise ValueError("diagnostic-only variation lacks Gold/replay evidence")
+            if row.get("unclassified_gold_or_replay_failure_observed") is not False:
+                raise ValueError("diagnostic-only variation has unknown attribution")
+            if row.get("replay_structural_evidence_passed") is not True:
+                raise ValueError(
+                    "diagnostic-only variation lacks passing replay structure"
+                )
+            if row.get("diagnostic_numerical_variation_observed") is not True:
+                raise ValueError("diagnostic-only variation lacks numerical evidence")
+            if row.get("known_numerical_variation_evidence") is not True:
+                raise ValueError(
+                    "diagnostic-only variation lacks recognized numerical evidence"
+                )
+            if row.get("diagnostic_classification_evidence_sufficient") is not True:
+                raise ValueError(
+                    "diagnostic-only variation lacks sufficient classification evidence"
+                )
+            if row.get("structural_correctness_passed") is not True:
+                raise ValueError("diagnostic-only variation has a structural failure")
+            if row.get("genuinely_incomplete_correctness_evidence") is not False:
+                raise ValueError(
+                    "diagnostic-only variation was also marked genuinely incomplete"
+                )
+        if row.get("downstream_gold_checks_skipped_after_confirmed_divergence"):
+            if outcome != "actual_numerical_decision_divergence":
+                raise ValueError("causal downstream Gold skip lacks actual divergence")
+            if row.get("genuinely_incomplete_correctness_evidence"):
+                raise ValueError("causal downstream skip was also marked incomplete")
+            skipped_checks = set(row.get("downstream_gold_skipped_checks", []))
+            skip_reasons = set(row.get("downstream_gold_skip_reasons", []))
+            if not skipped_checks or not skipped_checks <= (
+                CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS
+            ):
+                raise ValueError("causal downstream skip contains an unrelated check")
+            if (
+                not skip_reasons
+                or not skip_reasons <= CONFIRMED_DIVERGENCE_SKIP_REASONS
+            ):
+                raise ValueError("causal downstream skip has an unknown reason")
+            if not REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES <= set(
+                row.get("first_divergence_gold_comparison_modes_observed", [])
+            ):
+                raise ValueError("first divergence lacks required Gold-logit modes")
+            if not row.get("first_divergence_replay_decision_mismatch_captured"):
+                raise ValueError("first divergence lacks replay decision evidence")
+            if not row.get("structural_traversal_complete_through_first_divergence"):
+                raise ValueError("first divergence lacks complete traversal evidence")
+        if row.get("downstream_gold_checks_skipped_after_confirmed_replay_variation"):
+            if outcome != "diagnostic_only_numerical_variation":
+                raise ValueError("causal replay Gold skip lacks diagnostic variation")
+            if row.get("genuinely_incomplete_correctness_evidence"):
+                raise ValueError("causal replay Gold skip was also marked incomplete")
+            skipped_checks = set(row.get("downstream_gold_skipped_checks", []))
+            skip_reasons = set(row.get("downstream_gold_skip_reasons", []))
+            if not skipped_checks or not skipped_checks <= (
+                CAUSALLY_SKIPPABLE_DOWNSTREAM_GOLD_CHECKS
+            ):
+                raise ValueError("causal replay Gold skip contains an unrelated check")
+            if (
+                not skip_reasons
+                or not skip_reasons <= CONFIRMED_DIVERGENCE_SKIP_REASONS
+            ):
+                raise ValueError("causal replay Gold skip has an unknown reason")
+            if not REQUIRED_DIVERGENCE_GOLD_LOGIT_MODES <= set(
+                row.get("first_replay_variation_gold_comparison_modes_observed", [])
+            ):
+                raise ValueError("first replay variation lacks Gold-logit modes")
+            if not row.get("first_replay_variation_evidence_captured"):
+                raise ValueError("first replay variation lacks replay evidence")
+            if not row.get(
+                "structural_traversal_complete_through_first_replay_variation"
+            ):
+                raise ValueError("first replay variation lacks traversal evidence")
         reference_stable = bool(
             row.get("reference_repeat_stable") is True
             and row.get("reference_profile_stable") is True
@@ -292,7 +405,7 @@ def check_output(output_dir: Path) -> dict[str, Any]:
         ),
         "actual_divergence_event_count": len(divergences),
         "decision": decision["decision"],
-        "materialization_required": False,
+        "materialization_required": manifest["materialization_required"],
     }
 
 

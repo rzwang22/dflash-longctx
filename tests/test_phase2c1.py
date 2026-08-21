@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import ast
+import importlib.util
+import inspect
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from jsonschema import Draft202012Validator
@@ -11,6 +16,7 @@ from jsonschema import Draft202012Validator
 from dflash.phase2c.gold import (
     DEFAULT_GOLD_THRESHOLDS,
     classify_comparison_matrix,
+    exact_tensor_quantile,
     expected_node_alignment,
     structural_alignment_issues,
     summarize_comparison_mode,
@@ -24,6 +30,8 @@ from experiments.phase2c_online_tree import (
     parse_args,
     persist_gold_artifacts,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _node_record(
@@ -59,6 +67,200 @@ def _mode_summary(mode: str, node: dict, issues: list[str] | None = None) -> dic
         structural_issues=issues or [],
         thresholds=DEFAULT_GOLD_THRESHOLDS,
     )
+
+
+class _FakeScalar:
+    def __init__(self, value: float) -> None:
+        self.value = float(value)
+
+    def item(self) -> float:
+        return self.value
+
+    def __add__(self, other):
+        return _FakeScalar(self.value + _scalar_value(other))
+
+    def __sub__(self, other):
+        return _FakeScalar(self.value - _scalar_value(other))
+
+    def __mul__(self, other):
+        return _FakeScalar(self.value * _scalar_value(other))
+
+
+def _scalar_value(value) -> float:
+    return value.value if isinstance(value, _FakeScalar) else float(value)
+
+
+class _FakeTensor:
+    def __init__(
+        self,
+        values: list[float],
+        *,
+        virtual_numel: int | None = None,
+        device: str = "cuda:0",
+    ) -> None:
+        self.values = values
+        self.virtual_numel = virtual_numel
+        self.dtype = "torch.float32"
+        self.device = device
+
+    def numel(self) -> int:
+        return self.virtual_numel or len(self.values)
+
+    def detach(self):
+        return self
+
+    def reshape(self, *_shape):
+        return self
+
+    def to(self, *, device: str):
+        return _FakeTensor(
+            self.values,
+            virtual_numel=self.virtual_numel,
+            device=device,
+        )
+
+    def kthvalue(self, rank: int):
+        if self.virtual_numel is not None:
+            if not 1 <= rank <= self.virtual_numel:
+                raise IndexError(rank)
+            value = self.values[0]
+        else:
+            value = sorted(self.values)[rank - 1]
+        return SimpleNamespace(values=_FakeScalar(value))
+
+
+def _fake_native_linear_quantile(tensor: _FakeTensor, quantile: float):
+    values = sorted(tensor.values)
+    rank = quantile * (len(values) - 1)
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    value = values[lower]
+    if lower != upper:
+        value += (values[upper] - values[lower]) * (rank - lower)
+    return _FakeScalar(value)
+
+
+class Phase2C1ExactQuantileTests(unittest.TestCase):
+    def test_forced_fallback_matches_native_linear_interpolation(self) -> None:
+        tensor = _FakeTensor([9.0, 1.0, 4.0, 7.0, 3.0, 11.0])
+        native = exact_tensor_quantile(
+            tensor,
+            0.73,
+            _native_quantile=_fake_native_linear_quantile,
+        )
+        fallback = exact_tensor_quantile(
+            tensor,
+            0.73,
+            native_max_numel=0,
+            _native_quantile=lambda *_args: self.fail("native path was used"),
+        )
+        self.assertEqual(fallback["value"], native["value"])
+        self.assertEqual(native["quantile_backend"], "torch.quantile")
+        self.assertEqual(
+            fallback["quantile_backend"],
+            "cpu_kthvalue_linear_interpolation",
+        )
+        self.assertTrue(fallback["large_tensor_quantile_fallback_used"])
+
+    def test_fallback_has_no_random_or_sampling_calls(self) -> None:
+        tree = ast.parse(inspect.getsource(exact_tensor_quantile))
+        called = {
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        self.assertTrue({"kthvalue", "reshape", "to"} <= called)
+        self.assertTrue(
+            called.isdisjoint(
+                {"rand", "randn", "randint", "randperm", "multinomial", "topk"}
+            )
+        )
+
+    def test_materialized_error_stats_use_the_exact_quantile_helper(self) -> None:
+        source = (
+            REPO_ROOT / "third_party/qwen3_8b_dflash_b16/instrumented/dflash.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        function = next(
+            child
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "DFlashDraftModel"
+            for child in node.body
+            if isinstance(child, ast.FunctionDef)
+            and child.name == "_phase2c_tensor_error_stats"
+        )
+        call_names = {
+            node.func.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        attribute_calls = {
+            node.func.attr
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        }
+        self.assertIn("exact_tensor_quantile", call_names)
+        self.assertNotIn("quantile", attribute_calls)
+
+    def test_virtual_tensor_above_native_limit_uses_exact_fallback(self) -> None:
+        tensor = _FakeTensor([3.25], virtual_numel=2**24 + 1)
+        result = exact_tensor_quantile(
+            tensor,
+            0.99,
+            _native_quantile=lambda *_args: self.fail("native path was used"),
+        )
+        self.assertEqual(result["value"], 3.25)
+        self.assertEqual(result["quantile_input_numel"], 2**24 + 1)
+        self.assertEqual(result["quantile_input_dtype"], "float32")
+        self.assertEqual(result["quantile_input_device"], "cuda:0")
+        self.assertTrue(result["large_tensor_quantile_fallback_used"])
+
+    def test_native_limit_boundary_and_long_context_sizes(self) -> None:
+        at_limit = exact_tensor_quantile(
+            _FakeTensor([3.25], virtual_numel=2**24),
+            0.99,
+            _native_quantile=lambda *_args: _FakeScalar(3.25),
+        )
+        self.assertEqual(at_limit["quantile_backend"], "torch.quantile")
+        self.assertFalse(at_limit["large_tensor_quantile_fallback_used"])
+
+        for value_count in (2**24 + 1, 33_588_224):
+            with self.subTest(value_count=value_count):
+                result = exact_tensor_quantile(
+                    _FakeTensor([3.25], virtual_numel=value_count),
+                    0.99,
+                    _native_quantile=lambda *_args: self.fail("native path was used"),
+                )
+                self.assertEqual(result["value"], 3.25)
+                self.assertEqual(result["quantile_input_numel"], value_count)
+                self.assertEqual(
+                    result["quantile_backend"],
+                    "cpu_kthvalue_linear_interpolation",
+                )
+                self.assertTrue(result["large_tensor_quantile_fallback_used"])
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch not installed")
+    def test_forced_fallback_matches_real_torch_quantile(self) -> None:
+        import torch
+
+        tensor = torch.tensor([9.0, 1.0, 4.0, 7.0, 3.0, 11.0])
+        native = torch.quantile(tensor, 0.73).item()
+        fallback = exact_tensor_quantile(
+            tensor,
+            0.73,
+            native_max_numel=0,
+        )
+        self.assertEqual(fallback["value"], native)
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch not installed")
+    def test_real_torch_tensor_above_native_limit_does_not_raise(self) -> None:
+        import torch
+
+        tensor = torch.full((2**24 + 1,), 3.25, dtype=torch.float32)
+        result = exact_tensor_quantile(tensor, 0.99)
+        self.assertEqual(result["value"], 3.25)
+        self.assertEqual(result["quantile_input_numel"], 2**24 + 1)
+        self.assertTrue(result["large_tensor_quantile_fallback_used"])
 
 
 class Phase2C1ClassificationTests(unittest.TestCase):

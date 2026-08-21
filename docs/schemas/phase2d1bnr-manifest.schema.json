@@ -10,6 +10,9 @@
     "decision_rules", "subruns", "artifacts", "online_execution_modified",
     "selector_modified", "tree_modified", "kv_compaction_modified",
     "correctness_gate_modified", "numerical_thresholds_modified",
+    "diagnostic_gold_numerical_summary_modified",
+    "materialized_diagnostic_custom_code_modified",
+    "online_execution_source_otherwise_unchanged",
     "materialization_required", "formal_timing_claims_made",
     "no_performance_claims", "error"
   ],
@@ -46,7 +49,10 @@
     "kv_compaction_modified": {"const": false},
     "correctness_gate_modified": {"const": false},
     "numerical_thresholds_modified": {"const": false},
-    "materialization_required": {"const": false},
+    "diagnostic_gold_numerical_summary_modified": {"const": true},
+    "materialized_diagnostic_custom_code_modified": {"const": true},
+    "online_execution_source_otherwise_unchanged": {"const": true},
+    "materialization_required": {"const": true},
     "formal_timing_claims_made": {"const": false},
     "no_performance_claims": {"const": true},
     "error": {"type": ["object", "null"]}

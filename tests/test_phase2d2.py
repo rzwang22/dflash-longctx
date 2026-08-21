@@ -51,8 +51,57 @@ from scripts.check_phase2d2_acceptance import (
     _validate_gold_kv_shape_evidence,
     check_output,
 )
+from scripts.phase2d2_build_nr_calibration import (
+    EXPECTED_NR_CHECKER_COUNTS,
+    _source_runtime_provenance,
+    _validated_frozen_sweep_evidence,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _frozen_nr_sweep_fixture() -> tuple[dict, list[dict], dict]:
+    observations = [
+        {
+            "experiment": "cohort",
+            "outcome_category": (
+                "actual_numerical_decision_divergence"
+                if index == 0
+                else "actual_unresolved_semantic_divergence"
+                if index < 4
+                else "diagnostic_only_numerical_variation"
+            ),
+        }
+        for index in range(45)
+    ]
+    rows = []
+    strata = (
+        ("top1_packed_tree", 16, 0),
+        ("global_fixed", 16, 1),
+        ("global_fixed", 32, 3),
+    )
+    for threshold in (0.1, 0.25):
+        for selector, budget, divergence_count in strata:
+            caught = (
+                divergence_count if threshold == 0.25 else max(divergence_count - 1, 0)
+            )
+            rows.append(
+                {
+                    "experiment": "cohort",
+                    "selector_mode": selector,
+                    "node_budget": budget,
+                    "scope": "overall",
+                    "nominal_prompt_length": None,
+                    "threshold": threshold,
+                    "first_actual_divergence_round_count": divergence_count,
+                    "divergence_rounds_caught_by_trigger": caught,
+                    "divergence_recall": (
+                        caught / divergence_count if divergence_count else None
+                    ),
+                }
+            )
+    checker = {"status": "pass", **EXPECTED_NR_CHECKER_COUNTS}
+    return {"thresholds": [0.1, 0.25], "rows": rows}, observations, checker
 
 
 def _positions() -> list[dict]:
@@ -436,6 +485,103 @@ class CacheAndGuardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "shape flags disagree"):
             _validate_gold_kv_shape_evidence(incompatible)
 
+    def test_frozen_nr_calibration_includes_all_actual_divergence_classes(
+        self,
+    ) -> None:
+        sweep, observations, checker = _frozen_nr_sweep_fixture()
+        evidence = _validated_frozen_sweep_evidence(
+            sweep=sweep,
+            observations=observations,
+            checker_result=checker,
+            requested_threshold=0.25,
+        )
+        self.assertEqual(evidence["observed_actual_divergence_round_count"], 4)
+        self.assertEqual(evidence["observed_divergence_rounds_caught_by_trigger"], 4)
+        self.assertEqual(evidence["observed_false_negative_count"], 0)
+        self.assertEqual(
+            evidence["observed_actual_divergence_outcome_counts"],
+            {
+                "actual_numerical_decision_divergence": 1,
+                "actual_unresolved_semantic_divergence": 3,
+            },
+        )
+
+    def test_frozen_nr_calibration_rejects_one_missed_stratum(self) -> None:
+        sweep, observations, checker = _frozen_nr_sweep_fixture()
+        missed = next(
+            row
+            for row in sweep["rows"]
+            if row["threshold"] == 0.25
+            and row["selector_mode"] == "global_fixed"
+            and row["node_budget"] == 32
+        )
+        missed["divergence_rounds_caught_by_trigger"] = 2
+        missed["divergence_recall"] = 2 / 3
+        with self.assertRaisesRegex(ValueError, "cohort false negative"):
+            _validated_frozen_sweep_evidence(
+                sweep=sweep,
+                observations=observations,
+                checker_result=checker,
+                requested_threshold=0.25,
+            )
+
+    def test_frozen_nr_calibration_rejects_retuned_threshold(self) -> None:
+        sweep, observations, checker = _frozen_nr_sweep_fixture()
+        with self.assertRaisesRegex(ValueError, "frozen NR decision margin"):
+            _validated_frozen_sweep_evidence(
+                sweep=sweep,
+                observations=observations,
+                checker_result=checker,
+                requested_threshold=0.5,
+            )
+
+    def test_nr_source_runtime_provenance_is_exact_across_subruns(self) -> None:
+        manifest = {
+            "environment": {"device": "cuda:0"},
+            "configuration": {"dtype": "bfloat16"},
+            "target_model": {"revision": "a" * 40},
+            "materialized_draft": {"manifest": {"base_model_revision": "b" * 40}},
+        }
+        environment = {
+            "packages": {
+                "torch": {"version": "2.8.0"},
+                "transformers": {"version": "4.57.1"},
+            },
+            "cuda": {
+                "gpus": [
+                    {
+                        "index": 0,
+                        "name": "NVIDIA H100 PCIe",
+                        "compute_capability": "9.0",
+                    }
+                ]
+            },
+        }
+        subrun_manifest = {
+            "attention_backend": {
+                "target": {"configured_attention_implementation": "sdpa"}
+            }
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            observations = []
+            for index in range(2):
+                raw = root / f"raw-{index}"
+                raw.mkdir()
+                (raw / "environment.json").write_text(json.dumps(environment))
+                (raw / "manifest.json").write_text(json.dumps(subrun_manifest))
+                observations.append({"raw_subrun_dir": str(raw)})
+            provenance = _source_runtime_provenance(root, manifest, observations)
+            self.assertEqual(provenance["gpu_name"], "NVIDIA H100 PCIe")
+            self.assertEqual(provenance["compute_capability"], "9.0")
+            self.assertEqual(provenance["target_attention_implementation"], "sdpa")
+
+            changed = deepcopy(environment)
+            changed["cuda"]["gpus"][0]["name"] = "different GPU"
+            (root / "raw-1" / "environment.json").write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError, "one exact runtime provenance"):
+                _source_runtime_provenance(root, manifest, observations)
+
     def test_calibration_provenance_and_hash_are_strict(self) -> None:
         provenance = {
             "gpu_name": "NVIDIA H100 PCIe",
@@ -451,8 +597,28 @@ class CacheAndGuardTests(unittest.TestCase):
             "schema_version": CALIBRATION_SCHEMA_VERSION,
             "source_phase": "2D.1B-NR",
             "independent_calibration_cohort": True,
-            "decision_margin_threshold": 0.1,
-            "source_artifacts": {},
+            "decision_margin_threshold": 0.25,
+            "source_artifacts": {
+                "nr_directory": "/outputs/nr",
+                "nr_manifest_sha256": "c" * 64,
+                "margin_trigger_sweep_sha256": "d" * 64,
+                "nr_acceptance_checker_result": {
+                    "status": "pass",
+                    **EXPECTED_NR_CHECKER_COUNTS,
+                },
+                "qualifying_rows": [{}],
+                "cohort_overall_strata": [
+                    {"selector_mode": "global_fixed", "node_budget": 16}
+                ],
+                "observed_actual_divergence_outcome_counts": {
+                    "actual_numerical_decision_divergence": 1,
+                    "actual_unresolved_semantic_divergence": 3,
+                },
+                "observed_actual_divergence_round_count": 4,
+                "observed_divergence_rounds_caught_by_trigger": 4,
+                "observed_false_negative_count": 0,
+                "minimum_preregistered_zero_false_negative_threshold": 0.25,
+            },
             "provenance": provenance,
             "evaluation_outputs_used_to_choose_threshold": False,
             "formal_error_bound_claimed": False,

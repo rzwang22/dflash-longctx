@@ -103,6 +103,13 @@ K/V shapes for every target layer, layer-count/shape equality, the existing
 length invariants, and numerical error reductions. Missing or incompatible shape
 metadata remains a structural failure.
 
+Gold p99 reductions use native `torch.quantile` through its supported indexing
+range. Larger tensors are transferred in full to CPU and evaluated exactly from
+the two required `kthvalue` order statistics with linear interpolation. This is
+not a sample or approximation. Each result records the backend, input element
+count, dtype, device, probability, interpolation, and fallback status. The
+reduction remains diagnostic-only and outside formal timing.
+
 Original DFlash actual speculative execution is the Phase 2D.2A hard token-exact
 oracle. Target-only greedy output remains a recorded auxiliary numerical control.
 Refinement may alter accepted depth, correction rounds, and round segmentation;
@@ -132,8 +139,9 @@ speedup claim.
 
 ## H100 setup and new materialization
 
-The instrumented `dflash.py` and materialized helper set changed. Use a new
-directory; do not overwrite the validated Phase 2D.1B directory.
+The instrumented `dflash.py` and materialized `phase2c_gold.py` changed. Use a
+new SHA-bound directory; in particular, do not overwrite the validated
+`Qwen3-8B-DFlash-b16-phase2d2a-instrumented-3dc89043348b` directory.
 
 ```bash
 cd ~/data/dflash-longctx
@@ -202,53 +210,55 @@ python scripts/check_phase2d2_acceptance.py \
   outputs/phase2d2a-union-d2-p2-r2-n16-1k-always-gold
 ```
 
-Build a guard calibration only from the independent NR cohort, selecting a
-threshold that is present in its sweep and has no cohort false negatives. The
-builder reruns the Phase 2D.1B-NR acceptance checker and rejects a sweep with no
-observed actual divergence, missing recall fields, or any false negative:
+Build the guard calibration only from the frozen independent NR cohort. The
+threshold is fixed at 0.25; Phase 2D.2A outputs cannot retune it. The builder
+reruns the final Phase 2D.1B-NR checker, requires its 45 observations / 15
+physical cases / 45 configuration cases / four actual divergences, and checks
+every cohort-level selector/budget stratum. Both the one attributed numerical
+divergence and the three unresolved actual semantic divergences contribute to
+the false-negative count. The total at 0.25 must be four caught and zero missed,
+and 0.25 must remain the minimum preregistered zero-FN threshold:
 
 ```bash
-export NR_DIR=outputs/phase2d1b-nr-numerical-robustness
+export NR_DIR=outputs/phase2d1b-nr-full-cohort-45dd261c928a
 export NR_CALIBRATION=outputs/phase2d2a-nr-calibration
-export NR_THRESHOLD="$(python -c 'import json,sys; p=json.load(open(sys.argv[1])); rows=[r for r in p["rows"] if r["experiment"]=="cohort" and r["scope"]=="overall" and r["first_actual_divergence_round_count"]>0 and r["first_actual_divergence_round_count"]==r["divergence_rounds_caught_by_trigger"]]; print(min(r["threshold"] for r in rows))' "$NR_DIR/margin-trigger-sweep.json")"
+
+python scripts/check_phase2d1b_nr_acceptance.py --output-dir "$NR_DIR"
 
 python scripts/phase2d2_build_nr_calibration.py \
   --nr-dir "$NR_DIR" \
-  --decision-margin-threshold "$NR_THRESHOLD" \
+  --decision-margin-threshold 0.25 \
   --output-dir "$NR_CALIBRATION"
 ```
 
-Numerical guard smoke runs the same conditional configuration in three separate
-directories:
+Gate 3B uses the same mechanism configuration already validated by Gate 2 and
+changes only the verification mode to the calibrated guard:
 
 ```bash
-for VERIFY_MODE in packed_native always_replay margin_guarded_replay; do
-  EXTRA=()
-  if [ "$VERIFY_MODE" = margin_guarded_replay ]; then
-    EXTRA+=(--nr-calibration-dir "$NR_CALIBRATION")
-  fi
-  python experiments/phase2d2_robust_conditional_refinement.py \
-    --target-model-path "$TARGET_MODEL_DIR" \
-    --materialized-draft-path "$DRAFT_MODEL_DIR" \
-    --longbench-root "$LONGBENCH_ROOT" --longbench-task gov_report \
-    --frozen-selector-config "$FROZEN_SELECTOR" \
-    --sample-id gov_report-fd287bbfd3bdbdc9 \
-    --context-lengths 1K --pilot-samples 1 --max-new-tokens 32 \
-    --warmup-runs 0 --timing-repeats 1 \
-    --candidate-merge-mode union --refine-depth 2 \
-    --refined-prefix-budget 2 --conditional-top-r 2 \
-    --refinement-weight 0.5 --node-budget 16 \
-    --verification-mode "$VERIFY_MODE" "${EXTRA[@]}" \
-    --enable-gold-checks --gold-max-rounds 32 \
-    --output-dir "outputs/phase2d2a-guard-$VERIFY_MODE"
-  python scripts/check_phase2d2_acceptance.py \
-    "outputs/phase2d2a-guard-$VERIFY_MODE"
-done
+python experiments/phase2d2_robust_conditional_refinement.py \
+  --target-model-path "$TARGET_MODEL_DIR" \
+  --materialized-draft-path "$DRAFT_MODEL_DIR" \
+  --longbench-root "$LONGBENCH_ROOT" --longbench-task gov_report \
+  --frozen-selector-config "$FROZEN_SELECTOR" \
+  --sample-id gov_report-fd287bbfd3bdbdc9 \
+  --context-lengths 1K --pilot-samples 1 --max-new-tokens 32 \
+  --warmup-runs 0 --timing-repeats 1 \
+  --candidate-merge-mode union --refine-depth 2 \
+  --refined-prefix-budget 2 --conditional-top-r 2 \
+  --refinement-weight 0.5 --node-budget 16 \
+  --verification-mode margin_guarded_replay \
+  --nr-calibration-dir "$NR_CALIBRATION" \
+  --enable-gold-checks --gold-max-rounds 32 \
+  --output-dir outputs/phase2d2a-gate3b-margin-guarded
+
+python scripts/check_phase2d2_acceptance.py \
+  outputs/phase2d2a-gate3b-margin-guarded
 ```
 
-Only after these pass, run the following three preregistered one-round mechanism
-analyses. `max_new_tokens=1` deliberately limits each generation to one tree
-round; it is not a latency result.
+Do not run the following preregistered one-round mechanism analyses until Gate
+3B has passed and a separate continuation is authorized. They remain documented
+for the later stage only. `max_new_tokens=1` deliberately limits each generation
+to one tree round; it is not a latency result.
 
 ```bash
 run_mechanism () {

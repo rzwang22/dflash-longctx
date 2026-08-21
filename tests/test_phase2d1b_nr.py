@@ -110,12 +110,27 @@ def _write_subrun(
     return_code: int = 0,
     tree_tail: int = 50,
     source_matches: bool = True,
+    downstream_gold_skip_reason: str | None = None,
+    failure_class_override: str | None = None,
+    hard_failure_reason_override: str | None = None,
 ) -> None:
     root.mkdir()
     reference = [10, 20, 30, 40]
     tree = reference if actual_equal else [10, 20, 30, tree_tail]
     target = list(reference)
     manifest_status = "ok" if return_code == 0 else "failed"
+    reported_failure_class = (
+        failure_class_override
+        if failure_class_override is not None
+        else "numerical_backend_decision_divergence"
+        if not actual_equal
+        else "numerical_backend_variation"
+        if replay_mismatch
+        else None
+    )
+    hard_failure_reason = hard_failure_reason_override or (
+        f"gold_semantic_failure:{reported_failure_class}" if replay_mismatch else None
+    )
     _write_json(
         root / "manifest.json",
         {
@@ -139,18 +154,34 @@ def _write_subrun(
         root / "correctness-summary.json",
         {
             "gold_status": "fail_semantic" if replay_mismatch else "pass_exact",
-            "failure_class": (
-                "numerical_backend_decision_divergence"
-                if not actual_equal
-                else "numerical_backend_variation"
-                if replay_mismatch
-                else None
+            "failure_class": reported_failure_class,
+            "uncompleted_checks": (
+                ["kv_compaction", "kv_next_step_logits"]
+                if downstream_gold_skip_reason is not None
+                else []
             ),
-            "uncompleted_checks": [],
+            "uncompleted_check_details": (
+                [
+                    {
+                        "check": check,
+                        "reason": downstream_gold_skip_reason,
+                    }
+                    for check in ("kv_compaction", "kv_next_step_logits")
+                ]
+                if downstream_gold_skip_reason is not None
+                else []
+            ),
             "actual_execution_correctness_passed": actual_equal
             and not structural_failure,
             "actual_execution_semantic_failure": not actual_equal,
             "diagnostic_numerical_variation_observed": replay_mismatch,
+            "diagnostic_numerical_variation_reasons": (
+                [hard_failure_reason] if hard_failure_reason is not None else []
+            ),
+            "replay_semantic_variation_with_actual_consequence": not actual_equal,
+            "hard_correctness_failure_reasons": (
+                [hard_failure_reason] if hard_failure_reason is not None else []
+            ),
         },
     )
     pairwise = [
@@ -182,8 +213,11 @@ def _write_subrun(
                     "classification": {
                         "failure_class": None
                         if actual_equal
-                        else "numerical_backend_decision_divergence",
-                        "evidence_complete": True,
+                        else reported_failure_class,
+                        "evidence_complete": not bool(
+                            reported_failure_class
+                            and reported_failure_class.startswith("unresolved_")
+                        ),
                     },
                     "uncompleted_checks": [],
                 }
@@ -274,6 +308,10 @@ def _write_subrun(
                 "top8_ordered_equal": not (replay_mismatch and mode == "native"),
                 "max_abs_error": 1.0 if replay_mismatch else 0.0,
                 "mean_abs_error": 0.1 if replay_mismatch else 0.0,
+                "thresholds": {"max_abs_error": 0.5},
+                "backend": "configured_sdpa",
+                "dtype": "bfloat16",
+                "provenance": {"execution": "diagnostic_replay"},
             }
         )
     _write_jsonl(root / "gold-logit-checks.jsonl", gold)
@@ -282,10 +320,29 @@ def _write_subrun(
         [
             {
                 "round_index": 1,
-                "status": "fail_structural" if structural_failure else "pass_exact",
-                "structural_status": "fail" if structural_failure else "pass",
-                "semantic_status": "pass",
-                "numerical_status": "within_strict_thresholds",
+                "availability": "unavailable"
+                if downstream_gold_skip_reason is not None
+                else "available",
+                "status": "not_run"
+                if downstream_gold_skip_reason is not None
+                else "fail_structural"
+                if structural_failure
+                else "pass_exact",
+                "execution_status": "not_run_due_to_prior_failure"
+                if downstream_gold_skip_reason is not None
+                else "completed",
+                "structural_status": "not_run"
+                if downstream_gold_skip_reason is not None
+                else "fail"
+                if structural_failure
+                else "pass",
+                "semantic_status": "not_run"
+                if downstream_gold_skip_reason is not None
+                else "pass",
+                "numerical_status": "not_run"
+                if downstream_gold_skip_reason is not None
+                else "within_strict_thresholds",
+                "reason": downstream_gold_skip_reason,
             }
         ],
     )
@@ -426,6 +483,7 @@ class Phase2D1BNRTests(unittest.TestCase):
                 return_code=1,
             )
             result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        _validate(result, "phase2d1bnr-subrun.schema.json")
         self.assertEqual(
             result["outcome_category"],
             "actual_numerical_decision_divergence",
@@ -439,6 +497,46 @@ class Phase2D1BNRTests(unittest.TestCase):
         )
         event = build_divergence_event(result)
         self.assertEqual(event["minimum_verifier_margin"], 0.0)
+
+    def test_actual_unresolved_semantic_divergence_is_retained(self) -> None:
+        identity = _identity(experiment="cohort", mode="global_fixed", budget=32)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(
+                root,
+                identity,
+                actual_equal=False,
+                replay_mismatch=True,
+                return_code=1,
+                failure_class_override="unresolved_layerwise_output_divergence",
+                hard_failure_reason_override=(
+                    "gold_semantic_failure:gold_output_ids_mismatch"
+                ),
+            )
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        _validate(result, "phase2d1bnr-subrun.schema.json")
+        self.assertEqual(
+            result["outcome_category"], "actual_unresolved_semantic_divergence"
+        )
+        self.assertFalse(result["actual_reference_tree_output_ids_equal"])
+        self.assertTrue(result["actual_divergence_evidence_sufficient"])
+        self.assertEqual(
+            result["divergence_failure_class"],
+            "unresolved_layerwise_output_divergence",
+        )
+        self.assertEqual(
+            result["unresolved_attribution_reason"],
+            "unresolved_layerwise_output_divergence",
+        )
+        self.assertEqual(result["gold_status"], "fail_semantic")
+        self.assertEqual(
+            result["hard_correctness_failure_reasons"],
+            ["gold_semantic_failure:gold_output_ids_mismatch"],
+        )
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+        self.assertTrue(result["subprocess_nonzero_retained_as_diagnostic"])
+        event = build_divergence_event(result)
+        self.assertEqual(event["first_divergent_generated_offset"], 3)
 
     def test_correctness_exit_does_not_hide_source_provenance_mismatch(self) -> None:
         identity = _identity()
@@ -456,16 +554,91 @@ class Phase2D1BNRTests(unittest.TestCase):
         self.assertEqual(result["outcome_category"], "infrastructure_failure")
         self.assertFalse(result["source_provenance_validation_passed"])
 
-    def test_top1_exact_and_replay_only_variation_pass(self) -> None:
+    def test_confirmed_divergence_retains_causally_skipped_downstream_gold(
+        self,
+    ) -> None:
+        identity = _identity()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(
+                root,
+                identity,
+                actual_equal=False,
+                replay_mismatch=True,
+                return_code=1,
+                downstream_gold_skip_reason="prior_logits_gold_failure",
+            )
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        _validate(result, "phase2d1bnr-subrun.schema.json")
+        self.assertEqual(
+            result["outcome_category"],
+            "actual_numerical_decision_divergence",
+        )
+        self.assertTrue(result["gold_evidence_complete"])
+        self.assertTrue(result["subprocess_nonzero_retained_as_diagnostic"])
+        self.assertTrue(
+            result["downstream_gold_checks_skipped_after_confirmed_divergence"]
+        )
+        self.assertEqual(
+            result["downstream_gold_skipped_checks"],
+            ["kv_compaction", "kv_next_step_logits"],
+        )
+        self.assertEqual(
+            result["downstream_gold_skip_reasons"],
+            ["prior_logits_gold_failure"],
+        )
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+
+    def test_unknown_gold_skip_keeps_confirmed_divergence_unresolved(self) -> None:
+        identity = _identity()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(
+                root,
+                identity,
+                actual_equal=False,
+                replay_mismatch=True,
+                return_code=1,
+                downstream_gold_skip_reason="unknown_failure",
+            )
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        self.assertEqual(
+            result["outcome_category"], "actual_unresolved_semantic_divergence"
+        )
+        self.assertFalse(
+            result["downstream_gold_checks_skipped_after_confirmed_divergence"]
+        )
+        self.assertFalse(result["gold_evidence_complete"])
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+        self.assertEqual(
+            result["unresolved_attribution_reason"],
+            "causal_attribution_incomplete",
+        )
+
+    def test_output_exact_replay_only_variation_continues(self) -> None:
         identity = _identity(mode="top1_packed_tree")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "subrun"
             _write_subrun(root, identity, replay_mismatch=True)
             result = classify_subrun_artifacts(root, identity=identity, return_code=0)
-        self.assertEqual(result["outcome_category"], "pass_actual_exact")
+        self.assertEqual(
+            result["outcome_category"], "diagnostic_only_numerical_variation"
+        )
+        self.assertFalse(result["actual_execution_semantic_failure"])
+        self.assertTrue(result["replay_only_variation_observed"])
+        self.assertTrue(result["diagnostic_classification_evidence_sufficient"])
+        self.assertTrue(result["diagnostic_numerical_variation_observed"])
         self.assertTrue(result["replay_semantic_mismatch_observed"])
+        self.assertEqual(
+            result["_replay_rows"][0]["thresholds"], {"max_abs_error": 0.5}
+        )
+        self.assertEqual(result["_replay_rows"][0]["backend"], "configured_sdpa")
+        self.assertEqual(
+            result["diagnostic_numerical_variation_reasons"],
+            ["gold_semantic_failure:numerical_backend_variation"],
+        )
 
-    def test_nonzero_replay_only_exit_is_infrastructure_failure(self) -> None:
+    def test_nonzero_replay_only_exit_is_retained_and_continues(self) -> None:
         identity = _identity(mode="top1_packed_tree")
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "subrun"
@@ -474,11 +647,161 @@ class Phase2D1BNRTests(unittest.TestCase):
                 identity,
                 replay_mismatch=True,
                 return_code=1,
+                downstream_gold_skip_reason="prior_logits_gold_failure",
             )
             result = classify_subrun_artifacts(root, identity=identity, return_code=1)
-        self.assertEqual(result["outcome_category"], "infrastructure_failure")
+        self.assertEqual(
+            result["outcome_category"], "diagnostic_only_numerical_variation"
+        )
+        self.assertTrue(result["subprocess_nonzero_retained_as_diagnostic"])
+        self.assertTrue(
+            result["downstream_gold_checks_skipped_after_confirmed_replay_variation"]
+        )
 
-    def test_incomplete_gold_evidence_is_not_numerical_divergence(self) -> None:
+    def test_real_shape_exact_output_gold_semantic_variation_continues(self) -> None:
+        identity = _identity(experiment="cohort", mode="global_fixed", budget=32)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(
+                root,
+                identity,
+                replay_mismatch=True,
+                return_code=1,
+                downstream_gold_skip_reason="prior_logits_gold_failure",
+            )
+            gold_logits = [
+                json.loads(line)
+                for line in (root / "gold-logit-checks.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if json.loads(line)["comparison_mode"] == "native"
+            ]
+            _write_jsonl(root / "gold-logit-checks.jsonl", gold_logits)
+            _write_jsonl(root / "tree-traversal-checks.jsonl", [])
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        _validate(result, "phase2d1bnr-subrun.schema.json")
+        self.assertEqual(
+            result["outcome_category"], "diagnostic_only_numerical_variation"
+        )
+        self.assertTrue(result["actual_reference_tree_output_ids_equal"])
+        self.assertTrue(result["replay_only_variation_observed"])
+        self.assertTrue(result["replay_structural_evidence_passed"])
+        self.assertTrue(result["diagnostic_classification_evidence_sufficient"])
+        self.assertFalse(result["gold_evidence_complete"])
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+        self.assertTrue(result["subprocess_nonzero_retained_as_diagnostic"])
+
+    def test_exact_output_unresolved_numerical_variation_continues(self) -> None:
+        identity = _identity(
+            experiment="cohort", mode="top1_packed_tree", budget=16, context=16384
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(
+                root,
+                identity,
+                replay_mismatch=True,
+                return_code=1,
+                failure_class_override="unresolved_numerical_variation",
+                hard_failure_reason_override=(
+                    "gold_semantic_failure:unresolved_numerical_variation"
+                ),
+            )
+            _write_jsonl(root / "gold-logit-checks.jsonl", [])
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        _validate(result, "phase2d1bnr-subrun.schema.json")
+        self.assertEqual(
+            result["outcome_category"], "diagnostic_only_numerical_variation"
+        )
+        self.assertTrue(result["actual_reference_tree_output_ids_equal"])
+        self.assertTrue(result["gold_or_replay_variation_observed"])
+        self.assertTrue(result["known_numerical_variation_evidence"])
+        self.assertTrue(result["replay_only_variation_observed"])
+        self.assertTrue(result["replay_structural_evidence_passed"])
+        self.assertTrue(result["diagnostic_classification_evidence_sufficient"])
+        self.assertFalse(result["gold_evidence_complete"])
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+        self.assertEqual(
+            result["hard_correctness_failure_reasons"],
+            ["gold_semantic_failure:unresolved_numerical_variation"],
+        )
+
+    def test_exact_output_with_missing_replay_evidence_remains_incomplete(self) -> None:
+        identity = _identity()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(root, identity, replay_mismatch=True, return_code=1)
+            rows = [
+                json.loads(line)
+                for line in (root / "gold-logit-checks.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if json.loads(line)["comparison_mode"] != "native"
+            ]
+            _write_jsonl(root / "gold-logit-checks.jsonl", rows)
+            correctness = json.loads(
+                (root / "correctness-summary.json").read_text(encoding="utf-8")
+            )
+            correctness.update(
+                {
+                    "gold_status": "not_run",
+                    "failure_class": None,
+                    "diagnostic_numerical_variation_observed": False,
+                    "diagnostic_numerical_variation_reasons": [],
+                    "hard_correctness_failure_reasons": [],
+                }
+            )
+            _write_json(root / "correctness-summary.json", correctness)
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
+
+    def test_exact_output_with_unknown_failure_reason_remains_incomplete(self) -> None:
+        identity = _identity()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(
+                root,
+                identity,
+                replay_mismatch=True,
+                return_code=1,
+                failure_class_override="unknown_gold_failure",
+            )
+            rows = [
+                json.loads(line)
+                for line in (root / "gold-logit-checks.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            for row in rows:
+                row["numerical_status"] = "within_strict_thresholds"
+                row["top8_ordered_equal"] = True
+            _write_jsonl(root / "gold-logit-checks.jsonl", rows)
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
+
+    def test_missing_actual_output_relation_remains_incomplete(self) -> None:
+        identity = _identity()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "subrun"
+            _write_subrun(root, identity, replay_mismatch=True, return_code=1)
+            artifact = json.loads(
+                (root / "output-divergence.json").read_text(encoding="utf-8")
+            )
+            record = artifact["records"][0]
+            pair = next(
+                row
+                for row in record["pairwise_comparisons"]
+                if row["left_name"] == "original_dflash_reference"
+            )
+            pair.pop("output_ids_equal")
+            _write_json(root / "output-divergence.json", artifact)
+            result = classify_subrun_artifacts(root, identity=identity, return_code=1)
+        self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
+        self.assertFalse(result["actual_output_relation_reliable"])
+
+    def test_confirmed_divergence_with_incomplete_attribution_is_unresolved(
+        self,
+    ) -> None:
         identity = _identity()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "subrun"
@@ -498,7 +821,15 @@ class Phase2D1BNRTests(unittest.TestCase):
             ]
             _write_jsonl(root / "gold-logit-checks.jsonl", rows)
             result = classify_subrun_artifacts(root, identity=identity, return_code=1)
-        self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
+        self.assertEqual(
+            result["outcome_category"], "actual_unresolved_semantic_divergence"
+        )
+        self.assertFalse(result["gold_evidence_complete"])
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+        self.assertEqual(
+            result["unresolved_attribution_reason"],
+            "causal_attribution_incomplete",
+        )
 
     def test_structural_and_infrastructure_failures_are_distinct(self) -> None:
         identity = _identity()
@@ -740,15 +1071,54 @@ class Phase2D1BNRTests(unittest.TestCase):
             raw.mkdir(parents=True)
             observations = []
             rounds = []
+            divergence_events = []
+            replay_events = []
             for mode in ("top1_packed_tree", "global_fixed"):
                 identity = _identity(mode=mode)
                 subrun = raw / mode
-                _write_subrun(subrun, identity)
+                divergent = mode == "global_fixed"
+                replay_only = mode == "top1_packed_tree"
+                _write_subrun(
+                    subrun,
+                    identity,
+                    actual_equal=not divergent,
+                    replay_mismatch=divergent or replay_only,
+                    return_code=1,
+                    downstream_gold_skip_reason=(
+                        "prior_logits_gold_failure"
+                        if divergent or replay_only
+                        else None
+                    ),
+                    failure_class_override=(
+                        "unresolved_layerwise_output_divergence" if divergent else None
+                    ),
+                    hard_failure_reason_override=(
+                        "gold_semantic_failure:gold_output_ids_mismatch"
+                        if divergent
+                        else None
+                    ),
+                )
+                if replay_only:
+                    gold_logits = [
+                        json.loads(line)
+                        for line in (subrun / "gold-logit-checks.jsonl")
+                        .read_text(encoding="utf-8")
+                        .splitlines()
+                        if json.loads(line)["comparison_mode"] == "native"
+                    ]
+                    _write_jsonl(subrun / "gold-logit-checks.jsonl", gold_logits)
+                    _write_jsonl(subrun / "tree-traversal-checks.jsonl", [])
                 observation = classify_subrun_artifacts(
-                    subrun, identity=identity, return_code=0
+                    subrun,
+                    identity=identity,
+                    return_code=1,
                 )
                 observations.append(observation)
                 rounds.extend(extract_round_margin_events(observation))
+                event = build_divergence_event(observation)
+                if event is not None:
+                    divergence_events.append(event)
+                replay_events.extend(observation["_replay_rows"])
             manifest = {
                 "schema_version": "1.0",
                 "phase": "2D.1B-NR",
@@ -808,7 +1178,10 @@ class Phase2D1BNRTests(unittest.TestCase):
                 "kv_compaction_modified": False,
                 "correctness_gate_modified": False,
                 "numerical_thresholds_modified": False,
-                "materialization_required": False,
+                "diagnostic_gold_numerical_summary_modified": True,
+                "materialized_diagnostic_custom_code_modified": True,
+                "online_execution_source_otherwise_unchanged": True,
+                "materialization_required": True,
                 "formal_timing_claims_made": False,
                 "no_performance_claims": True,
                 "error": None,
@@ -817,8 +1190,8 @@ class Phase2D1BNRTests(unittest.TestCase):
                 root,
                 manifest,
                 observations,
-                [],
-                [],
+                divergence_events,
+                replay_events,
                 rounds,
                 (0.0, 0.1),
             )

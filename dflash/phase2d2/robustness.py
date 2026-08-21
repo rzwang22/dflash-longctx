@@ -8,6 +8,7 @@ import math
 from typing import Any
 
 CALIBRATION_SCHEMA_VERSION = "phase2d2a-nr-calibration-v1"
+FROZEN_DECISION_MARGIN_THRESHOLD = 0.25
 PROVENANCE_FIELDS = (
     "gpu_name",
     "compute_capability",
@@ -17,6 +18,19 @@ PROVENANCE_FIELDS = (
     "torch_version",
     "transformers_version",
     "target_attention_implementation",
+)
+SOURCE_ARTIFACT_FIELDS = (
+    "nr_directory",
+    "nr_manifest_sha256",
+    "margin_trigger_sweep_sha256",
+    "nr_acceptance_checker_result",
+    "qualifying_rows",
+    "cohort_overall_strata",
+    "observed_actual_divergence_outcome_counts",
+    "observed_actual_divergence_round_count",
+    "observed_divergence_rounds_caught_by_trigger",
+    "observed_false_negative_count",
+    "minimum_preregistered_zero_false_negative_threshold",
 )
 
 
@@ -67,6 +81,33 @@ def validate_nr_calibration(
     threshold = float(calibration["decision_margin_threshold"])
     if not math.isfinite(threshold) or threshold < 0:
         raise ValueError("calibrated decision margin must be finite and non-negative")
+    if threshold != FROZEN_DECISION_MARGIN_THRESHOLD:
+        raise ValueError("Phase 2D.2A requires the frozen NR threshold 0.25")
+    source_artifacts = calibration["source_artifacts"]
+    missing_source = sorted(set(SOURCE_ARTIFACT_FIELDS) - set(source_artifacts))
+    if missing_source:
+        raise ValueError(
+            f"NR calibration source artifacts lack required fields: {missing_source}"
+        )
+    checker = source_artifacts["nr_acceptance_checker_result"]
+    if checker.get("status") != "pass":
+        raise ValueError("NR calibration source acceptance checker did not pass")
+    if int(source_artifacts["observed_actual_divergence_round_count"]) != 4:
+        raise ValueError("NR calibration must contain four observed divergences")
+    if int(source_artifacts["observed_divergence_rounds_caught_by_trigger"]) != 4:
+        raise ValueError("NR guard did not catch all four observed divergences")
+    if int(source_artifacts["observed_false_negative_count"]) != 0:
+        raise ValueError("NR calibration contains an observed false negative")
+    if (
+        float(source_artifacts["minimum_preregistered_zero_false_negative_threshold"])
+        != FROZEN_DECISION_MARGIN_THRESHOLD
+    ):
+        raise ValueError("NR calibration did not freeze the minimum zero-FN threshold")
+    if source_artifacts["observed_actual_divergence_outcome_counts"] != {
+        "actual_numerical_decision_divergence": 1,
+        "actual_unresolved_semantic_divergence": 3,
+    }:
+        raise ValueError("NR calibration actual-divergence taxonomy changed")
     expected_hash = calibration_sha256(calibration)
     if calibration["calibration_sha256"] != expected_hash:
         raise ValueError("NR calibration SHA-256 mismatch")
