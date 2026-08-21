@@ -24,6 +24,67 @@ DEFAULT_GOLD_THRESHOLDS = {
 }
 
 
+def exact_tensor_quantile(
+    tensor: Any,
+    quantile: float,
+    *,
+    native_max_numel: int = 2**24,
+    _native_quantile: Any = None,
+) -> dict[str, Any]:
+    """Return an exact linear quantile with a large-tensor CPU fallback.
+
+    PyTorch's native quantile implementation rejects tensors above its
+    indexing limit. Gold diagnostics must not sample because p99 participates
+    in threshold classification, so the fallback evaluates the two exact
+    order statistics required by PyTorch's default linear interpolation.
+
+    ``_native_quantile`` is an injection seam for framework-free unit tests;
+    production callers always use the default ``torch.quantile`` backend.
+    """
+
+    value_count = int(tensor.numel())
+    if value_count == 0:
+        raise ValueError("cannot compute a quantile over an empty tensor")
+    if not 0.0 <= quantile <= 1.0:
+        raise ValueError("quantile must be in [0, 1]")
+    if native_max_numel < 0:
+        raise ValueError("native_max_numel must be non-negative")
+
+    input_dtype = str(tensor.dtype).removeprefix("torch.")
+    input_device = str(tensor.device)
+    fallback_used = value_count > native_max_numel
+    if not fallback_used:
+        if _native_quantile is None:
+            import torch
+
+            _native_quantile = torch.quantile
+        result = _native_quantile(tensor, quantile)
+        backend = "torch.quantile"
+    else:
+        cpu_values = tensor.detach().reshape(-1).to(device="cpu")
+        rank = float(quantile) * (value_count - 1)
+        lower_index = math.floor(rank)
+        upper_index = math.ceil(rank)
+        lower_value = cpu_values.kthvalue(lower_index + 1).values
+        if lower_index == upper_index:
+            result = lower_value
+        else:
+            upper_value = cpu_values.kthvalue(upper_index + 1).values
+            result = lower_value + (upper_value - lower_value) * (rank - lower_index)
+        backend = "cpu_kthvalue_linear_interpolation"
+
+    return {
+        "value": float(result.item()),
+        "quantile_backend": backend,
+        "quantile_input_numel": value_count,
+        "quantile_input_dtype": input_dtype,
+        "quantile_input_device": input_device,
+        "quantile_probability": float(quantile),
+        "quantile_interpolation": "linear",
+        "large_tensor_quantile_fallback_used": fallback_used,
+    }
+
+
 def validate_gold_thresholds(thresholds: dict[str, float]) -> dict[str, float]:
     """Return a named, finite threshold set without silently changing values."""
 

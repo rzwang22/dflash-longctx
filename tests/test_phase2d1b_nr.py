@@ -29,7 +29,9 @@ from dflash.phase2d1bnr.parse import (
 )
 from experiments.phase2d1b_nr_numerical_robustness import (
     ARTIFACTS,
+    _diagnostic_protected_change_is_allowed,
     _persist_results,
+    _protected_changes,
     parse_args,
 )
 from scripts.check_phase2d1b_nr_acceptance import check_output
@@ -395,6 +397,50 @@ def _write_subrun(
 
 
 class Phase2D1BNRTests(unittest.TestCase):
+    def test_protected_audit_allows_only_gold_summary_symbols(self) -> None:
+        gold_path = "dflash/phase2c/gold.py"
+        gold_baseline = "def existing():\n    return 1\n"
+        gold_allowed = (
+            gold_baseline + "\ndef exact_tensor_quantile(value):\n    return value\n"
+        )
+        self.assertTrue(
+            _diagnostic_protected_change_is_allowed(
+                gold_path, gold_baseline, gold_allowed
+            )
+        )
+        self.assertFalse(
+            _diagnostic_protected_change_is_allowed(
+                gold_path,
+                gold_baseline,
+                gold_allowed.replace("return 1", "return 2"),
+            )
+        )
+
+        dflash_path = "third_party/qwen3_8b_dflash_b16/instrumented/dflash.py"
+        dflash_baseline = (
+            "class DFlashDraftModel:\n"
+            "    def _phase2c_tensor_error_stats(self):\n"
+            "        return 1\n"
+            "    def online_generation(self):\n"
+            "        return 2\n"
+        )
+        dflash_allowed = dflash_baseline.replace("return 1", "return 3", 1)
+        self.assertTrue(
+            _diagnostic_protected_change_is_allowed(
+                dflash_path, dflash_baseline, dflash_allowed
+            )
+        )
+        self.assertFalse(
+            _diagnostic_protected_change_is_allowed(
+                dflash_path,
+                dflash_baseline,
+                dflash_allowed.replace("return 2", "return 4"),
+            )
+        )
+
+    def test_repository_protected_audit_accepts_diagnostic_only_patch(self) -> None:
+        self.assertEqual(_protected_changes("HEAD"), [])
+
     def test_cli_defaults_and_overrides(self) -> None:
         args = parse_args(
             [
@@ -589,7 +635,7 @@ class Phase2D1BNRTests(unittest.TestCase):
         )
         self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
 
-    def test_unknown_downstream_gold_skip_reason_remains_incomplete(self) -> None:
+    def test_unknown_gold_skip_keeps_confirmed_divergence_unresolved(self) -> None:
         identity = _identity()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "subrun"
@@ -602,11 +648,18 @@ class Phase2D1BNRTests(unittest.TestCase):
                 downstream_gold_skip_reason="unknown_failure",
             )
             result = classify_subrun_artifacts(root, identity=identity, return_code=1)
-        self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
+        self.assertEqual(
+            result["outcome_category"], "actual_unresolved_semantic_divergence"
+        )
         self.assertFalse(
             result["downstream_gold_checks_skipped_after_confirmed_divergence"]
         )
-        self.assertTrue(result["genuinely_incomplete_correctness_evidence"])
+        self.assertFalse(result["gold_evidence_complete"])
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+        self.assertEqual(
+            result["unresolved_attribution_reason"],
+            "causal_attribution_incomplete",
+        )
 
     def test_output_exact_replay_only_variation_continues(self) -> None:
         identity = _identity(mode="top1_packed_tree")
@@ -792,7 +845,9 @@ class Phase2D1BNRTests(unittest.TestCase):
         self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
         self.assertFalse(result["actual_output_relation_reliable"])
 
-    def test_incomplete_gold_evidence_is_not_numerical_divergence(self) -> None:
+    def test_confirmed_divergence_with_incomplete_attribution_is_unresolved(
+        self,
+    ) -> None:
         identity = _identity()
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "subrun"
@@ -812,8 +867,15 @@ class Phase2D1BNRTests(unittest.TestCase):
             ]
             _write_jsonl(root / "gold-logit-checks.jsonl", rows)
             result = classify_subrun_artifacts(root, identity=identity, return_code=1)
-        self.assertEqual(result["outcome_category"], "incomplete_correctness_evidence")
-        self.assertTrue(result["genuinely_incomplete_correctness_evidence"])
+        self.assertEqual(
+            result["outcome_category"], "actual_unresolved_semantic_divergence"
+        )
+        self.assertFalse(result["gold_evidence_complete"])
+        self.assertFalse(result["genuinely_incomplete_correctness_evidence"])
+        self.assertEqual(
+            result["unresolved_attribution_reason"],
+            "causal_attribution_incomplete",
+        )
 
     def test_structural_and_infrastructure_failures_are_distinct(self) -> None:
         identity = _identity()
@@ -1162,7 +1224,10 @@ class Phase2D1BNRTests(unittest.TestCase):
                 "kv_compaction_modified": False,
                 "correctness_gate_modified": False,
                 "numerical_thresholds_modified": False,
-                "materialization_required": False,
+                "diagnostic_gold_numerical_summary_modified": True,
+                "materialized_diagnostic_custom_code_modified": True,
+                "online_execution_source_otherwise_unchanged": True,
+                "materialization_required": True,
                 "formal_timing_claims_made": False,
                 "no_performance_claims": True,
                 "error": None,

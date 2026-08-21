@@ -405,7 +405,7 @@ def check_output(output_dir: Path) -> dict[str, Any]:
         ),
         "actual_divergence_event_count": len(divergences),
         "decision": decision["decision"],
-        "materialization_required": False,
+        "materialization_required": manifest["materialization_required"],
     }
 
 

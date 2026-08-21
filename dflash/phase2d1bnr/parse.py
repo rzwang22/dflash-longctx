@@ -711,6 +711,14 @@ def classify_subrun_artifacts(
         provenance,
         expected_correctness_exit=process_is_expected_correctness_exit,
     )
+    confirmed_actual_divergence = bool(
+        actual_divergence_evidence_sufficient
+        and reference_stable
+        and not structural_failure
+        and source_provenance_valid
+    )
+    if confirmed_actual_divergence and unresolved_attribution_reason is None:
+        unresolved_attribution_reason = "causal_attribution_incomplete"
 
     if manifest.get("status") == "error":
         outcome = "infrastructure_failure"
@@ -727,7 +735,7 @@ def classify_subrun_artifacts(
             and _numerical_attribution(str(failure_class))
         ):
             outcome = "actual_numerical_decision_divergence"
-        elif unresolved_attribution_reason is not None:
+        elif confirmed_actual_divergence:
             outcome = "actual_unresolved_semantic_divergence"
         else:
             outcome = "incomplete_correctness_evidence"

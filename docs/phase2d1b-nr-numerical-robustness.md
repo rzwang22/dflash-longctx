@@ -61,10 +61,14 @@ the current stage and leave the NR root explicitly incomplete.
 `actual_unresolved_semantic_divergence` means stable, hashed reference/tree
 token lists establish an actual mismatch and its first divergent offset, while
 the available controls do not establish a numerical verifier attribution. The
-raw failure class is retained as `unresolved_attribution_reason`; this outcome
-remains diagnostic study data and does not abort the cohort. Missing output
-relations, missing first-divergence evidence, and unknown failure classes remain
-`incomplete_correctness_evidence`.
+raw failure class remains in `divergence_failure_class`; a known unresolved
+class is retained as `unresolved_attribution_reason`, otherwise the reason is
+`causal_attribution_incomplete`. This outcome remains diagnostic study data and
+does not abort the cohort. `incomplete_correctness_evidence` is reserved for an
+unreliable actual output relation, unstable reference, missing output
+IDs/hashes/first-divergence position, invalid structural evidence, or invalid
+source/experiment provenance. Missing causal attribution alone does not erase
+an already reliable actual semantic divergence.
 
 `diagnostic_only_numerical_variation` means the actual Original-DFlash and tree
 outputs remain token exact while a replay/Gold comparison records semantic or
@@ -93,11 +97,37 @@ divergence, and traversal/structural checks pass through that round. The NR
 observation preserves the skipped checks and reasons in
 `downstream_gold_skipped_checks` and `downstream_gold_skip_reasons`. Unknown
 reasons, unrelated skipped checks, absent comparison modes, or incomplete
-traversal remain `incomplete_correctness_evidence` and stop the study.
+traversal do not qualify for the causal Gold-completeness exemption. When the
+actual divergence is nevertheless independently reliable, it remains
+`actual_unresolved_semantic_divergence`; when the actual relation itself is not
+reliable, it remains `incomplete_correctness_evidence`.
 The native/same-mask/math and traversal-through-variation requirements remain
 the stricter test for declaring the Gold evidence itself complete. They are not
 used to mislabel otherwise sufficient output-exact diagnostic evidence as
 genuinely incomplete.
+
+## Exact large-tensor Gold quantiles
+
+Gold KV compares every target layer's compacted and dense-reference K/V tensors.
+For Qwen3-8B, each flattened K or V error tensor has approximately
+`1 × 8 × context_length × 128` FP32 elements on CUDA. At 16K this reaches
+`2^24` elements, and later committed prefixes exceed PyTorch's native quantile
+indexing limit. The diagnostic helper keeps `torch.quantile` for tensors at or
+below that limit. Above it, it copies the complete error tensor to CPU and uses
+the exact lower and upper kth order statistics with PyTorch's default linear
+interpolation. It never samples or approximates p99, and it does not change the
+existing max/mean/p99 metrics or thresholds. Gold diagnostics remain outside
+formal timing.
+
+Each affected numerical summary records `quantile_backend`,
+`quantile_input_numel`, `quantile_input_dtype`, `quantile_input_device`, and
+`large_tensor_quantile_fallback_used`, together with the `0.99` probability and
+`linear` interpolation convention. The implementation lives in the
+materialized `phase2c_gold.py` dependency and is called only by the Gold/layer
+diagnostic `_phase2c_tensor_error_stats` method. NR's protected-path audit strips
+only these two named diagnostic symbols before comparing the baseline/current
+AST; changes to online generation, tree/selector logic, verification, or KV
+compaction remain rejected.
 
 ## Artifacts
 
@@ -142,20 +172,32 @@ test -z "$(git status --porcelain)"
 source .venv/bin/activate
 
 export TARGET_MODEL_DIR=/mnt/sevenT/wrz_data/models/Qwen3-8B-b968826d
-export DRAFT_MODEL_DIR=/mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16-phase2d1b-instrumented-3339d83dc214
+export DRAFT_SOURCE_MODEL_DIR=/mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16
+export DRAFT_MODEL_DIR=/mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16-phase2d1bnr-gold-quantile-$(git rev-parse --short=12 HEAD)
 export LONGBENCH_ROOT=/mnt/sevenT/wrz_data/datasets/LongBench
 export FROZEN_SELECTOR=outputs/phase2d1b-frozen-selector/frozen-selector.json
 export CAPTURE_GOV=outputs/phase2b-capture-gov-report-matched-3
 export NR_OUT=outputs/phase2d1b-nr-numerical-robustness
 
 test -d "$TARGET_MODEL_DIR"
-test -f "$DRAFT_MODEL_DIR/materialization.json"
+test -d "$DRAFT_SOURCE_MODEL_DIR"
 test -f "$LONGBENCH_ROOT/gov_report.jsonl"
 test -f "$FROZEN_SELECTOR"
 test -d "$CAPTURE_GOV"
 ```
 
-No new materialization is required.
+A new diagnostic materialization is required because both materialized
+`dflash.py` and `phase2c_gold.py` changed. Do not overwrite
+`phase2d1b-instrumented-3339d83dc214`:
+
+```bash
+test ! -e "$DRAFT_MODEL_DIR"
+python scripts/materialize_dflash.py \
+  --source-model-path "$DRAFT_SOURCE_MODEL_DIR" \
+  --output-dir "$DRAFT_MODEL_DIR" \
+  --implementation instrumented
+test -f "$DRAFT_MODEL_DIR/materialization.json"
+```
 
 ## Gate NR-1: CPU-only sanity
 

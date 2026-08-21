@@ -18,9 +18,36 @@
     "warning": {"type": ["string", "null"]},
     "reason": {"type": ["string", "null"]},
     "provenance": {"type": "object"},
-    "layers": {"type": "array"},
+    "layers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "k": {"$ref": "#/$defs/tensorErrorStats"},
+          "v": {"$ref": "#/$defs/tensorErrorStats"}
+        }
+      }
+    },
     "next_step_layer_lengths": {"type": "array", "items": {"type": "integer"}},
     "dense_reference_layer_lengths": {"type": "array", "items": {"type": "integer"}}
+  },
+  "$defs": {
+    "tensorErrorStats": {
+      "type": "object",
+      "properties": {
+        "max_abs_error": {"type": "number", "minimum": 0},
+        "mean_abs_error": {"type": "number", "minimum": 0},
+        "p99_abs_error": {"type": "number", "minimum": 0},
+        "element_count": {"type": "integer", "minimum": 1},
+        "quantile_backend": {"type": "string", "minLength": 1},
+        "quantile_input_numel": {"type": "integer", "minimum": 1},
+        "quantile_input_dtype": {"type": "string", "minLength": 1},
+        "quantile_input_device": {"type": "string", "minLength": 1},
+        "quantile_probability": {"type": "number", "minimum": 0, "maximum": 1},
+        "quantile_interpolation": {"const": "linear"},
+        "large_tensor_quantile_fallback_used": {"type": "boolean"}
+      }
+    }
   },
   "allOf": [
     {

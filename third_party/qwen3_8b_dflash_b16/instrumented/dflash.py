@@ -696,12 +696,16 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
 
     @staticmethod
     def _phase2c_tensor_error_stats(left, right):
+        from .phase2c_gold import exact_tensor_quantile
+
         difference = (left.float() - right.float()).abs().reshape(-1)
+        p99 = exact_tensor_quantile(difference, 0.99)
         return {
             "max_abs_error": float(difference.max().item()),
             "mean_abs_error": float(difference.mean().item()),
-            "p99_abs_error": float(torch.quantile(difference, 0.99).item()),
+            "p99_abs_error": p99.pop("value"),
             "element_count": int(difference.numel()),
+            **p99,
         }
 
     def _phase2c_forward_with_layer_capture(self, target, **forward_kwargs):

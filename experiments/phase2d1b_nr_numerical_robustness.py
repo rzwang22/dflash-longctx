@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import hashlib
 import json
@@ -70,6 +71,19 @@ ARTIFACTS = (
     "subrun-index.jsonl",
     "terminal.log",
 )
+
+_ALLOWED_DIAGNOSTIC_PROTECTED_CHANGES = {
+    "dflash/phase2c/gold.py": {
+        "top_level_functions": {"exact_tensor_quantile"},
+        "class_methods": {},
+    },
+    "third_party/qwen3_8b_dflash_b16/instrumented/dflash.py": {
+        "top_level_functions": set(),
+        "class_methods": {
+            "DFlashDraftModel": {"_phase2c_tensor_error_stats"},
+        },
+    },
+}
 
 
 class TeeStream:
@@ -262,6 +276,50 @@ def _gpu_inventory() -> dict[str, Any]:
     return {"available": bool(output), "devices": output}
 
 
+def _protected_ast_without_allowed_symbols(source: str, path: str) -> str:
+    """Remove the explicitly allowed diagnostic symbols from an AST."""
+
+    allowed = _ALLOWED_DIAGNOSTIC_PROTECTED_CHANGES[path]
+    tree = ast.parse(source, filename=path)
+    top_level_functions = allowed["top_level_functions"]
+    tree.body = [
+        node
+        for node in tree.body
+        if not (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in top_level_functions
+        )
+    ]
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        allowed_methods = allowed["class_methods"].get(node.name, set())
+        node.body = [
+            child
+            for child in node.body
+            if not (
+                isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and child.name in allowed_methods
+            )
+        ]
+    return ast.dump(tree, include_attributes=False)
+
+
+def _diagnostic_protected_change_is_allowed(
+    path: str, baseline_source: str, current_source: str
+) -> bool:
+    """Allow only the named Gold numerical-summary implementation symbols."""
+
+    if path not in _ALLOWED_DIAGNOSTIC_PROTECTED_CHANGES:
+        return False
+    try:
+        baseline_ast = _protected_ast_without_allowed_symbols(baseline_source, path)
+        current_ast = _protected_ast_without_allowed_symbols(current_source, path)
+    except (SyntaxError, ValueError):
+        return False
+    return baseline_ast == current_ast
+
+
 def _protected_changes(current_sha: str) -> list[str]:
     changed = set(
         _git("diff", "--name-only", f"{BASELINE_SHA}..{current_sha}").splitlines()
@@ -275,7 +333,21 @@ def _protected_changes(current_sha: str) -> list[str]:
         "dflash/phase2d1/",
         "dflash/phase2d1b/correctness.py",
     )
-    return sorted(path for path in changed if path.startswith(forbidden))
+    protected = []
+    for path in sorted(changed):
+        if not path.startswith(forbidden):
+            continue
+        if path in _ALLOWED_DIAGNOSTIC_PROTECTED_CHANGES:
+            baseline_source = _git("show", f"{BASELINE_SHA}:{path}")
+            current_path = REPO_ROOT / path
+            if current_path.is_file() and _diagnostic_protected_change_is_allowed(
+                path,
+                baseline_source,
+                current_path.read_text(encoding="utf-8"),
+            ):
+                continue
+        protected.append(path)
+    return protected
 
 
 def _sha256_json(value: Any) -> str:
@@ -526,7 +598,10 @@ def _manifest(
         "kv_compaction_modified": False,
         "correctness_gate_modified": False,
         "numerical_thresholds_modified": False,
-        "materialization_required": False,
+        "diagnostic_gold_numerical_summary_modified": True,
+        "materialized_diagnostic_custom_code_modified": True,
+        "online_execution_source_otherwise_unchanged": True,
+        "materialization_required": True,
         "formal_timing_claims_made": False,
         "no_performance_claims": True,
         "error": None,
