@@ -28,6 +28,9 @@ REQUIRED = (
     "fixed-budget-comparison.json",
     "fixed-budget-comparison.csv",
     "robust-verification-events.jsonl",
+    "verifier-oracle-comparisons.jsonl",
+    "verifier-oracle-summary.json",
+    "tree-traversal-checks.jsonl",
     "fallback-summary.json",
     "fallback-summary.csv",
     "correctness-summary.json",
@@ -115,6 +118,121 @@ def _validate_gold_kv_shape_evidence(row: dict[str, Any]) -> None:
         raise ValueError("KV Gold structural status did not pass")
 
 
+def _same_evidence_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return all(
+        left.get(field) == right.get(field)
+        for field in (
+            "task",
+            "sample_id",
+            "nominal_prompt_length",
+            "configuration_id",
+        )
+    )
+
+
+def _causal_gold_kv_skip_evidence(
+    row: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+    samples: list[dict[str, Any]],
+    gold_logits: list[dict[str, Any]],
+    traversal: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate one exact downstream KV skip after confirmed logit evidence."""
+
+    failures = []
+    if row.get("availability") != "unavailable":
+        failures.append("availability_is_not_unavailable")
+    if row.get("status") != "not_run":
+        failures.append("status_is_not_not_run")
+    if row.get("execution_status") != "not_run_due_to_prior_failure":
+        failures.append("execution_status_is_not_prior_failure")
+    if row.get("reason") != "prior_logits_gold_failure":
+        failures.append("reason_is_not_prior_logits_gold_failure")
+    if row.get("comparison_mode") != "dense_committed_path":
+        failures.append("unavailable_check_is_not_downstream_kv_gold")
+    if manifest.get("status") != "ok" or manifest.get("error") is not None:
+        failures.append("run_has_infrastructure_or_manifest_failure")
+
+    matching_samples = [
+        sample for sample in samples if _same_evidence_identity(row, sample)
+    ]
+    if len(matching_samples) != 1:
+        failures.append("sample_correctness_evidence_is_missing_or_ambiguous")
+    else:
+        correctness = matching_samples[0].get("correctness", {})
+        required_exactness = (
+            "original_dflash_reference_output_ids_equal",
+            "formal_repeat_output_ids_equal",
+            "control_profile_output_ids_equal",
+            "control_diagnostic_output_ids_equal",
+            "actual_execution_correctness_passed",
+            "structural_checks_passed",
+            "passed",
+        )
+        failures.extend(
+            f"sample_{field}_did_not_pass"
+            for field in required_exactness
+            if correctness.get(field) is not True
+        )
+
+    matching_traversal = [
+        item
+        for item in traversal
+        if _same_evidence_identity(row, item)
+        and item.get("round_index") == row.get("round_index")
+    ]
+    if len(matching_traversal) != 1:
+        failures.append("round_traversal_evidence_is_missing_or_ambiguous")
+    else:
+        traversal_row = matching_traversal[0]
+        checks = traversal_row.get("checks", {})
+        if traversal_row.get("status") != "pass":
+            failures.append("round_traversal_status_did_not_pass")
+        for field in (
+            "structural_checks_passed",
+            "traversal_checks_passed",
+            "kv_root_transition_checks_passed",
+            "all_checks_passed",
+        ):
+            if checks.get(field) is not True:
+                failures.append(f"round_traversal_{field}_did_not_pass")
+
+    matching_logits = [
+        item
+        for item in gold_logits
+        if _same_evidence_identity(row, item)
+        and item.get("round_index") == row.get("round_index")
+    ]
+    required_modes = set(manifest.get("phase2d2", {}).get("gold_comparison_modes", []))
+    observed_modes = {item.get("comparison_mode") for item in matching_logits}
+    if not required_modes or not required_modes.issubset(observed_modes):
+        failures.append("required_gold_logit_modes_are_missing")
+    if not matching_logits:
+        failures.append("gold_logit_evidence_is_missing")
+    elif any(item.get("availability") != "available" for item in matching_logits):
+        failures.append("gold_logit_evidence_is_unavailable")
+    elif any(
+        item.get("structural_status") != "pass"
+        or bool(item.get("structural_issues"))
+        for item in matching_logits
+    ):
+        failures.append("gold_logit_structural_evidence_failed")
+    elif not any(item.get("status") == "fail_semantic" for item in matching_logits):
+        failures.append("prior_gold_logit_failure_is_not_present")
+
+    return {
+        "accepted": not failures,
+        "round_index": row.get("round_index"),
+        "reason": row.get("reason"),
+        "failures": failures,
+        "required_gold_logit_modes": sorted(required_modes),
+        "observed_gold_logit_modes": sorted(
+            value for value in observed_modes if value is not None
+        ),
+    }
+
+
 def check_output(output: Path) -> dict[str, Any]:
     missing = [name for name in REQUIRED if not (output / name).is_file()]
     if missing:
@@ -128,8 +246,13 @@ def check_output(output: Path) -> dict[str, Any]:
     robust_events = _jsonl(output / "robust-verification-events.jsonl")
     decision = _json(output / "phase2d2-decision.json")
     output_divergence = _json(output / "output-divergence.json")
+    gold_logits_path = output / "gold-logit-checks.jsonl"
+    gold_logits = _jsonl(gold_logits_path) if gold_logits_path.is_file() else []
     gold_kv_path = output / "gold-kv-checks.jsonl"
     gold_kv = _jsonl(gold_kv_path) if gold_kv_path.is_file() else []
+    traversal = _jsonl(output / "tree-traversal-checks.jsonl")
+    verifier_oracle = _jsonl(output / "verifier-oracle-comparisons.jsonl")
+    verifier_oracle_summary = _json(output / "verifier-oracle-summary.json")
     if manifest.get("status") not in {"ok", "failed", "error"}:
         raise ValueError(
             f"incomplete Phase 2D.2A manifest status: {manifest.get('status')!r}"
@@ -251,12 +374,36 @@ def check_output(output: Path) -> dict[str, Any]:
         _validate(row, "phase2d2-refined-tree-round.schema.json")
     for row in robust_events:
         _validate(row, "phase2d2-robust-verification-event.schema.json")
+    for row in verifier_oracle:
+        _validate(row, "phase2d2-verifier-oracle-comparison.schema.json")
+    _validate(
+        verifier_oracle_summary,
+        "phase2d2-verifier-oracle-summary.schema.json",
+    )
+    causal_gold_kv_skips = []
     if manifest["phase2d2"].get("gold_checks_enabled"):
         if not gold_kv:
             raise ValueError("enabled Gold checks produced no KV evidence")
+        if any(row.get("availability") != "available" for row in gold_logits):
+            raise ValueError("Gold logit evidence is unavailable")
         for row in gold_kv:
             _validate(row, "phase2c-gold-kv-check.schema.json")
-            _validate_gold_kv_shape_evidence(row)
+            if row.get("availability") == "available":
+                _validate_gold_kv_shape_evidence(row)
+                continue
+            causal = _causal_gold_kv_skip_evidence(
+                row,
+                manifest=manifest,
+                samples=samples,
+                gold_logits=gold_logits,
+                traversal=traversal,
+            )
+            if not causal["accepted"]:
+                raise ValueError(
+                    "KV Gold evidence is unavailable without a complete causal "
+                    f"downstream-skip proof: {causal['failures']}"
+                )
+            causal_gold_kv_skips.append(causal)
     required_pairs = (
         ("target_only", "original_dflash_reference"),
         ("target_only", "refined_tree"),
@@ -295,6 +442,8 @@ def check_output(output: Path) -> dict[str, Any]:
         "sample_count": len(samples),
         "round_count": len(rounds),
         "decision": decision["decision"],
+        "causal_downstream_gold_kv_skip_count": len(causal_gold_kv_skips),
+        "causal_downstream_gold_kv_skips": causal_gold_kv_skips,
     }
 
 

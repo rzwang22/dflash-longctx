@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-verifier-oracle-comparison.schema.json",
+  "title": "Phase 2D.2A diagnostic three-way verifier comparison",
+  "type": "object",
+  "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_id", "round_index", "generated_prefix_length", "semantic_prefix_token_sha256", "round_entry_state", "packed_native", "q1_replay", "fixed_shape_recheck", "pairwise", "diagnostic_isolation", "reference_support"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+    "sample_id": {"type": "string", "minLength": 1},
+    "nominal_prompt_length": {"type": "integer", "minimum": 1},
+    "round_index": {"type": "integer", "minimum": 0},
+    "generated_prefix_length": {"type": "integer", "minimum": 0},
+    "semantic_prefix_token_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "round_entry_state": {
+      "type": "object",
+      "required": ["persistent_target_kv_length", "packed_native_cache_comparable_summary", "packed_native_cache_sha256", "snapshot_cache_sha256", "q1_clone_cache_sha256", "fixed_shape_clone_cache_sha256", "all_round_entry_cache_hashes_equal", "q1_and_fixed_cloned_from_same_snapshot", "q1_and_fixed_cache_objects_distinct", "q1_and_fixed_cache_storage_independent"]
+    },
+    "packed_native": {"$ref": "#/$defs/path"},
+    "q1_replay": {"$ref": "#/$defs/path"},
+    "fixed_shape_recheck": {"$ref": "#/$defs/path"},
+    "pairwise": {
+      "type": "object",
+      "required": ["packed_native_vs_q1_replay", "packed_native_vs_fixed_shape_recheck", "q1_replay_vs_fixed_shape_recheck"],
+      "additionalProperties": {"$ref": "#/$defs/relation"}
+    },
+    "diagnostic_isolation": {
+      "type": "object",
+      "required": ["online_output_ids_unchanged", "online_packed_cache_unchanged", "draft_cache_lengths_unchanged", "target_hidden_unchanged", "diagnostic_cache_results_never_committed"],
+      "additionalProperties": {"type": "boolean"}
+    },
+    "reference_support": {
+      "type": "object",
+      "required": ["attribution_available", "attribution_unavailable_reason", "packed_native_matches_original_dflash", "q1_replay_matches_original_dflash", "fixed_shape_recheck_matches_original_dflash"],
+      "properties": {
+        "attribution_available": {"type": "boolean"},
+        "attribution_unavailable_reason": {"type": ["string", "null"]},
+        "packed_native_matches_original_dflash": {"type": ["boolean", "null"]},
+        "q1_replay_matches_original_dflash": {"type": ["boolean", "null"]},
+        "fixed_shape_recheck_matches_original_dflash": {"type": ["boolean", "null"]}
+      }
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "object",
+      "required": ["accepted_draft_token_ids", "accepted_node_indices", "accepted_draft_token_count", "next_root_token_id", "next_root_kind", "parent_top1_token_ids", "parent_top1_top2_margins", "decision_records", "query_lengths", "attention_mask_form", "position_ids", "cache_position_argument_is_explicit", "candidate_next_committed_token_ids", "decision_sha256", "candidate_next_committed_token_ids_sha256"],
+      "properties": {
+        "decision_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_next_committed_token_ids_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "relation": {
+      "type": "object",
+      "required": ["decision_equal", "first_disagreement_depth"],
+      "properties": {
+        "decision_equal": {"type": "boolean"},
+        "first_disagreement_depth": {"type": ["integer", "null"], "minimum": 0}
+      }
+    }
+  }
+}

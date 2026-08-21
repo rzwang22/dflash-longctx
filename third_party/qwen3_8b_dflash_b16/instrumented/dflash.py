@@ -459,6 +459,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         phase2d2_calibration_validated: bool = False,
         phase2d2_calibration_hash: str | None = None,
         phase2d2_shadow_replay: bool = False,
+        enable_phase2d2_verifier_oracle_diagnostics: bool = False,
     ):
         """Generate with the pinned behavior; diagnostics are strictly opt-in."""
 
@@ -542,6 +543,15 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 raise ValueError("Phase 2D.2A base Top-M must equal online draft Top-K")
             if phase2d2_calibration_validated and not phase2d2_calibration_hash:
                 raise ValueError("validated Phase 2D.2A calibration requires its hash")
+        if enable_phase2d2_verifier_oracle_diagnostics and (
+            not enable_phase2d2_refinement
+            or not return_diagnostics
+            or phase2c_profiling
+        ):
+            raise ValueError(
+                "Phase 2D.2A verifier-oracle diagnostics require an unprofiled "
+                "Phase 2D.2A diagnostics run"
+            )
         if online_tree_gold_layer_localization and not enable_online_tree_gold_checks:
             raise ValueError("gold layer localization requires gold checks")
         if enable_online_tree_divergence_diagnostics and not (
@@ -618,6 +628,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 phase2d2_config=configured_phase2d2,
                 phase2d2_calibration_hash=phase2d2_calibration_hash,
                 phase2d2_shadow_replay=phase2d2_shadow_replay,
+                enable_phase2d2_verifier_oracle_diagnostics=(
+                    enable_phase2d2_verifier_oracle_diagnostics
+                ),
             )
         if not any(
             (
@@ -2101,6 +2114,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         native_traversal,
         context_length_before,
         block_size,
+        return_decision_diagnostics=False,
     ):
         """Recheck the native-selected path with the original linear block shape."""
 
@@ -2160,6 +2174,63 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             canonical_output.hidden_states, self.target_layer_ids
         )
         target_hidden = hidden_all[:, : 1 + accepted_count, :]
+        decision_records = []
+        if return_decision_diagnostics:
+            canonical_top2 = torch.topk(
+                canonical_output.logits[0, : int(native_tokens.shape[0]) + 1].float(),
+                k=2,
+                dim=-1,
+            )
+            native_index_list = [
+                int(value) for value in native_indices.detach().cpu().tolist()
+            ]
+            for decision_depth in range(accepted_count + 1):
+                parent_index = (
+                    0
+                    if decision_depth == 0
+                    else native_index_list[decision_depth - 1]
+                )
+                selected_child = (
+                    native_index_list[decision_depth]
+                    if decision_depth < accepted_count
+                    else None
+                )
+                children = torch.nonzero(
+                    tree["parent_indices"] == parent_index, as_tuple=True
+                )[0]
+                decision_records.append(
+                    {
+                        "decision_depth": decision_depth,
+                        "parent_node_index": parent_index,
+                        "parent_token_id": int(
+                            tree["token_ids"][parent_index].item()
+                        ),
+                        "top1_token_id": int(
+                            canonical_top2.indices[decision_depth, 0].item()
+                        ),
+                        "top2_token_id": int(
+                            canonical_top2.indices[decision_depth, 1].item()
+                        ),
+                        "top1_top2_margin": float(
+                            (
+                                canonical_top2.values[decision_depth, 0]
+                                - canonical_top2.values[decision_depth, 1]
+                            ).item()
+                        ),
+                        "selected_child_node_index": selected_child,
+                        "decision_kind": (
+                            "accept_candidate"
+                            if selected_child is not None
+                            else "bonus"
+                            if int(children.numel()) == 0
+                            else "correction"
+                        ),
+                        "query_length": block_size,
+                        "attention_mask_shape": None,
+                        "explicit_attention_mask": False,
+                        "sampling": "greedy_argmax",
+                    }
+                )
         compaction = {
             "committed_cache_source": "canonical_recheck",
             "prefix_length": context_length_before,
@@ -2190,6 +2261,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "canonical_parent_argmax_token_ids": canonical_argmax[
                 : int(native_tokens.shape[0]) + 1
             ],
+            "decision_records": decision_records,
             "next_root_token_tensor": canonical_argmax[accepted_count],
             "next_root_is_bonus_tensor": torch.tensor(
                 decision["next_root_is_bonus"],
@@ -2198,6 +2270,25 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             ),
             "input_token_ids": linear_ids,
             "query_length": block_size,
+            **(
+                {
+                    "query_lengths": [block_size] * len(decision_records),
+                    "attention_mask_form": "implicit_causal_fixed_linear_block",
+                    "attention_mask_shape": None,
+                    "position_ids": [
+                        int(value)
+                        for value in positions[0].detach().cpu().tolist()
+                    ],
+                    "cache_positions": None,
+                    "cache_positions_semantic": [
+                        int(value)
+                        for value in positions[0].detach().cpu().tolist()
+                    ],
+                    "cache_position_argument_is_explicit": False,
+                }
+                if return_decision_diagnostics
+                else {}
+            ),
             "round_entry_kv_length": context_length_before,
             "effective_kv_length": context_length_before + block_size,
         }
@@ -2300,6 +2391,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     "query_length": 1,
                     "attention_mask_shape": [1, position + 1],
                     "explicit_attention_mask": True,
+                    "position_ids": [position],
+                    "cache_positions": [position],
                     "sampling": "greedy_argmax",
                 }
             )
@@ -2405,8 +2498,130 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             ),
             "query_length": 1,
             "query_lengths": [1] * len(decision_records),
+            "attention_mask_form": "explicit_all_ones_linear_prefix",
+            "attention_mask_shapes": [
+                row["attention_mask_shape"] for row in decision_records
+            ],
+            "position_ids": [
+                row["position_ids"][0] for row in decision_records
+            ],
+            "cache_positions": [
+                row["cache_positions"][0] for row in decision_records
+            ],
+            "cache_position_argument_is_explicit": True,
             "round_entry_kv_length": context_length_before,
             "effective_kv_length": expected_length,
+        }
+
+    @staticmethod
+    def _phase2d2_json_sha256(payload):
+        return hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _phase2d2_cache_storage_is_independent(left, right):
+        if len(left.layers) != len(right.layers):
+            return False
+        return all(
+            left_layer.keys.data_ptr() != right_layer.keys.data_ptr()
+            and left_layer.values.data_ptr() != right_layer.values.data_ptr()
+            for left_layer, right_layer in zip(left.layers, right.layers)
+        )
+
+    @classmethod
+    def _phase2d2_oracle_decision_view(cls, result):
+        accepted_ids = [
+            int(value)
+            for value in result["committed_tokens"][1:].detach().cpu().tolist()
+        ]
+        accepted_indices = [
+            int(value)
+            for value in result["accepted_node_indices"].detach().cpu().tolist()
+        ]
+        next_root_token_id = int(result["next_root_token_id"])
+        next_root_kind = result.get("next_root_kind")
+        if next_root_kind is None:
+            next_root_kind = (
+                "bonus" if bool(result["next_root_is_bonus"]) else "correction"
+            )
+        candidate_sequence = [
+            int(result["committed_tokens"][0].item()),
+            *accepted_ids,
+            next_root_token_id,
+        ]
+        decision_signature = {
+            "accepted_node_indices": accepted_indices,
+            "next_root_token_id": next_root_token_id,
+            "next_root_kind": next_root_kind,
+            "parent_top1_token_ids": [
+                int(row["top1_token_id"]) for row in result["decision_records"]
+            ],
+        }
+        return {
+            "accepted_draft_token_ids": accepted_ids,
+            "accepted_node_indices": accepted_indices,
+            "accepted_draft_token_count": len(accepted_ids),
+            "next_root_token_id": next_root_token_id,
+            "next_root_kind": next_root_kind,
+            "parent_top1_token_ids": [
+                int(row["top1_token_id"]) for row in result["decision_records"]
+            ],
+            "parent_top1_top2_margins": [
+                float(row["top1_top2_margin"])
+                for row in result["decision_records"]
+            ],
+            "decision_records": result["decision_records"],
+            "query_lengths": list(result["query_lengths"]),
+            "attention_mask_form": result["attention_mask_form"],
+            "attention_mask_shape": result.get("attention_mask_shape"),
+            "attention_mask_shapes": result.get("attention_mask_shapes"),
+            "position_ids": list(result["position_ids"]),
+            "cache_positions": result.get("cache_positions"),
+            "cache_positions_semantic": result.get("cache_positions_semantic"),
+            "cache_position_argument_is_explicit": result[
+                "cache_position_argument_is_explicit"
+            ],
+            "candidate_next_committed_token_ids": candidate_sequence,
+            "decision_sha256": cls._phase2d2_json_sha256(decision_signature),
+            "candidate_next_committed_token_ids_sha256": (
+                cls._phase2d2_json_sha256(candidate_sequence)
+            ),
+        }
+
+    @staticmethod
+    def _phase2d2_oracle_pairwise(left, right):
+        left_records = left["decision_records"]
+        right_records = right["decision_records"]
+        first_depth = None
+        for depth in range(max(len(left_records), len(right_records))):
+            if depth >= len(left_records) or depth >= len(right_records):
+                first_depth = depth
+                break
+            left_signature = (
+                left_records[depth]["top1_token_id"],
+                left_records[depth]["selected_child_node_index"],
+                left_records[depth]["decision_kind"],
+            )
+            right_signature = (
+                right_records[depth]["top1_token_id"],
+                right_records[depth]["selected_child_node_index"],
+                right_records[depth]["decision_kind"],
+            )
+            if left_signature != right_signature:
+                first_depth = depth
+                break
+        equal = bool(
+            first_depth is None
+            and left["accepted_node_indices"] == right["accepted_node_indices"]
+            and left["next_root_token_id"] == right["next_root_token_id"]
+            and left["next_root_kind"] == right["next_root_kind"]
+        )
+        return {
+            "decision_equal": equal,
+            "first_disagreement_depth": first_depth,
         }
 
     @torch.inference_mode()
@@ -2441,6 +2656,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         phase2d2_config: dict,
         phase2d2_calibration_hash: str | None,
         phase2d2_shadow_replay: bool,
+        enable_phase2d2_verifier_oracle_diagnostics: bool,
     ):
         """Run opt-in online marginal-tree drafting with packed target verification."""
 
@@ -3004,6 +3220,66 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         if enable_gold_checks and round_index < gold_max_rounds
                         else None
                     )
+                    verifier_oracle_snapshot = None
+                    verifier_oracle_q1_cache = None
+                    verifier_oracle_fixed_cache = None
+                    verifier_oracle_round_entry_state = None
+                    verifier_oracle_comparison = None
+                    if enable_phase2d2_verifier_oracle_diagnostics:
+                        verifier_oracle_snapshot = clone_dynamic_cache(
+                            past_key_values_target
+                        )
+                        verifier_oracle_q1_cache = clone_dynamic_cache(
+                            verifier_oracle_snapshot
+                        )
+                        verifier_oracle_fixed_cache = clone_dynamic_cache(
+                            verifier_oracle_snapshot
+                        )
+                        packed_round_entry_summary = (
+                            self._phase2c_cache_comparable_summary(
+                                past_key_values_target
+                            )
+                        )
+                        snapshot_summary = self._phase2c_cache_comparable_summary(
+                            verifier_oracle_snapshot
+                        )
+                        q1_clone_summary = self._phase2c_cache_comparable_summary(
+                            verifier_oracle_q1_cache
+                        )
+                        fixed_clone_summary = self._phase2c_cache_comparable_summary(
+                            verifier_oracle_fixed_cache
+                        )
+                        packed_hash = self._phase2d2_json_sha256(
+                            packed_round_entry_summary
+                        )
+                        snapshot_hash = self._phase2d2_json_sha256(snapshot_summary)
+                        q1_hash = self._phase2d2_json_sha256(q1_clone_summary)
+                        fixed_hash = self._phase2d2_json_sha256(fixed_clone_summary)
+                        verifier_oracle_round_entry_state = {
+                            "persistent_target_kv_length": context_length_before,
+                            "packed_native_cache_comparable_summary": (
+                                packed_round_entry_summary
+                            ),
+                            "packed_native_cache_sha256": packed_hash,
+                            "snapshot_cache_sha256": snapshot_hash,
+                            "q1_clone_cache_sha256": q1_hash,
+                            "fixed_shape_clone_cache_sha256": fixed_hash,
+                            "all_round_entry_cache_hashes_equal": (
+                                len({packed_hash, snapshot_hash, q1_hash, fixed_hash})
+                                == 1
+                            ),
+                            "q1_and_fixed_cloned_from_same_snapshot": True,
+                            "q1_and_fixed_cache_objects_distinct": (
+                                verifier_oracle_q1_cache
+                                is not verifier_oracle_fixed_cache
+                            ),
+                            "q1_and_fixed_cache_storage_independent": (
+                                self._phase2d2_cache_storage_is_independent(
+                                    verifier_oracle_q1_cache,
+                                    verifier_oracle_fixed_cache,
+                                )
+                            ),
+                        }
                     snapshot_pair = None
                     stabilization_prefix_cache = None
                     phase2d2_verification_mode = phase2d2_config.get(
@@ -3100,6 +3376,236 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             for value in path_margins_tensor.detach().cpu().tolist()
                         ]
                         minimum_path_margin = min(path_margins)
+
+                    if enable_phase2d2_verifier_oracle_diagnostics:
+                        packed_decision_logits = packed_output.logits[0].index_select(
+                            0, native_path_decision_indices
+                        )
+                        packed_top2 = torch.topk(
+                            packed_decision_logits.float(), k=2, dim=-1
+                        )
+                        native_accepted_indices = [
+                            int(value)
+                            for value in traversal["accepted_node_indices"]
+                            .detach()
+                            .cpu()
+                            .tolist()
+                        ]
+                        packed_decision_records = []
+                        for decision_depth in range(
+                            len(native_accepted_indices) + 1
+                        ):
+                            parent_index = (
+                                0
+                                if decision_depth == 0
+                                else native_accepted_indices[decision_depth - 1]
+                            )
+                            selected_child = (
+                                native_accepted_indices[decision_depth]
+                                if decision_depth < len(native_accepted_indices)
+                                else None
+                            )
+                            children = torch.nonzero(
+                                tree["parent_indices"] == parent_index,
+                                as_tuple=True,
+                            )[0]
+                            packed_decision_records.append(
+                                {
+                                    "decision_depth": decision_depth,
+                                    "parent_node_index": parent_index,
+                                    "parent_token_id": int(
+                                        tree["token_ids"][parent_index].item()
+                                    ),
+                                    "top1_token_id": int(
+                                        packed_top2.indices[decision_depth, 0].item()
+                                    ),
+                                    "top2_token_id": int(
+                                        packed_top2.indices[decision_depth, 1].item()
+                                    ),
+                                    "top1_top2_margin": float(
+                                        (
+                                            packed_top2.values[decision_depth, 0]
+                                            - packed_top2.values[decision_depth, 1]
+                                        ).item()
+                                    ),
+                                    "selected_child_node_index": selected_child,
+                                    "decision_kind": (
+                                        "accept_candidate"
+                                        if selected_child is not None
+                                        else "bonus"
+                                        if int(children.numel()) == 0
+                                        else "correction"
+                                    ),
+                                    "query_length": int(
+                                        tree["actual_total_node_count"]
+                                    ),
+                                    "attention_mask_shape": [
+                                        int(value) for value in tree_mask.shape
+                                    ],
+                                    "explicit_attention_mask": True,
+                                    "position_ids": [
+                                        int(semantic_positions[0, parent_index].item())
+                                    ],
+                                    "cache_positions": [
+                                        int(cache_positions[parent_index].item())
+                                    ],
+                                    "sampling": "greedy_argmax",
+                                }
+                            )
+                        packed_oracle_result = {
+                            "committed_tokens": native_committed_tokens,
+                            "accepted_node_indices": traversal[
+                                "accepted_node_indices"
+                            ],
+                            "next_root_token_id": int(
+                                traversal["next_root_token_id"].item()
+                            ),
+                            "next_root_is_bonus": bool(
+                                traversal["next_root_is_bonus"].item()
+                            ),
+                            "next_root_kind": (
+                                "bonus"
+                                if bool(traversal["next_root_is_bonus"].item())
+                                else "correction"
+                            ),
+                            "decision_records": packed_decision_records,
+                            "query_lengths": [
+                                int(tree["actual_total_node_count"])
+                            ],
+                            "attention_mask_form": (
+                                "explicit_4d_prefix_self_and_ancestors"
+                            ),
+                            "attention_mask_shape": [
+                                int(value) for value in tree_mask.shape
+                            ],
+                            "position_ids": [
+                                int(value)
+                                for value in semantic_positions[0]
+                                .detach()
+                                .cpu()
+                                .tolist()
+                            ],
+                            "cache_positions": [
+                                int(value)
+                                for value in cache_positions.detach().cpu().tolist()
+                            ],
+                            "cache_positions_semantic": None,
+                            "cache_position_argument_is_explicit": True,
+                        }
+                        online_output_before = output_ids.detach().clone()
+                        online_packed_cache_before = self._phase2d2_json_sha256(
+                            self._phase2c_cache_comparable_summary(
+                                past_key_values_target
+                            )
+                        )
+                        draft_cache_lengths_before = dynamic_cache_lengths(
+                            past_key_values_draft
+                        )
+                        target_hidden_before = self._phase2c_tensor_comparable_summary(
+                            target_hidden
+                        )
+                        q1_oracle_result = self._phase2d2_q1_authoritative_replay(
+                            target=target,
+                            prefix_cache=verifier_oracle_q1_cache,
+                            tree=tree,
+                            native_traversal=traversal,
+                            context_length_before=context_length_before,
+                        )
+                        fixed_oracle_result = (
+                            self._phase2c_canonical_selected_path_recheck(
+                                target=target,
+                                prefix_cache=verifier_oracle_fixed_cache,
+                                tree=tree,
+                                native_traversal=traversal,
+                                context_length_before=context_length_before,
+                                block_size=block_size,
+                                return_decision_diagnostics=True,
+                            )
+                        )
+                        packed_view = self._phase2d2_oracle_decision_view(
+                            packed_oracle_result
+                        )
+                        q1_view = self._phase2d2_oracle_decision_view(
+                            q1_oracle_result
+                        )
+                        fixed_view = self._phase2d2_oracle_decision_view(
+                            fixed_oracle_result
+                        )
+                        prefix_ids = [
+                            int(value)
+                            for value in output_ids[
+                                0,
+                                : num_input_tokens + generated_prefix_before,
+                            ]
+                            .detach()
+                            .cpu()
+                            .tolist()
+                        ]
+                        verifier_oracle_comparison = {
+                            "schema_version": "1.0",
+                            "round_index": round_index,
+                            "generated_prefix_length": generated_prefix_before,
+                            "absolute_sequence_prefix_length": (
+                                num_input_tokens + generated_prefix_before
+                            ),
+                            "semantic_prefix_token_sha256": (
+                                self._phase2d2_json_sha256(prefix_ids)
+                            ),
+                            "round_entry_state": verifier_oracle_round_entry_state,
+                            "packed_native": packed_view,
+                            "q1_replay": q1_view,
+                            "fixed_shape_recheck": fixed_view,
+                            "pairwise": {
+                                "packed_native_vs_q1_replay": (
+                                    self._phase2d2_oracle_pairwise(
+                                        packed_view, q1_view
+                                    )
+                                ),
+                                "packed_native_vs_fixed_shape_recheck": (
+                                    self._phase2d2_oracle_pairwise(
+                                        packed_view, fixed_view
+                                    )
+                                ),
+                                "q1_replay_vs_fixed_shape_recheck": (
+                                    self._phase2d2_oracle_pairwise(
+                                        q1_view, fixed_view
+                                    )
+                                ),
+                            },
+                            "diagnostic_isolation": {
+                                "online_output_ids_unchanged": bool(
+                                    torch.equal(online_output_before, output_ids)
+                                ),
+                                "online_packed_cache_unchanged": (
+                                    online_packed_cache_before
+                                    == self._phase2d2_json_sha256(
+                                        self._phase2c_cache_comparable_summary(
+                                            past_key_values_target
+                                        )
+                                    )
+                                ),
+                                "draft_cache_lengths_unchanged": (
+                                    draft_cache_lengths_before
+                                    == dynamic_cache_lengths(past_key_values_draft)
+                                ),
+                                "target_hidden_unchanged": (
+                                    target_hidden_before
+                                    == self._phase2c_tensor_comparable_summary(
+                                        target_hidden
+                                    )
+                                ),
+                                "diagnostic_cache_results_never_committed": True,
+                            },
+                            "reference_support": {
+                                "attribution_available": False,
+                                "attribution_unavailable_reason": (
+                                    "original_dflash_continuation_is_joined_by_runner"
+                                ),
+                                "packed_native_matches_original_dflash": None,
+                                "q1_replay_matches_original_dflash": None,
+                                "fixed_shape_recheck_matches_original_dflash": None,
+                            },
+                        }
 
                     phase2d2_guard_triggered = False
                     phase2d2_authoritative_replay_required = False
@@ -3851,6 +4357,15 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             and canonical["first_corrected_depth"] is not None
                             else None
                         )
+                        packed_q1_decision_disagreement = (
+                            not verifier_oracle_comparison["pairwise"][
+                                "packed_native_vs_q1_replay"
+                            ]["decision_equal"]
+                            if verifier_oracle_comparison is not None
+                            else bool(
+                                canonical_available and canonical["decision_changed"]
+                            )
+                        )
                         refined_paths = {
                             tuple(row["path"])
                             for row in phase2d2_tree_spec["nodes"]
@@ -3942,6 +4457,24 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             "packed_tentative_output_token_ids": packed_tentative_tokens,
                             "replay_authoritative_output_token_ids": replay_tokens,
                             "packed_replay_decision_equal": native_canonical_equal,
+                            "packed_q1_decision_disagreement": (
+                                packed_q1_decision_disagreement
+                            ),
+                            "guard_triggered_on_packed_q1_disagreement": bool(
+                                phase2d2_guard_triggered
+                                and packed_q1_decision_disagreement
+                            ),
+                            "guard_missed_packed_q1_disagreement": bool(
+                                not phase2d2_guard_triggered
+                                and packed_q1_decision_disagreement
+                            ),
+                            "original_dflash_reference_attribution_available": False,
+                            "original_dflash_supports_packed_decision": None,
+                            "original_dflash_supports_q1_decision": None,
+                            "original_dflash_supports_fixed_shape_decision": None,
+                            "verifier_oracle_comparison": (
+                                verifier_oracle_comparison
+                            ),
                             "first_packed_replay_divergent_decision_depth": (
                                 first_divergent_decision_depth
                             ),

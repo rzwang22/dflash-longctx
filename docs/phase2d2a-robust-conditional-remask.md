@@ -75,6 +75,13 @@ verified, refined-only, and unused nodes are recorded separately.
 
 ## Robust verification
 
+Evaluation of frozen refinements is temporarily paused for verifier-oracle
+characterization. The names `always_replay` and `margin_guarded_replay` describe
+the existing online mechanisms; they do not establish that q1 replay is an
+authoritative numerical oracle. Original DFlash actual speculative execution
+remains the hard token-exact reference. Packed-versus-q1 disagreement alone is
+diagnostic and cannot be called a correctness failure or a prevented failure.
+
 - `packed_native` commits the existing packed traversal and cache. It is the risk
   and performance baseline, not an equality claim.
 - `always_replay` runs packed verification for candidate statistics, then starts
@@ -83,7 +90,7 @@ verified, refined-only, and unused nodes are recorded separately.
   accept/correct/bonus decisions. Only root plus accepted draft path remains in
   the replay cache; correction/bonus becomes the next root and is not committed
   in the current round. Packed temporary KV is discarded.
-- `margin_guarded_replay` applies the same authoritative replay when any
+- `margin_guarded_replay` applies the same q1 replay when any
   verifier-relevant packed margin is at or below a frozen threshold or is
   unavailable. The calibration must come from an independent Phase 2D.1B-NR
   cohort and exactly match GPU, compute capability, dtype, model revisions,
@@ -95,13 +102,58 @@ threshold to measure false positives/negatives. Formal latency, component
 profiling, and Gold/shadow diagnostics are separate generations. The guard is an
 empirical H100 control, not a formal numerical error bound.
 
-The Q1 replay cache is a linear authoritative commit source, not a gathered
-packed-cache source. Gold KV validation checks its storage indices as the full
+### Three-way verifier-oracle diagnostic
+
+`--enable-verifier-oracle-diagnostics` adds a diagnostics-generation-only
+comparison at every round-entry semantic prefix. It records the actual packed
+decision, q1 replay, and the original-shape fixed linear-block recheck. Q1 and
+fixed-shape execution receive independent deep clones of one cache snapshot;
+sampled cache summaries and hashes establish the shared source, while storage
+independence establishes that neither replay consumes the other's mutated
+cache. Neither diagnostic cache can be committed. The runner aligns a
+candidate committed sequence to Original DFlash using absolute generated-prefix
+length and the token-prefix hash, not raw round number.
+
+| Property | Packed native | Q1 replay | Fixed-shape recheck |
+|---|---|---|---|
+| Target query | all packed tree nodes | one token per forward | one 16-token block |
+| Mask | explicit 4D prefix/self/ancestor tree mask | explicit all-ones linear prefix | implicit causal mask |
+| Position IDs | semantic tree depths | one absolute position per forward | 16 consecutive absolute positions |
+| Cache position | explicit packed storage positions | explicit, advanced after every token | implicit argument; semantic positions recorded |
+| Cache update | one packed append then gather | sequential append per token | one 16-token append, cropped only by the existing online mode |
+| Target hidden | gathered committed packed nodes | concatenated q1 hidden steps | leading root/accepted part of the fixed block |
+| Correction/bonus | terminal packed parent logits | terminal q1 logits | corresponding fixed-block parent logits |
+| Subsequent draft state if committed | packed gathered KV/hidden | q1 KV/hidden | fixed-block cropped KV/hidden |
+
+These query shapes and cache schedules can select different SDPA kernels and
+produce different BF16 argmax results. Sequential q1 is therefore not assumed
+to be more correct. The fixed-shape recheck is a candidate diagnostic oracle,
+not a newly promoted online commit policy. Formal execution, selector,
+candidate tree, acceptance, threshold, and timing remain unchanged.
+
+The new artifacts are `verifier-oracle-comparisons.jsonl`,
+`verifier-oracle-summary.json`, and `tree-traversal-checks.jsonl`. Per-repeat,
+profile, and diagnostic output hashes expose stability without adding work to
+the timed generation. Neutral robust-event fields report packed/q1 disagreement
+and guard response; legacy positive/negative fields remain only for backward
+schema compatibility.
+
+When selected by an existing replay mode, the Q1 cache is its linear online
+commit source, not a gathered packed-cache source. Gold KV validation checks its storage indices as the full
 contiguous committed prefix and requires the packed temporary KV to be marked
 discarded. Each Gold row records non-null candidate and dense-reference
 K/V shapes for every target layer, layer-count/shape equality, the existing
 length invariants, and numerical error reductions. Missing or incompatible shape
 metadata remains a structural failure.
+
+The external checker permits one narrow exception for unavailable downstream
+KV Gold: `availability=unavailable`, `status=not_run`, and reason exactly
+`prior_logits_gold_failure`. Acceptance additionally requires exact and stable
+Original-DFlash/tree execution, an error-free manifest, a passing traversal at
+that round, every configured Gold-logit mode present and structurally valid,
+and an actual prior semantic logit failure. Runtime errors, missing modes,
+unrelated unavailable records, or absent traversal evidence remain hard
+failures; the skipped row is not rewritten as an exact Gold pass.
 
 Gold p99 reductions use native `torch.quantile` through its supported indexing
 range. Larger tensors are transferred in full to CPU and evaluated exactly from
@@ -139,9 +191,11 @@ speedup claim.
 
 ## H100 setup and new materialization
 
-The instrumented `dflash.py` and materialized `phase2c_gold.py` changed. Use a
-new SHA-bound directory; in particular, do not overwrite the validated
-`Qwen3-8B-DFlash-b16-phase2d2a-instrumented-3dc89043348b` directory.
+The instrumented `dflash.py` changed. Use a new SHA-bound directory; in
+particular, do not overwrite the current
+`Qwen3-8B-DFlash-b16-phase2d2a-instrumented-66ce72888b34` directory. The change
+adds diagnostic forwards and records only; it does not change refinement or
+online verifier decisions.
 
 ```bash
 cd ~/data/dflash-longctx
@@ -166,7 +220,12 @@ python scripts/materialize_dflash.py \
   --implementation instrumented
 ```
 
-## Ordered H100 gates
+## Earlier ordered H100 gates (paused)
+
+The commands below document the preregistered evaluation sequence, but frozen
+refinement, N=32, held-out, and threshold runs are paused during verifier-oracle
+characterization. Do not resume them from this document until the temporary
+characterization stage is closed.
 
 Base control smoke:
 

@@ -80,6 +80,9 @@ ROOT_ARTIFACTS = (
     "fixed-budget-comparison.json",
     "fixed-budget-comparison.csv",
     "robust-verification-events.jsonl",
+    "verifier-oracle-comparisons.jsonl",
+    "verifier-oracle-summary.json",
+    "tree-traversal-checks.jsonl",
     "fallback-summary.json",
     "fallback-summary.csv",
     "correctness-summary.json",
@@ -158,6 +161,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gold-layer-localization", action="store_true")
     parser.add_argument("--gold-max-rounds", type=int, default=32)
     parser.add_argument("--gold-record-all-nodes", action="store_true")
+    parser.add_argument(
+        "--enable-verifier-oracle-diagnostics",
+        action="store_true",
+        help=(
+            "Run packed/q1/fixed-shape verifier comparisons on independent "
+            "round-entry KV clones in the separate diagnostics generation only."
+        ),
+    )
     parser.add_argument(
         "--gold-max-abs-threshold",
         type=float,
@@ -409,6 +420,99 @@ def _generated_ids(tensor: Any, prompt_length: int) -> list[int]:
     return [int(value) for value in tensor[0, prompt_length:].detach().cpu().tolist()]
 
 
+def _first_divergent_generated_offset(
+    left: list[int], right: list[int]
+) -> int | None:
+    for offset, (left_token, right_token) in enumerate(zip(left, right)):
+        if left_token != right_token:
+            return offset
+    return min(len(left), len(right)) if len(left) != len(right) else None
+
+
+def _output_identity_metadata(
+    generated: list[int], *, reference: list[int]
+) -> dict[str, Any]:
+    return {
+        "generated_output_token_ids_sha256": _sha256_ids(generated),
+        "generated_token_count": len(generated),
+        "output_ids_equal_reference": generated == reference,
+        "first_divergent_generated_offset_vs_reference": (
+            _first_divergent_generated_offset(reference, generated)
+        ),
+    }
+
+
+def _attribute_verifier_oracle_comparisons(
+    rows: list[dict[str, Any]],
+    *,
+    prompt_token_ids: list[int],
+    original_dflash_generated_token_ids: list[int],
+) -> list[dict[str, Any]]:
+    attributed = []
+    full_reference = [*prompt_token_ids, *original_dflash_generated_token_ids]
+    for source in rows:
+        row = dict(source)
+        prefix = int(row["generated_prefix_length"])
+        expected_prefix = full_reference[: len(prompt_token_ids) + prefix]
+        expected_hash = _sha256_ids(expected_prefix)
+        pairwise = row["pairwise"]
+        disagreement_depths = [
+            value["first_disagreement_depth"]
+            for value in pairwise.values()
+            if not value["decision_equal"]
+            and value["first_disagreement_depth"] is not None
+        ]
+        first_depth = min(disagreement_depths) if disagreement_depths else None
+        support = {
+            "attribution_available": False,
+            "attribution_unavailable_reason": None,
+            "semantic_prefix_matches_original_dflash": (
+                row["semantic_prefix_token_sha256"] == expected_hash
+            ),
+            "first_verifier_disagreement_depth": first_depth,
+            "first_verifier_disagreement_absolute_generated_offset": (
+                prefix + first_depth + 1 if first_depth is not None else None
+            ),
+            "packed_native_matches_original_dflash": None,
+            "q1_replay_matches_original_dflash": None,
+            "fixed_shape_recheck_matches_original_dflash": None,
+        }
+        if prefix > len(original_dflash_generated_token_ids):
+            support["attribution_unavailable_reason"] = (
+                "generated_prefix_beyond_original_dflash_output"
+            )
+        elif not support["semantic_prefix_matches_original_dflash"]:
+            support["attribution_unavailable_reason"] = (
+                "semantic_prefix_hash_differs_from_original_dflash"
+            )
+        else:
+            paths = (
+                ("packed_native", "packed_native_matches_original_dflash"),
+                ("q1_replay", "q1_replay_matches_original_dflash"),
+                (
+                    "fixed_shape_recheck",
+                    "fixed_shape_recheck_matches_original_dflash",
+                ),
+            )
+            sequences = {
+                path: row[path]["candidate_next_committed_token_ids"]
+                for path, _ in paths
+            }
+            remaining = original_dflash_generated_token_ids[prefix:]
+            if any(len(sequence) > len(remaining) for sequence in sequences.values()):
+                support["attribution_unavailable_reason"] = (
+                    "original_dflash_continuation_truncated"
+                )
+            else:
+                support["attribution_available"] = True
+                for path, field in paths:
+                    sequence = sequences[path]
+                    support[field] = remaining[: len(sequence)] == sequence
+        row["reference_support"] = support
+        attributed.append(row)
+    return attributed
+
+
 def _output_relations(
     *,
     target_generated: list[int],
@@ -488,6 +592,7 @@ def _generation_options(
     gold: bool,
     shadow_replay: bool,
     context_length: int,
+    verifier_oracle_diagnostics: bool = False,
 ) -> dict[str, Any]:
     calibration_hash = (
         args.nr_calibration["calibration_sha256"]
@@ -525,6 +630,9 @@ def _generation_options(
         "phase2d2_calibration_validated": args.nr_calibration is not None,
         "phase2d2_calibration_hash": calibration_hash,
         "phase2d2_shadow_replay": shadow_replay,
+        "enable_phase2d2_verifier_oracle_diagnostics": (
+            verifier_oracle_diagnostics
+        ),
     }
 
 
@@ -600,6 +708,7 @@ def _run_one(
         enable_profiling=False,
     )
     formal_ids = None
+    first_formal_generated = None
     formal_timings = []
     formal_equal = True
     for repeat in range(args.timing_repeats):
@@ -620,10 +729,29 @@ def _run_one(
                 context_length=workload["nominal_prompt_length"],
             ),
         )
+        current_generated = _generated_ids(current, prompt_length)
         if formal_ids is None:
             formal_ids = current
+            first_formal_generated = current_generated
         formal_equal = formal_equal and bool(torch_module.equal(formal_ids, current))
-        formal_timings.append({"repeat": repeat, **timing})
+        formal_timings.append(
+            {
+                "repeat": repeat,
+                **timing,
+                **_output_identity_metadata(
+                    current_generated,
+                    reference=first_formal_generated,
+                ),
+                "output_ids_equal_repeat_0": (
+                    current_generated == first_formal_generated
+                ),
+                "first_divergent_generated_offset_vs_repeat_0": (
+                    _first_divergent_generated_offset(
+                        first_formal_generated, current_generated
+                    )
+                ),
+            }
+        )
     torch_module.cuda.reset_peak_memory_stats(input_ids.device)
     profile_ids, profile_diagnostics, profile_timing, _ = _call_generation(
         torch_module=torch_module,
@@ -657,6 +785,9 @@ def _run_one(
             gold=args.enable_gold_checks,
             shadow_replay=True,
             context_length=workload["nominal_prompt_length"],
+            verifier_oracle_diagnostics=(
+                args.enable_verifier_oracle_diagnostics
+            ),
         ),
     )
     target_generated = _generated_ids(target_only, prompt_length)
@@ -664,6 +795,12 @@ def _run_one(
     formal_generated = _generated_ids(formal_ids, prompt_length)
     profile_generated = _generated_ids(profile_ids, prompt_length)
     diagnostic_generated = _generated_ids(diagnostic_ids, prompt_length)
+    profile_output_identity = _output_identity_metadata(
+        profile_generated, reference=formal_generated
+    )
+    diagnostic_output_identity = _output_identity_metadata(
+        diagnostic_generated, reference=formal_generated
+    )
     relations = _output_relations(
         target_generated=target_generated,
         reference_generated=reference_generated,
@@ -672,6 +809,58 @@ def _run_one(
         diagnostic_generated=diagnostic_generated,
         formal_repeat_output_ids_equal=formal_equal,
     )
+    raw_oracle_comparisons = [
+        row["phase2d2"]["verifier_oracle_comparison"]
+        for row in diagnostic["rounds"]
+        if row.get("phase2d2", {}).get("verifier_oracle_comparison") is not None
+    ]
+    oracle_comparisons = _attribute_verifier_oracle_comparisons(
+        raw_oracle_comparisons,
+        prompt_token_ids=[int(value) for value in workload["input_ids"]],
+        original_dflash_generated_token_ids=reference_generated,
+    )
+    oracle_by_round = {row["round_index"]: row for row in oracle_comparisons}
+    for row in diagnostic["rounds"]:
+        oracle = oracle_by_round.get(row["round_index"])
+        if oracle is None:
+            continue
+        oracle.update(
+            {
+                "task": workload["longbench_task"],
+                "sample_id": workload["sample_id"],
+                "source_sample_id": workload["source_sample_id"],
+                "nominal_prompt_length": workload["nominal_prompt_length"],
+                "actual_prompt_length": workload["actual_prompt_length"],
+                "configuration_id": _configuration_id(args),
+                "evidence_source": "separate_diagnostics_path",
+            }
+        )
+        phase = row["phase2d2"]
+        reference_support = oracle["reference_support"]
+        phase["verifier_oracle_comparison"] = oracle
+        phase["packed_q1_decision_disagreement"] = not oracle["pairwise"][
+            "packed_native_vs_q1_replay"
+        ]["decision_equal"]
+        phase["guard_triggered_on_packed_q1_disagreement"] = bool(
+            phase["guard_triggered"]
+            and phase["packed_q1_decision_disagreement"]
+        )
+        phase["guard_missed_packed_q1_disagreement"] = bool(
+            not phase["guard_triggered"]
+            and phase["packed_q1_decision_disagreement"]
+        )
+        phase["original_dflash_reference_attribution_available"] = (
+            reference_support["attribution_available"]
+        )
+        phase["original_dflash_supports_packed_decision"] = reference_support[
+            "packed_native_matches_original_dflash"
+        ]
+        phase["original_dflash_supports_q1_decision"] = reference_support[
+            "q1_replay_matches_original_dflash"
+        ]
+        phase["original_dflash_supports_fixed_shape_decision"] = reference_support[
+            "fixed_shape_recheck_matches_original_dflash"
+        ]
     structural_reasons = []
     rounds = []
     for row in diagnostic["rounds"]:
@@ -825,11 +1014,13 @@ def _run_one(
             "components": profile_diagnostics["profiling"]["components"],
             "memory": profile_diagnostics["profiling"]["memory"],
             "output_ids_equal_formal": relations["control_profile_output_ids_equal"],
+            **profile_output_identity,
         },
         "diagnostics": {
             "formal_end_to_end": False,
             "measurement": diagnostic_timing,
             "output_ids_equal_formal": relations["control_diagnostic_output_ids_equal"],
+            **diagnostic_output_identity,
         },
         "correctness": correctness,
     }
@@ -871,6 +1062,7 @@ def _run_one(
         "gold_kv": gold_kv,
         "gold_layers": gold_layers,
         "traversal": traversal,
+        "verifier_oracle": oracle_comparisons,
         "pairwise": pairwise,
     }
     return sample, rounds, evidence
@@ -1088,6 +1280,80 @@ def _sample_timing_row(
     }
 
 
+def _verifier_oracle_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    disagreement_rows = [
+        row
+        for row in rows
+        if any(not relation["decision_equal"] for relation in row["pairwise"].values())
+    ]
+    first = (
+        min(
+            disagreement_rows,
+            key=lambda row: (
+                row["nominal_prompt_length"],
+                row["generated_prefix_length"],
+                row["round_index"],
+            ),
+        )
+        if disagreement_rows
+        else None
+    )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "diagnostic",
+        "comparison_round_count": len(rows),
+        "decision_disagreement_round_count": len(disagreement_rows),
+        "all_q1_query_lengths_are_one": bool(
+            rows
+            and all(
+                row["q1_replay"]["query_lengths"]
+                and all(value == 1 for value in row["q1_replay"]["query_lengths"])
+                for row in rows
+            )
+        ),
+        "all_fixed_shape_query_lengths_are_block_size_16": bool(
+            rows
+            and all(
+                row["fixed_shape_recheck"]["query_lengths"]
+                and all(
+                    value == 16
+                    for value in row["fixed_shape_recheck"]["query_lengths"]
+                )
+                for row in rows
+            )
+        ),
+        "all_round_entry_clone_hashes_equal": bool(
+            rows
+            and all(
+                row["round_entry_state"]["all_round_entry_cache_hashes_equal"]
+                for row in rows
+            )
+        ),
+        "all_diagnostic_isolation_checks_passed": bool(
+            rows
+            and all(
+                all(row["diagnostic_isolation"].values()) for row in rows
+            )
+        ),
+        "reference_attribution_available_count": sum(
+            row["reference_support"]["attribution_available"] for row in rows
+        ),
+        "first_decision_disagreement": (
+            {
+                "task": first["task"],
+                "sample_id": first["sample_id"],
+                "nominal_prompt_length": first["nominal_prompt_length"],
+                "round_index": first["round_index"],
+                "generated_prefix_length": first["generated_prefix_length"],
+                "pairwise": first["pairwise"],
+                "reference_support": first["reference_support"],
+            }
+            if first is not None
+            else None
+        ),
+    }
+
+
 def _persist(
     output: Path,
     *,
@@ -1156,6 +1422,13 @@ def _persist(
                         "guard_false_negative",
                         "packed_numerical_decision_divergence",
                         "verifier_relevant_argmax_flip",
+                        "packed_q1_decision_disagreement",
+                        "guard_triggered_on_packed_q1_disagreement",
+                        "guard_missed_packed_q1_disagreement",
+                        "original_dflash_reference_attribution_available",
+                        "original_dflash_supports_packed_decision",
+                        "original_dflash_supports_q1_decision",
+                        "original_dflash_supports_fixed_shape_decision",
                         "replay_decisions",
                     }
                 },
@@ -1273,6 +1546,11 @@ def _persist(
     gold_logits = [row for item in evidence for row in item["gold_logits"]]
     gold_kv = [row for item in evidence for row in item["gold_kv"]]
     gold_layers = [row for item in evidence for row in item["gold_layers"]]
+    traversal = [row for item in evidence for row in item["traversal"]]
+    verifier_oracle = [
+        row for item in evidence for row in item.get("verifier_oracle", [])
+    ]
+    verifier_oracle_summary = _verifier_oracle_summary(verifier_oracle)
     gold_summary = build_gold_comparison_summary(gold_logits, gold_kv)
     timing_rows = [_sample_timing_row(row, rounds) for row in samples]
     timing_summary = {"schema_version": SCHEMA_VERSION, "rows": timing_rows}
@@ -1346,6 +1624,11 @@ def _persist(
     _write_json(output / "fixed-budget-comparison.json", comparison)
     _write_csv(output / "fixed-budget-comparison.csv", comparison["rows"])
     _write_jsonl(output / "robust-verification-events.jsonl", robust_events)
+    _write_jsonl(output / "verifier-oracle-comparisons.jsonl", verifier_oracle)
+    _write_json(
+        output / "verifier-oracle-summary.json", verifier_oracle_summary
+    )
+    _write_jsonl(output / "tree-traversal-checks.jsonl", traversal)
     _write_json(output / "fallback-summary.json", fallback_summary)
     _write_csv(output / "fallback-summary.csv", [fallback_summary])
     _write_json(output / "correctness-summary.json", correctness)
@@ -1387,6 +1670,9 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
         "gold_checks_enabled": args.enable_gold_checks,
         "gold_comparison_modes": list(args.gold_comparison_modes),
         "gold_max_rounds": args.gold_max_rounds,
+        "verifier_oracle_diagnostics_enabled": (
+            args.enable_verifier_oracle_diagnostics
+        ),
         "decision_margin_threshold": args.decision_margin_threshold,
         "frozen_selector_hash": args.frozen_selector["config_sha256"],
         "frozen_refinement_config_hash": (
@@ -1454,7 +1740,12 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     "verification_mode_effect": (
                         "packed_native commits packed traversal/cache; always_replay "
-                        "commits the shape-stable q_len=1 authoritative path"
+                        "commits the existing q_len=1 replay path, whose numerical "
+                        "oracle status is not assumed"
+                    ),
+                    "verifier_oracle_diagnostics": (
+                        "packed native, q_len=1 replay, and fixed-shape q_len=16 "
+                        "recheck run only on independent diagnostic cache clones"
                     ),
                 },
             },
@@ -1462,6 +1753,7 @@ def main(argv: list[str] | None = None) -> int:
                 "formal_end_to_end": "unprofiled control repeats",
                 "component_timing": "separate profiling run",
                 "gold_and_shadow_replay": "separate diagnostic run",
+                "verifier_oracle_comparison": "separate unprofiled diagnostic run",
                 "target_only_is_authoritative": False,
                 "target_only_is_auxiliary_numerical_control": True,
                 "original_dflash_is_token_exact_reference": True,

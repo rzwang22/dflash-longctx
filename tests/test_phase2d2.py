@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -38,16 +39,21 @@ from experiments.phase2d2_robust_conditional_refinement import (
     BASE_CONTROL_SELECTOR_MODE,
     GOLD_ARTIFACTS,
     ROOT_ARTIFACTS,
+    _attribute_verifier_oracle_comparisons,
     _comparison,
     _evaluate_output_contract,
+    _first_divergent_generated_offset,
     _generation_options,
+    _output_identity_metadata,
     _output_relations,
     _persist,
     _sample_timing_row,
+    _verifier_oracle_summary,
     build_parser,
 )
 from scripts.aggregate_phase2d2_decision import _stable_positive_by_task
 from scripts.check_phase2d2_acceptance import (
+    _causal_gold_kv_skip_evidence,
     _validate_gold_kv_shape_evidence,
     check_output,
 )
@@ -58,6 +64,85 @@ from scripts.phase2d2_build_nr_calibration import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _oracle_path(sequence: list[int], *, query_lengths: list[int]) -> dict:
+    token_hash = hashlib.sha256(
+        json.dumps(sequence, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {
+        "accepted_draft_token_ids": sequence[1:-1],
+        "accepted_node_indices": list(range(1, len(sequence) - 1)),
+        "accepted_draft_token_count": max(0, len(sequence) - 2),
+        "next_root_token_id": sequence[-1],
+        "next_root_kind": "correction",
+        "parent_top1_token_ids": sequence[1:],
+        "parent_top1_top2_margins": [0.5] * (len(sequence) - 1),
+        "decision_records": [],
+        "query_lengths": query_lengths,
+        "attention_mask_form": "fixture",
+        "position_ids": list(range(len(sequence))),
+        "cache_position_argument_is_explicit": True,
+        "candidate_next_committed_token_ids": sequence,
+        "decision_sha256": token_hash,
+        "candidate_next_committed_token_ids_sha256": token_hash,
+    }
+
+
+def _oracle_comparison_fixture() -> dict:
+    prefix_ids = [1, 2]
+    prefix_hash = hashlib.sha256(
+        json.dumps(prefix_ids, separators=(",", ":")).encode()
+    ).hexdigest()
+    relation_equal = {"decision_equal": True, "first_disagreement_depth": None}
+    relation_different = {"decision_equal": False, "first_disagreement_depth": 0}
+    return {
+        "schema_version": "1.0",
+        "task": "gov_report",
+        "sample_id": "sample",
+        "source_sample_id": "sample",
+        "nominal_prompt_length": 1024,
+        "actual_prompt_length": 1024,
+        "configuration_id": "base",
+        "round_index": 0,
+        "generated_prefix_length": 0,
+        "absolute_sequence_prefix_length": 2,
+        "semantic_prefix_token_sha256": prefix_hash,
+        "round_entry_state": {
+            "persistent_target_kv_length": 2,
+            "packed_native_cache_comparable_summary": [],
+            "packed_native_cache_sha256": "a" * 64,
+            "snapshot_cache_sha256": "a" * 64,
+            "q1_clone_cache_sha256": "a" * 64,
+            "fixed_shape_clone_cache_sha256": "a" * 64,
+            "all_round_entry_cache_hashes_equal": True,
+            "q1_and_fixed_cloned_from_same_snapshot": True,
+            "q1_and_fixed_cache_objects_distinct": True,
+            "q1_and_fixed_cache_storage_independent": True,
+        },
+        "packed_native": _oracle_path([10, 11, 12], query_lengths=[16]),
+        "q1_replay": _oracle_path([10, 99], query_lengths=[1, 1]),
+        "fixed_shape_recheck": _oracle_path([10, 11, 12], query_lengths=[16, 16]),
+        "pairwise": {
+            "packed_native_vs_q1_replay": relation_different,
+            "packed_native_vs_fixed_shape_recheck": relation_equal,
+            "q1_replay_vs_fixed_shape_recheck": relation_different,
+        },
+        "diagnostic_isolation": {
+            "online_output_ids_unchanged": True,
+            "online_packed_cache_unchanged": True,
+            "draft_cache_lengths_unchanged": True,
+            "target_hidden_unchanged": True,
+            "diagnostic_cache_results_never_committed": True,
+        },
+        "reference_support": {
+            "attribution_available": False,
+            "attribution_unavailable_reason": "not_joined",
+            "packed_native_matches_original_dflash": None,
+            "q1_replay_matches_original_dflash": None,
+            "fixed_shape_recheck_matches_original_dflash": None,
+        },
+    }
 
 
 def _frozen_nr_sweep_fixture() -> tuple[dict, list[dict], dict]:
@@ -636,6 +721,196 @@ class CacheAndGuardTests(unittest.TestCase):
 
 
 class MetricsFreezeAndSchemaTests(unittest.TestCase):
+    def test_three_way_attribution_uses_original_dflash_absolute_prefix(self) -> None:
+        row = _oracle_comparison_fixture()
+        attributed = _attribute_verifier_oracle_comparisons(
+            [row],
+            prompt_token_ids=[1, 2],
+            original_dflash_generated_token_ids=[10, 11, 12, 13],
+        )[0]
+        support = attributed["reference_support"]
+        self.assertTrue(support["attribution_available"])
+        self.assertTrue(support["packed_native_matches_original_dflash"])
+        self.assertFalse(support["q1_replay_matches_original_dflash"])
+        self.assertTrue(support["fixed_shape_recheck_matches_original_dflash"])
+        self.assertEqual(
+            support["first_verifier_disagreement_absolute_generated_offset"], 1
+        )
+
+    def test_packed_q1_disagreement_alone_is_not_a_correctness_oracle(self) -> None:
+        self.assertFalse(
+            _oracle_comparison_fixture()["pairwise"][
+                "packed_native_vs_q1_replay"
+            ]["decision_equal"]
+        )
+        relations = _output_relations(
+            target_generated=[8, 9],
+            reference_generated=[8, 9],
+            formal_generated=[8, 9],
+            profile_generated=[8, 9],
+            diagnostic_generated=[8, 9],
+            formal_repeat_output_ids_equal=True,
+        )
+        self.assertTrue(
+            _evaluate_output_contract(relations)["hard_output_relations_passed"]
+        )
+
+    def test_prefix_hash_mismatch_does_not_fake_reference_attribution(self) -> None:
+        row = _oracle_comparison_fixture()
+        row["semantic_prefix_token_sha256"] = "f" * 64
+        support = _attribute_verifier_oracle_comparisons(
+            [row],
+            prompt_token_ids=[1, 2],
+            original_dflash_generated_token_ids=[10, 11, 12],
+        )[0]["reference_support"]
+        self.assertFalse(support["attribution_available"])
+        self.assertEqual(
+            support["attribution_unavailable_reason"],
+            "semantic_prefix_hash_differs_from_original_dflash",
+        )
+
+    def test_verifier_oracle_summary_preserves_q1_and_fixed_geometry(self) -> None:
+        row = _attribute_verifier_oracle_comparisons(
+            [_oracle_comparison_fixture()],
+            prompt_token_ids=[1, 2],
+            original_dflash_generated_token_ids=[10, 11, 12],
+        )[0]
+        summary = _verifier_oracle_summary([row])
+        self.assertTrue(summary["all_q1_query_lengths_are_one"])
+        self.assertTrue(
+            summary["all_fixed_shape_query_lengths_are_block_size_16"]
+        )
+        self.assertTrue(summary["all_round_entry_clone_hashes_equal"])
+        self.assertTrue(summary["all_diagnostic_isolation_checks_passed"])
+        self.assertEqual(summary["decision_disagreement_round_count"], 1)
+        comparison_schema = json.loads(
+            (
+                REPO_ROOT
+                / "docs/schemas/phase2d2-verifier-oracle-comparison.schema.json"
+            ).read_text()
+        )
+        summary_schema = json.loads(
+            (
+                REPO_ROOT
+                / "docs/schemas/phase2d2-verifier-oracle-summary.schema.json"
+            ).read_text()
+        )
+        Draft202012Validator(comparison_schema).validate(row)
+        Draft202012Validator(summary_schema).validate(summary)
+
+    def test_output_identity_metadata_is_deterministic_and_diagnostic(self) -> None:
+        left = _output_identity_metadata([4, 5, 6], reference=[4, 5, 6])
+        right = _output_identity_metadata([4, 5, 9], reference=[4, 5, 6])
+        self.assertEqual(
+            left["generated_output_token_ids_sha256"],
+            _output_identity_metadata([4, 5, 6], reference=[])[
+                "generated_output_token_ids_sha256"
+            ],
+        )
+        self.assertTrue(left["output_ids_equal_reference"])
+        self.assertFalse(right["output_ids_equal_reference"])
+        self.assertEqual(
+            right["first_divergent_generated_offset_vs_reference"], 2
+        )
+        self.assertEqual(_first_divergent_generated_offset([1], [1, 2]), 1)
+
+    def test_strict_causal_gold_kv_skip_contract(self) -> None:
+        identity = {
+            "task": "gov_report",
+            "sample_id": "sample",
+            "nominal_prompt_length": 1024,
+            "configuration_id": "base",
+        }
+        row = {
+            **identity,
+            "round_index": 33,
+            "availability": "unavailable",
+            "status": "not_run",
+            "execution_status": "not_run_due_to_prior_failure",
+            "reason": "prior_logits_gold_failure",
+            "comparison_mode": "dense_committed_path",
+        }
+        manifest = {
+            "status": "ok",
+            "error": None,
+            "phase2d2": {
+                "gold_comparison_modes": ["native", "same_mask", "math"]
+            },
+        }
+        correctness = {
+            field: True
+            for field in (
+                "original_dflash_reference_output_ids_equal",
+                "formal_repeat_output_ids_equal",
+                "control_profile_output_ids_equal",
+                "control_diagnostic_output_ids_equal",
+                "actual_execution_correctness_passed",
+                "structural_checks_passed",
+                "passed",
+            )
+        }
+        samples = [{**identity, "correctness": correctness}]
+        traversal = [
+            {
+                **identity,
+                "round_index": 33,
+                "status": "pass",
+                "checks": {
+                    "structural_checks_passed": True,
+                    "traversal_checks_passed": True,
+                    "kv_root_transition_checks_passed": True,
+                    "all_checks_passed": True,
+                },
+            }
+        ]
+        gold_logits = [
+            {
+                **identity,
+                "round_index": 33,
+                "comparison_mode": mode,
+                "availability": "available",
+                "status": "fail_semantic" if mode == "same_mask" else "pass_exact",
+                "structural_status": "pass",
+                "structural_issues": [],
+            }
+            for mode in ("native", "same_mask", "math")
+        ]
+        accepted = _causal_gold_kv_skip_evidence(
+            row,
+            manifest=manifest,
+            samples=samples,
+            gold_logits=gold_logits,
+            traversal=traversal,
+        )
+        self.assertTrue(accepted["accepted"])
+
+        wrong_reason = _causal_gold_kv_skip_evidence(
+            {**row, "reason": "RuntimeError: OOM"},
+            manifest=manifest,
+            samples=samples,
+            gold_logits=gold_logits,
+            traversal=traversal,
+        )
+        self.assertFalse(wrong_reason["accepted"])
+        missing_mode = _causal_gold_kv_skip_evidence(
+            row,
+            manifest=manifest,
+            samples=samples,
+            gold_logits=gold_logits[:-1],
+            traversal=traversal,
+        )
+        self.assertFalse(missing_mode["accepted"])
+        unstable = deepcopy(samples)
+        unstable[0]["correctness"]["formal_repeat_output_ids_equal"] = False
+        unstable_result = _causal_gold_kv_skip_evidence(
+            row,
+            manifest=manifest,
+            samples=unstable,
+            gold_logits=gold_logits,
+            traversal=traversal,
+        )
+        self.assertFalse(unstable_result["accepted"])
+
     def test_cli_defaults_and_overrides(self) -> None:
         defaults = build_parser().parse_args(
             [
@@ -656,6 +931,7 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
         self.assertEqual(defaults.node_budget, 16)
         self.assertEqual(defaults.verification_mode, "always_replay")
         self.assertEqual(defaults.online_selector_mode, BASE_CONTROL_SELECTOR_MODE)
+        self.assertFalse(defaults.enable_verifier_oracle_diagnostics)
 
         overridden = build_parser().parse_args(
             [
@@ -679,6 +955,7 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
                 "32",
                 "--verification-mode",
                 "packed_native",
+                "--enable-verifier-oracle-diagnostics",
             ]
         )
         self.assertEqual(overridden.candidate_merge_mode, "union")
@@ -688,6 +965,7 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
         self.assertEqual(overridden.refinement_weight, 0.25)
         self.assertEqual(overridden.node_budget, 32)
         self.assertEqual(overridden.verification_mode, "packed_native")
+        self.assertTrue(overridden.enable_verifier_oracle_diagnostics)
 
     def test_base_only_uses_phase2c_top1_control_configuration(self) -> None:
         args = build_parser().parse_args(
@@ -723,6 +1001,9 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
         self.assertEqual(options["online_selector_mode"], "top1_packed_tree")
         self.assertEqual(options["phase2d2_candidate_merge_mode"], "base_only")
         self.assertEqual(options["phase2d2_verification_mode"], "packed_native")
+        self.assertFalse(
+            options["enable_phase2d2_verifier_oracle_diagnostics"]
+        )
 
     def test_base_only_reference_tree_passes_when_target_only_differs(self) -> None:
         relations = _output_relations(
@@ -1064,6 +1345,22 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
         self.assertIn('"packed_temporary_kv_discarded"', source)
         self.assertIn('"candidate_shape": {', source)
         self.assertIn('"reference_shape": {', source)
+        self.assertIn(
+            "enable_phase2d2_verifier_oracle_diagnostics", source
+        )
+        self.assertIn(
+            "verifier_oracle_q1_cache = clone_dynamic_cache(\n"
+            "                            verifier_oracle_snapshot",
+            source,
+        )
+        self.assertIn(
+            "verifier_oracle_fixed_cache = clone_dynamic_cache(\n"
+            "                            verifier_oracle_snapshot",
+            source,
+        )
+        self.assertIn('"query_length": block_size', source)
+        self.assertIn('"diagnostic_cache_results_never_committed": True', source)
+        self.assertIn('"packed_q1_decision_disagreement"', source)
 
     def test_original_vendored_code_is_not_modified_by_phase2d2(self) -> None:
         changed = subprocess.run(

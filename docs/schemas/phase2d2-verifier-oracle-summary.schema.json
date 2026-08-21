@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2-verifier-oracle-summary.schema.json",
+  "title": "Phase 2D.2A verifier-oracle diagnostic summary",
+  "type": "object",
+  "required": ["schema_version", "status", "comparison_round_count", "decision_disagreement_round_count", "all_q1_query_lengths_are_one", "all_fixed_shape_query_lengths_are_block_size_16", "all_round_entry_clone_hashes_equal", "all_diagnostic_isolation_checks_passed", "reference_attribution_available_count", "first_decision_disagreement"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"const": "diagnostic"},
+    "comparison_round_count": {"type": "integer", "minimum": 0},
+    "decision_disagreement_round_count": {"type": "integer", "minimum": 0},
+    "all_q1_query_lengths_are_one": {"type": "boolean"},
+    "all_fixed_shape_query_lengths_are_block_size_16": {"type": "boolean"},
+    "all_round_entry_clone_hashes_equal": {"type": "boolean"},
+    "all_diagnostic_isolation_checks_passed": {"type": "boolean"},
+    "reference_attribution_available_count": {"type": "integer", "minimum": 0},
+    "first_decision_disagreement": {"type": ["object", "null"]}
+  }
+}

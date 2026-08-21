@@ -10,6 +10,35 @@
     "actual_prompt_length": {"type": "integer", "minimum": 1},
     "node_budget": {"enum": [16, 32]},
     "generated_output_token_ids": {"type": "array", "items": {"type": "integer"}},
+    "formal_timing_repeats": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["repeat", "generated_output_token_ids_sha256", "generated_token_count", "output_ids_equal_repeat_0", "first_divergent_generated_offset_vs_repeat_0"],
+        "properties": {
+          "repeat": {"type": "integer", "minimum": 0},
+          "generated_output_token_ids_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "generated_token_count": {"type": "integer", "minimum": 0},
+          "output_ids_equal_repeat_0": {"type": "boolean"},
+          "first_divergent_generated_offset_vs_repeat_0": {"type": ["integer", "null"], "minimum": 0}
+        }
+      }
+    },
+    "profiling": {"$ref": "#/$defs/diagnosticExecution"},
+    "diagnostics": {"$ref": "#/$defs/diagnosticExecution"},
     "correctness": {"type": "object", "required": ["target_only_output_ids_equal", "target_only_original_dflash_reference_output_ids_equal", "original_dflash_reference_output_ids_equal", "actual_reference_tree_output_ids_equal", "target_only_is_auxiliary_numerical_control", "target_only_mismatch_is_hard_failure", "target_only_auxiliary_status", "target_only_auxiliary_warnings", "base_only_reference_tree_output_exactness_required", "base_only_reference_tree_output_ids_equal", "actual_execution_correctness_passed", "structural_checks_passed", "passed"]}
+  },
+  "$defs": {
+    "diagnosticExecution": {
+      "type": "object",
+      "required": ["generated_output_token_ids_sha256", "generated_token_count", "output_ids_equal_formal", "first_divergent_generated_offset_vs_reference"],
+      "properties": {
+        "generated_output_token_ids_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "generated_token_count": {"type": "integer", "minimum": 0},
+        "output_ids_equal_formal": {"type": "boolean"},
+        "first_divergent_generated_offset_vs_reference": {"type": ["integer", "null"], "minimum": 0}
+      }
+    }
   }
 }
