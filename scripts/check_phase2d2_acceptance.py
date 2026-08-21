@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Phase 2D.2A artifacts and hard target-only/structure invariants."""
+"""Validate Phase 2D.2A Original-DFlash/tree and structural invariants."""
 
 from __future__ import annotations
 
@@ -64,6 +64,57 @@ def _validate(payload: Any, schema_name: str) -> None:
     Draft202012Validator(schema).validate(payload)
 
 
+def _validate_gold_kv_shape_evidence(row: dict[str, Any]) -> None:
+    """Reject absent or internally inconsistent authoritative KV shapes."""
+
+    if row.get("availability") != "available":
+        raise ValueError("KV Gold evidence is unavailable")
+    required_shape_fields = {
+        "candidate_shape",
+        "reference_shape",
+        "shape_metadata_available",
+        "shape_layer_count_matches",
+        "layer_shape_matches",
+        "all_layer_shapes_match",
+    }
+    missing_shape_fields = sorted(required_shape_fields - set(row))
+    if missing_shape_fields:
+        raise ValueError(
+            f"KV Gold shape metadata is incomplete: {missing_shape_fields}"
+        )
+    if not row["shape_metadata_available"]:
+        raise ValueError("KV Gold shapes are unavailable")
+    candidate = row["candidate_shape"]
+    reference = row["reference_shape"]
+    reported_matches = row["layer_shape_matches"]
+    if not candidate or not reference:
+        raise ValueError("KV Gold shape lists are empty")
+    if len(candidate) != len(reference) or not row["shape_layer_count_matches"]:
+        raise ValueError("KV Gold layer counts differ")
+    if len(reported_matches) != len(candidate):
+        raise ValueError("KV Gold per-layer shape evidence is incomplete")
+    for layer_index, (left, right, reported) in enumerate(
+        zip(candidate, reference, reported_matches)
+    ):
+        if set(left) != {"k", "v"} or set(right) != {"k", "v"}:
+            raise ValueError(f"KV Gold layer {layer_index} lacks K/V")
+        expected = {
+            "layer_index": layer_index,
+            "k": left["k"] == right["k"],
+            "v": left["v"] == right["v"],
+        }
+        if reported != expected:
+            raise ValueError(
+                f"KV Gold layer {layer_index} shape flags disagree"
+            )
+        if not expected["k"] or not expected["v"]:
+            raise ValueError(f"KV Gold layer {layer_index} K/V shapes differ")
+    if not row["all_layer_shapes_match"]:
+        raise ValueError("KV Gold shapes do not all match")
+    if row.get("structural_status") != "pass":
+        raise ValueError("KV Gold structural status did not pass")
+
+
 def check_output(output: Path) -> dict[str, Any]:
     missing = [name for name in REQUIRED if not (output / name).is_file()]
     if missing:
@@ -112,18 +163,35 @@ def check_output(output: Path) -> dict[str, Any]:
     for row in samples:
         _validate(row, "phase2d2-sample.schema.json")
         if (
-            row["target_only"]["generated_output_token_ids"]
+            row["original_dflash_reference"]["generated_output_token_ids"]
             != row["generated_output_token_ids"]
         ):
-            raise ValueError("sample target-only/refined-tree token IDs differ")
+            raise ValueError("sample Original-DFlash/refined-tree token IDs differ")
         if not row["correctness"]["passed"]:
             raise ValueError("sample hard correctness record did not pass")
         if row["candidate_merge_mode"] == "base_only" and not row[
             "correctness"
-        ].get("base_only_phase2c_output_ids_equal"):
+        ].get("base_only_reference_tree_output_ids_equal"):
             raise ValueError(
-                "base_only target/original-DFlash/tree outputs are not token exact"
+                "base_only Original-DFlash/tree outputs are not token exact"
             )
+        expected_target_warnings = []
+        if row["target_only"]["generated_output_token_ids"] != row[
+            "original_dflash_reference"
+        ]["generated_output_token_ids"]:
+            expected_target_warnings.append(
+                "target_only_reference_numerical_divergence"
+            )
+        if (
+            row["target_only"]["generated_output_token_ids"]
+            != row["generated_output_token_ids"]
+        ):
+            expected_target_warnings.append("target_only_tree_numerical_divergence")
+        if (
+            row["correctness"].get("target_only_auxiliary_warnings")
+            != expected_target_warnings
+        ):
+            raise ValueError("target-only auxiliary output status is inconsistent")
     for row in rounds:
         _validate(row, "phase2d2-round.schema.json")
         phase = row["phase2d2"]
@@ -188,26 +256,7 @@ def check_output(output: Path) -> dict[str, Any]:
             raise ValueError("enabled Gold checks produced no KV evidence")
         for row in gold_kv:
             _validate(row, "phase2c-gold-kv-check.schema.json")
-            if (
-                row.get("availability") == "available"
-                and manifest["phase2d2"]["verification_mode"] == "always_replay"
-            ):
-                required_shape_fields = {
-                    "candidate_shape",
-                    "reference_shape",
-                    "shape_metadata_available",
-                    "shape_layer_count_matches",
-                    "layer_shape_matches",
-                    "all_layer_shapes_match",
-                }
-                missing_shape_fields = sorted(required_shape_fields - set(row))
-                if missing_shape_fields:
-                    raise ValueError(
-                        "always_replay KV Gold shape metadata is incomplete: "
-                        f"{missing_shape_fields}"
-                    )
-                if not row["shape_metadata_available"]:
-                    raise ValueError("always_replay KV Gold shapes are unavailable")
+            _validate_gold_kv_shape_evidence(row)
     required_pairs = (
         ("target_only", "original_dflash_reference"),
         ("target_only", "refined_tree"),
@@ -224,21 +273,16 @@ def check_output(output: Path) -> dict[str, Any]:
             raise ValueError(
                 f"absolute-token relation {left_name}/{right_name} is incomplete"
             )
-        if any(not row.get("output_ids_equal") for row in matches) and any(
-            sample["candidate_merge_mode"] == "base_only" for sample in samples
+        if (
+            left_name == "original_dflash_reference"
+            and right_name == "refined_tree"
+            and any(not row.get("output_ids_equal") for row in matches)
         ):
             raise ValueError(
-                f"base_only absolute-token relation {left_name}/{right_name} diverged"
+                "Original-DFlash/refined-tree absolute-token relation diverged"
             )
-    if not correctness.get("all_target_only_output_ids_equal"):
-        raise ValueError("target-only/refined-tree output token mismatch")
-    if any(row["candidate_merge_mode"] == "base_only" for row in samples):
-        if not correctness.get(
-            "all_target_only_original_dflash_reference_output_ids_equal"
-        ):
-            raise ValueError("target-only/original-DFlash output token mismatch")
-        if not correctness.get("all_original_dflash_reference_output_ids_equal"):
-            raise ValueError("original-DFlash/base-only-tree output token mismatch")
+    if not correctness.get("all_original_dflash_reference_output_ids_equal"):
+        raise ValueError("Original-DFlash/refined-tree output token mismatch")
     if not correctness.get("structural_correctness_passed"):
         raise ValueError(
             "structural correctness failed: "

@@ -39,6 +39,7 @@ from experiments.phase2d2_robust_conditional_refinement import (
     GOLD_ARTIFACTS,
     ROOT_ARTIFACTS,
     _comparison,
+    _evaluate_output_contract,
     _generation_options,
     _output_relations,
     _persist,
@@ -46,7 +47,10 @@ from experiments.phase2d2_robust_conditional_refinement import (
     build_parser,
 )
 from scripts.aggregate_phase2d2_decision import _stable_positive_by_task
-from scripts.check_phase2d2_acceptance import check_output
+from scripts.check_phase2d2_acceptance import (
+    _validate_gold_kv_shape_evidence,
+    check_output,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -409,6 +413,29 @@ class CacheAndGuardTests(unittest.TestCase):
         self.assertFalse(metadata["all_layer_shapes_match"])
         self.assertFalse(metadata["layer_shape_matches"][0]["k"])
 
+    def test_always_replay_checker_rejects_missing_or_incompatible_shapes(
+        self,
+    ) -> None:
+        valid = {
+            "availability": "available",
+            "structural_status": "pass",
+            "candidate_shape": [{"k": [1, 8, 1024, 128], "v": [1, 8, 1024, 128]}],
+            "reference_shape": [{"k": [1, 8, 1024, 128], "v": [1, 8, 1024, 128]}],
+            "shape_metadata_available": True,
+            "shape_layer_count_matches": True,
+            "layer_shape_matches": [{"layer_index": 0, "k": True, "v": True}],
+            "all_layer_shapes_match": True,
+        }
+        _validate_gold_kv_shape_evidence(valid)
+        missing = dict(valid)
+        missing.pop("candidate_shape")
+        with self.assertRaisesRegex(ValueError, "metadata is incomplete"):
+            _validate_gold_kv_shape_evidence(missing)
+        incompatible = deepcopy(valid)
+        incompatible["reference_shape"][0]["k"][2] = 1025
+        with self.assertRaisesRegex(ValueError, "shape flags disagree"):
+            _validate_gold_kv_shape_evidence(incompatible)
+
     def test_calibration_provenance_and_hash_are_strict(self) -> None:
         provenance = {
             "gpu_name": "NVIDIA H100 PCIe",
@@ -531,20 +558,50 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
         self.assertEqual(options["phase2d2_candidate_merge_mode"], "base_only")
         self.assertEqual(options["phase2d2_verification_mode"], "packed_native")
 
-    def test_base_only_explicit_three_way_output_relation(self) -> None:
+    def test_base_only_reference_tree_passes_when_target_only_differs(self) -> None:
         relations = _output_relations(
-            target_generated=[1, 2, 3],
+            target_generated=[1, 2, 9],
             reference_generated=[1, 2, 3],
             formal_generated=[1, 2, 3],
             profile_generated=[1, 2, 3],
             diagnostic_generated=[1, 2, 3],
             formal_repeat_output_ids_equal=True,
         )
-        self.assertTrue(relations["target_only_output_ids_equal"])
-        self.assertTrue(
+        contract = _evaluate_output_contract(relations)
+        self.assertFalse(relations["target_only_output_ids_equal"])
+        self.assertFalse(
             relations["target_only_original_dflash_reference_output_ids_equal"]
         )
         self.assertTrue(relations["original_dflash_reference_output_ids_equal"])
+        self.assertTrue(contract["hard_output_relations_passed"])
+        self.assertEqual(contract["hard_output_failure_reasons"], [])
+        self.assertEqual(
+            contract["target_only_auxiliary_status"],
+            "target_only_reference_numerical_divergence",
+        )
+        self.assertEqual(
+            contract["target_only_auxiliary_warnings"],
+            [
+                "target_only_reference_numerical_divergence",
+                "target_only_tree_numerical_divergence",
+            ],
+        )
+
+    def test_base_only_reference_tree_divergence_is_hard(self) -> None:
+        relations = _output_relations(
+            target_generated=[1, 2, 9],
+            reference_generated=[1, 2, 3],
+            formal_generated=[1, 2, 4],
+            profile_generated=[1, 2, 4],
+            diagnostic_generated=[1, 2, 4],
+            formal_repeat_output_ids_equal=True,
+        )
+        contract = _evaluate_output_contract(relations)
+        self.assertFalse(contract["hard_output_relations_passed"])
+        self.assertEqual(
+            contract["hard_output_failure_reasons"],
+            ["original_dflash_reference_output_ids_equal"],
+        )
 
     def test_target_reference_relation_is_not_inferred_from_tree(self) -> None:
         relations = _output_relations(

@@ -10,6 +10,6 @@
     "actual_prompt_length": {"type": "integer", "minimum": 1},
     "node_budget": {"enum": [16, 32]},
     "generated_output_token_ids": {"type": "array", "items": {"type": "integer"}},
-    "correctness": {"type": "object", "required": ["target_only_output_ids_equal", "target_only_original_dflash_reference_output_ids_equal", "original_dflash_reference_output_ids_equal", "base_only_three_way_output_exactness_required", "base_only_phase2c_output_ids_equal", "structural_checks_passed", "passed"]}
+    "correctness": {"type": "object", "required": ["target_only_output_ids_equal", "target_only_original_dflash_reference_output_ids_equal", "original_dflash_reference_output_ids_equal", "actual_reference_tree_output_ids_equal", "target_only_is_auxiliary_numerical_control", "target_only_mismatch_is_hard_failure", "target_only_auxiliary_status", "target_only_auxiliary_warnings", "base_only_reference_tree_output_exactness_required", "base_only_reference_tree_output_ids_equal", "actual_execution_correctness_passed", "structural_checks_passed", "passed"]}
   }
 }

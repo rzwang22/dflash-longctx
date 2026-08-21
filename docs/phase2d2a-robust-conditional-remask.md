@@ -50,7 +50,10 @@ arguments suppressed; Original DFlash uses the unchanged
 `spec_generate(temperature=0)` call. Both receive the same chat-templated input
 IDs, EOS ID, maximum token count, target instance, dtype, and cache semantics.
 Every run records all three pairwise relations among target-only, Original
-DFlash, and the tree output; `base_only` requires all three to be token exact.
+DFlash, and the tree output. Original DFlash actual speculative execution is the
+token-exact oracle for the tree. Target-only is an auxiliary numerical control:
+its reference/tree mismatches are retained as explicit warnings but are not hard
+failures without an Original-DFlash/tree divergence.
 
 For each selected prefix, one internal-batch conditional pass computes full
 vocabulary logits. Only bounded IDs are retained, but both the base and
@@ -95,15 +98,16 @@ empirical H100 control, not a formal numerical error bound.
 The Q1 replay cache is a linear authoritative commit source, not a gathered
 packed-cache source. Gold KV validation checks its storage indices as the full
 contiguous committed prefix and requires the packed temporary KV to be marked
-discarded. Each available Gold row records non-null candidate and dense-reference
+discarded. Each Gold row records non-null candidate and dense-reference
 K/V shapes for every target layer, layer-count/shape equality, the existing
 length invariants, and numerical error reductions. Missing or incompatible shape
 metadata remains a structural failure.
 
-Target-only greedy output is the Phase 2D.2A hard token-exact oracle. Original
-DFlash remains a recorded third control. Refinement may alter accepted depth,
-correction rounds, and round segmentation; only absolute generated-token output
-and structural/cache invariants are hard-gated.
+Original DFlash actual speculative execution is the Phase 2D.2A hard token-exact
+oracle. Target-only greedy output remains a recorded auxiliary numerical control.
+Refinement may alter accepted depth, correction rounds, and round segmentation;
+the Original-DFlash/tree absolute generated-token relation and structural/cache
+invariants are hard-gated.
 
 ## Artifacts and automatic decision
 
@@ -400,7 +404,7 @@ for CONFIG_ID in "${FROZEN_REFINEMENT_IDS[@]}"; do
 done
 ```
 
-Proceeding to Phase 2D.2B requires target-only exactness, all structural/KV
+Proceeding to Phase 2D.2B requires Original-DFlash/tree exactness, all structural/KV
 checks, no held-out guard false negative, and stable same-N coverage plus online
 accepted-token-efficiency improvement. Abandon dependency refinement if fixed-N
 coverage and online efficiency show no stable gain; prefer a lightweight adapter

@@ -4,5 +4,5 @@
   "title": "Phase 2D.2A output divergence",
   "type": "object",
   "required": ["schema_version", "status", "authoritative_relation", "records"],
-  "properties": {"schema_version": {"const": "1.0"}, "status": {"enum": ["pass", "failed"]}, "authoritative_relation": {"enum": ["target_only_vs_refined_tree", "target_only_original_dflash_reference_and_tree"]}, "records": {"type": "array"}}
+  "properties": {"schema_version": {"const": "1.0"}, "status": {"enum": ["pass", "failed"]}, "authoritative_relation": {"enum": ["target_only_vs_refined_tree", "target_only_original_dflash_reference_and_tree", "original_dflash_reference_vs_tree"]}, "records": {"type": "array"}}
 }

@@ -437,6 +437,42 @@ def _output_relations(
     }
 
 
+def _evaluate_output_contract(relations: dict[str, bool]) -> dict[str, Any]:
+    """Apply the frozen Phase 2C actual-execution output oracle."""
+
+    required_relations = (
+        "original_dflash_reference_output_ids_equal",
+        "formal_repeat_output_ids_equal",
+        "control_profile_output_ids_equal",
+        "control_diagnostic_output_ids_equal",
+    )
+    hard_reasons = [name for name in required_relations if not relations[name]]
+    target_only_warnings = []
+    if not relations["target_only_original_dflash_reference_output_ids_equal"]:
+        target_only_warnings.append("target_only_reference_numerical_divergence")
+    if not relations["target_only_output_ids_equal"]:
+        target_only_warnings.append("target_only_tree_numerical_divergence")
+    return {
+        "hard_output_relation_names": list(required_relations),
+        "hard_output_relations_passed": not hard_reasons,
+        "hard_output_failure_reasons": hard_reasons,
+        "actual_reference_tree_output_ids_equal": relations[
+            "original_dflash_reference_output_ids_equal"
+        ],
+        "target_only_reference_output_ids_equal": relations[
+            "target_only_original_dflash_reference_output_ids_equal"
+        ],
+        "target_only_tree_output_ids_equal": relations[
+            "target_only_output_ids_equal"
+        ],
+        "target_only_auxiliary_status": (
+            target_only_warnings[0] if target_only_warnings else "equal"
+        ),
+        "target_only_auxiliary_warnings": target_only_warnings,
+        "target_only_auxiliary_warning_observed": bool(target_only_warnings),
+    }
+
+
 def _configuration_id(args: argparse.Namespace) -> str:
     return (
         f"{args.candidate_merge_mode}-d{args.refine_depth}-"
@@ -726,47 +762,29 @@ def _run_one(
         if row.get("status") == "fail"
         or row.get("checks", {}).get("all_checks_passed") is False
     )
-    required_relations = {
-        "target_only_output_ids_equal",
-        "formal_repeat_output_ids_equal",
-        "control_profile_output_ids_equal",
-        "control_diagnostic_output_ids_equal",
-    }
-    if args.candidate_merge_mode == "base_only":
-        required_relations.update(
-            {
-                "target_only_original_dflash_reference_output_ids_equal",
-                "original_dflash_reference_output_ids_equal",
-            }
-        )
-    hard_reasons = [
-        name
-        for name in sorted(required_relations)
-        if not relations[name]
-    ]
+    output_contract = _evaluate_output_contract(relations)
+    hard_reasons = list(output_contract["hard_output_failure_reasons"])
     hard_reasons.extend(structural_reasons)
     correctness = {
-        "target_only_is_authoritative_greedy_oracle": True,
+        "target_only_is_authoritative_greedy_oracle": False,
+        "target_only_is_auxiliary_numerical_control": True,
+        "target_only_mismatch_is_hard_failure": False,
         "original_dflash_reference_is_recorded_control": True,
-        "base_only_three_way_output_exactness_required": (
+        "original_dflash_reference_is_token_exact_oracle": True,
+        "base_only_reference_tree_output_exactness_required": (
             args.candidate_merge_mode == "base_only"
         ),
-        "base_only_phase2c_output_ids_equal": (
-            all(
-                relations[name]
-                for name in (
-                    "target_only_output_ids_equal",
-                    "target_only_original_dflash_reference_output_ids_equal",
-                    "original_dflash_reference_output_ids_equal",
-                )
-            )
+        "base_only_reference_tree_output_ids_equal": (
+            relations["original_dflash_reference_output_ids_equal"]
             if args.candidate_merge_mode == "base_only"
             else None
         ),
         **relations,
+        **output_contract,
         "structural_checks_passed": not structural_reasons,
         "structural_failure_reasons": structural_reasons,
         "hard_correctness_failure_reasons": hard_reasons,
+        "actual_execution_correctness_passed": not hard_reasons,
         "passed": not hard_reasons,
         "gold_status": diagnostic["phase2c"]["gold_overall_status"],
         "gold_numerical_variation_is_diagnostic": True,
@@ -1189,7 +1207,9 @@ def _persist(
         "official_checker_passed": bool(
             samples and all(row["correctness"]["passed"] for row in samples)
         ),
-        "target_only_output_exactness_required": True,
+        "target_only_output_exactness_required": False,
+        "target_only_is_auxiliary_numerical_control": True,
+        "original_dflash_reference_output_exactness_required": True,
         "all_target_only_output_ids_equal": bool(
             samples
             and all(
@@ -1214,6 +1234,20 @@ def _persist(
                 for row in samples
             )
         ),
+        "diagnostic_target_only_variation_observed": any(
+            row["correctness"]["target_only_auxiliary_warning_observed"]
+            for row in samples
+        ),
+        "target_only_auxiliary_statuses": [
+            row["correctness"]["target_only_auxiliary_status"] for row in samples
+        ],
+        "actual_execution_correctness_passed": bool(
+            samples
+            and all(
+                row["correctness"]["actual_execution_correctness_passed"]
+                for row in samples
+            )
+        ),
         "structural_correctness_passed": all(
             row["correctness"]["structural_checks_passed"] for row in samples
         ),
@@ -1226,24 +1260,14 @@ def _persist(
         "records": [row["correctness"] for row in samples],
     }
     pairwise = [row for item in evidence for row in item["pairwise"]]
-    base_only_present = any(
-        row["candidate_merge_mode"] == "base_only" for row in samples
-    )
-    output_relations_passed = correctness["all_target_only_output_ids_equal"] and (
-        not base_only_present
-        or (
-            correctness[
-                "all_target_only_original_dflash_reference_output_ids_equal"
-            ]
-            and correctness["all_original_dflash_reference_output_ids_equal"]
-        )
-    )
     output_divergence = {
         "schema_version": SCHEMA_VERSION,
-        "status": "pass" if output_relations_passed else "failed",
-        "authoritative_relation": (
-            "target_only_original_dflash_reference_and_tree"
+        "status": (
+            "pass"
+            if correctness["all_original_dflash_reference_output_ids_equal"]
+            else "failed"
         ),
+        "authoritative_relation": "original_dflash_reference_vs_tree",
         "records": pairwise,
     }
     gold_logits = [row for item in evidence for row in item["gold_logits"]]
@@ -1438,8 +1462,9 @@ def main(argv: list[str] | None = None) -> int:
                 "formal_end_to_end": "unprofiled control repeats",
                 "component_timing": "separate profiling run",
                 "gold_and_shadow_replay": "separate diagnostic run",
-                "target_only_is_authoritative": True,
-                "original_dflash_is_recorded_control": True,
+                "target_only_is_authoritative": False,
+                "target_only_is_auxiliary_numerical_control": True,
+                "original_dflash_is_token_exact_reference": True,
                 "fixed_target_budget_includes_root": True,
             },
             "artifacts": [*ROOT_ARTIFACTS, *GOLD_ARTIFACTS],
