@@ -96,11 +96,37 @@ diagnostic and cannot be called a correctness failure or a prevented failure.
   cohort and exactly match GPU, compute capability, dtype, model revisions,
   PyTorch, Transformers, and target attention backend. No calibration means a
   preflight failure; zero is not silently assumed.
+- `always_fixed_shape_recheck` runs one Original-DFlash-compatible fixed
+  16-token linear block from an independent clone of the exact round-entry KV
+  snapshot on every round. It rechecks only the packed-selected path, may
+  shorten that path at the first mismatch, crops the temporary KV to the root
+  plus accepted prefix, and commits with source
+  `phase2d2_fixed_shape_recheck`. The correction/bonus remains the next root.
+- `margin_guarded_fixed_shape_recheck` uses that same q=16 executor only when
+  the frozen packed margin is at most 0.25 or unavailable. A non-triggered
+  round is the existing packed-native commit. The provenance-matched NR
+  calibration is mandatory and the threshold is not recalibrated here.
+
+The two fixed-shape modes are new opt-in modes. They do not redefine the
+historical q=1 behavior or artifact meaning of `always_replay` and
+`margin_guarded_replay`. Their neutral accounting uses `fallback_executed` and
+`fallback_executor=fixed_shape_recheck`; the legacy `fallback_replay_*` fields
+remain false. Each online fixed fallback takes a second independent clone from
+the preserved pre-packed snapshot, so packed temporary KV cannot become its
+input. Diagnostic records prove snapshot hash stability, storage independence,
+the full temporary prefix+16 layer lengths, final prefix+root+accepted crop,
+MASK-tail removal, packed-cache discard, and exact target-hidden commit length.
 
 The diagnostic run can execute a non-authoritative shadow replay above the guard
 threshold to measure false positives/negatives. Formal latency, component
 profiling, and Gold/shadow diagnostics are separate generations. The guard is an
 empirical H100 control, not a formal numerical error bound.
+
+Candidate-quality tables still have their historical q1-labelled provenance.
+Fixed-shape F1/F2/F3 qualification therefore does not use coverage or
+refined-only recovery as a decision criterion and makes no new refinement
+benefit claim. Original DFlash speculative execution is the hard token-exact
+oracle; target-only and q1 disagreement remain auxiliary diagnostics.
 
 ### Three-way verifier-oracle diagnostic
 
@@ -193,9 +219,9 @@ speedup claim.
 
 The instrumented `dflash.py` changed. Use a new SHA-bound directory; in
 particular, do not overwrite the current
-`Qwen3-8B-DFlash-b16-phase2d2a-instrumented-66ce72888b34` directory. The change
-adds diagnostic forwards and records only; it does not change refinement or
-online verifier decisions.
+`Qwen3-8B-DFlash-b16-phase2d2a-instrumented-804234b14133` directory. The change
+adds two opt-in fixed-shape online verifier modes and their records; it does not
+change refinement, tree construction, or any legacy verification mode.
 
 ```bash
 cd ~/data/dflash-longctx
@@ -208,7 +234,7 @@ test -z "$(git status --porcelain)"
 source .venv/bin/activate
 export TARGET_MODEL_DIR=/mnt/sevenT/wrz_data/models/Qwen3-8B-b968826d
 export DRAFT_WEIGHT_DIR=/mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16
-export LONGBENCH_ROOT=/mnt/sevenT/wrz_data/datasets/LongBench
+export LONGBENCH_ROOT=/mnt/sevenT/wrz_data/datasets/LongBench/data
 export FROZEN_SELECTOR=outputs/phase2d1b-frozen-selector/frozen-selector.json
 export SHORT_SHA=$(git rev-parse --short=12 HEAD)
 export DRAFT_MODEL_DIR=/mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16-phase2d2a-instrumented-$SHORT_SHA

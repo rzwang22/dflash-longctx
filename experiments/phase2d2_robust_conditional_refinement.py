@@ -11,6 +11,7 @@ import shlex
 import statistics
 import sys
 import traceback
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,10 @@ from dflash.phase2d2.metrics import (
 )
 from dflash.phase2d2.refinement import (
     CANDIDATE_MERGE_MODES,
+    FIXED_SHAPE_MARGIN_THRESHOLD,
+    FIXED_SHAPE_VERIFICATION_MODES,
+    MARGIN_GUARDED_VERIFICATION_MODES,
+    Q1_REPLAY_VERIFICATION_MODES,
     VERIFICATION_MODES,
     validate_refinement_options,
 )
@@ -274,16 +279,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "held-out refined evaluation requires a frozen refinement config"
         )
     args.exclude_selector_training_sources = args.evidence_role == "held_out_evaluation"
-    if args.verification_mode == "margin_guarded_replay":
+    if args.verification_mode in MARGIN_GUARDED_VERIFICATION_MODES:
         if args.dtype == "auto":
-            raise ValueError("margin_guarded_replay requires an explicit dtype")
+            raise ValueError(
+                f"{args.verification_mode} requires an explicit dtype"
+            )
         if args.nr_calibration_dir is None:
-            raise ValueError("margin_guarded_replay requires --nr-calibration-dir")
+            raise ValueError(
+                f"{args.verification_mode} requires --nr-calibration-dir"
+            )
         calibration_path = args.nr_calibration_dir / "nr-calibration.json"
         if not calibration_path.is_file():
             raise ValueError(f"missing NR calibration artifact: {calibration_path}")
         args.nr_calibration = _load_json(calibration_path)
         calibrated = float(args.nr_calibration["decision_margin_threshold"])
+        if (
+            args.verification_mode == "margin_guarded_fixed_shape_recheck"
+            and calibrated != FIXED_SHAPE_MARGIN_THRESHOLD
+        ):
+            raise ValueError(
+                "margin_guarded_fixed_shape_recheck requires the frozen 0.25 "
+                "NR threshold"
+            )
         if (
             args.decision_margin_threshold is not None
             and float(args.decision_margin_threshold) != calibrated
@@ -783,7 +800,9 @@ def _run_one(
             args,
             profiling=False,
             gold=args.enable_gold_checks,
-            shadow_replay=True,
+            shadow_replay=(
+                args.verification_mode not in FIXED_SHAPE_VERIFICATION_MODES
+            ),
             context_length=workload["nominal_prompt_length"],
             verifier_oracle_diagnostics=(
                 args.enable_verifier_oracle_diagnostics
@@ -841,6 +860,12 @@ def _run_one(
         phase["packed_q1_decision_disagreement"] = not oracle["pairwise"][
             "packed_native_vs_q1_replay"
         ]["decision_equal"]
+        phase["packed_fixed_shape_decision_disagreement"] = not oracle[
+            "pairwise"
+        ]["packed_native_vs_fixed_shape_recheck"]["decision_equal"]
+        phase["packed_fixed_shape_first_disagreement_depth"] = oracle[
+            "pairwise"
+        ]["packed_native_vs_fixed_shape_recheck"]["first_disagreement_depth"]
         phase["guard_triggered_on_packed_q1_disagreement"] = bool(
             phase["guard_triggered"]
             and phase["packed_q1_decision_disagreement"]
@@ -887,10 +912,19 @@ def _run_one(
             structural_reasons.append(
                 f"round_{row['round_index']}:temporary_state_commit"
             )
-        if phase["fallback_replay_executed"] and any(
-            value != 1 for value in phase["fallback_query_lengths"]
-        ):
-            structural_reasons.append(f"round_{row['round_index']}:fallback_q_len")
+        if phase["fallback_executed"]:
+            expected_query_length = (
+                1
+                if phase["verification_mode"] in Q1_REPLAY_VERIFICATION_MODES
+                else 16
+            )
+            if any(
+                value != expected_query_length
+                for value in phase["fallback_query_lengths"]
+            ):
+                structural_reasons.append(
+                    f"round_{row['round_index']}:fallback_q_len"
+                )
         current.update(
             {
                 "task": workload["longbench_task"],
@@ -1394,26 +1428,50 @@ def _persist(
                         "verification_mode",
                         "packed_tentative_output_token_ids",
                         "replay_authoritative_output_token_ids",
+                        "fallback_authoritative_output_token_ids",
                         "first_packed_replay_divergent_decision_depth",
                         "first_packed_replay_divergent_absolute_generated_offset",
                         "packed_verifier_margins",
                         "guard_triggered",
                         "guard_trigger",
                         "authoritative_replay_required_by_mode",
+                        "fallback_required_by_mode",
+                        "fallback_executed",
+                        "fallback_executor",
+                        "fallback_forward_count",
                         "fallback_replay_executed",
                         "fallback_replay_token_count",
                         "fallback_query_lengths",
+                        "fixed_shape_fallback_triggered",
+                        "fixed_shape_fallback_executed",
+                        "fixed_shape_forward_count",
+                        "fixed_shape_query_lengths",
+                        "fixed_shape_temporary_kv_layer_lengths",
+                        "fixed_shape_temporary_block_length",
+                        "fixed_shape_cropped_committed_kv_length",
+                        "fixed_shape_mask_tail_discarded_count",
+                        "fixed_shape_round_entry_snapshot_isolated",
+                        "fixed_shape_snapshot_unchanged_after_packed",
+                        "fixed_shape_snapshot_matches_preverification_cache",
+                        "fixed_shape_snapshot_unchanged_after_recheck",
+                        "fixed_shape_clone_matches_round_entry",
+                        "fixed_shape_clone_storage_independent",
                         "diagnostic_shadow_replay_executed",
                         "diagnostic_shadow_replay_query_lengths",
                         "packed_temporary_kv_discarded",
                         "authoritative_committed_cache_length",
                         "authoritative_committed_target_kv_layer_lengths",
+                        "authoritative_committed_target_hidden_length",
                         "authoritative_committed_token_ids",
                         "authoritative_accepted_draft_token_ids",
                         "authoritative_next_root_token_id",
+                        "authoritative_next_root_absolute_sequence_position",
+                        "authoritative_next_root_transition_slot_count",
+                        "authoritative_next_root_matches_output_transition",
                         "authoritative_next_root_kind",
                         "correction_or_bonus_committed_in_current_round",
                         "sibling_kv_removed_from_committed_cache",
+                        "fixed_shape_mask_tail_absent_from_committed_cache",
                         "terminal_round",
                         "truncated_round",
                         "final_output_source",
@@ -1423,6 +1481,8 @@ def _persist(
                         "packed_numerical_decision_divergence",
                         "verifier_relevant_argmax_flip",
                         "packed_q1_decision_disagreement",
+                        "packed_fixed_shape_decision_disagreement",
+                        "packed_fixed_shape_first_disagreement_depth",
                         "guard_triggered_on_packed_q1_disagreement",
                         "guard_missed_packed_q1_disagreement",
                         "original_dflash_reference_attribution_available",
@@ -1430,6 +1490,7 @@ def _persist(
                         "original_dflash_supports_q1_decision",
                         "original_dflash_supports_fixed_shape_decision",
                         "replay_decisions",
+                        "fallback_decisions",
                     }
                 },
             }
@@ -1450,16 +1511,94 @@ def _persist(
         "schema_version": SCHEMA_VERSION,
         "round_count": len(rounds),
         "fallback_round_count": sum(
-            row["phase2d2"]["fallback_replay_executed"] for row in rounds
+            row["phase2d2"].get(
+                "fallback_executed",
+                row["phase2d2"]["fallback_replay_executed"],
+            )
+            for row in rounds
         ),
         "fallback_rate": (
-            sum(row["phase2d2"]["fallback_replay_executed"] for row in rounds)
+            sum(
+                row["phase2d2"].get(
+                    "fallback_executed",
+                    row["phase2d2"]["fallback_replay_executed"],
+                )
+                for row in rounds
+            )
             / len(rounds)
             if rounds
             else None
         ),
         "fallback_replay_token_count": sum(
             row["phase2d2"]["fallback_replay_token_count"] for row in rounds
+        ),
+        "fallback_executor_distribution": dict(
+            sorted(
+                Counter(
+                    row["phase2d2"].get("fallback_executor", "q1_replay")
+                    if row["phase2d2"].get(
+                        "fallback_executed",
+                        row["phase2d2"]["fallback_replay_executed"],
+                    )
+                    else "none"
+                    for row in rounds
+                ).items()
+            )
+        ),
+        "fallback_target_forward_count": sum(
+            row["phase2d2"].get(
+                "fallback_forward_count",
+                row["phase2d2"]["fallback_replay_token_count"],
+            )
+            for row in rounds
+        ),
+        "fixed_shape_fallback_round_count": sum(
+            row["phase2d2"].get("fixed_shape_fallback_executed", False)
+            for row in rounds
+        ),
+        "packed_fixed_shape_decision_disagreement_count": sum(
+            row["phase2d2"].get(
+                "packed_fixed_shape_decision_disagreement", False
+            )
+            for row in rounds
+        ),
+        "triggered_packed_fixed_shape_decision_disagreement_count": sum(
+            row["phase2d2"].get("fixed_shape_fallback_triggered", False)
+            and row["phase2d2"].get(
+                "packed_fixed_shape_decision_disagreement", False
+            )
+            for row in rounds
+        ),
+        "non_triggered_packed_fixed_shape_decision_disagreement_count": sum(
+            not row["phase2d2"].get("fixed_shape_fallback_triggered", False)
+            and row["phase2d2"].get(
+                "packed_fixed_shape_decision_disagreement", False
+            )
+            for row in rounds
+        ),
+        "fixed_shape_authoritative_commit_count": sum(
+            row["phase2d2"].get("final_output_source")
+            == "fixed_shape_recheck"
+            for row in rounds
+        ),
+        "reference_attributed_supports_packed_count": sum(
+            row["phase2d2"].get("original_dflash_supports_packed_decision") is True
+            for row in rounds
+        ),
+        "reference_attributed_supports_fixed_shape_count": sum(
+            row["phase2d2"].get("original_dflash_supports_fixed_shape_decision")
+            is True
+            for row in rounds
+        ),
+        "reference_supported_harmful_fixed_shape_correction_count": sum(
+            row["phase2d2"].get("original_dflash_reference_attribution_available")
+            and row["phase2d2"].get("original_dflash_supports_packed_decision")
+            is True
+            and row["phase2d2"].get(
+                "original_dflash_supports_fixed_shape_decision"
+            )
+            is False
+            for row in rounds
         ),
         "diagnostic_shadow_replay_round_count": sum(
             row["phase2d2"].get("diagnostic_shadow_replay_executed", False)

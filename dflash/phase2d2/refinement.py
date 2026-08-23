@@ -17,11 +17,25 @@ MAXIMUM_DRAFT_DEPTH = 15
 BLOCK_SIZE = 16
 BASE_TOP_M = 16
 CANDIDATE_MERGE_MODES = ("base_only", "conditional_rerank", "union")
-VERIFICATION_MODES = ("packed_native", "always_replay", "margin_guarded_replay")
+Q1_REPLAY_VERIFICATION_MODES = ("always_replay", "margin_guarded_replay")
+FIXED_SHAPE_VERIFICATION_MODES = (
+    "always_fixed_shape_recheck",
+    "margin_guarded_fixed_shape_recheck",
+)
+MARGIN_GUARDED_VERIFICATION_MODES = (
+    "margin_guarded_replay",
+    "margin_guarded_fixed_shape_recheck",
+)
+VERIFICATION_MODES = (
+    "packed_native",
+    *Q1_REPLAY_VERIFICATION_MODES,
+    *FIXED_SHAPE_VERIFICATION_MODES,
+)
 REFINE_DEPTHS = (1, 2, 4)
 REFINED_PREFIX_BUDGETS = (1, 2, 4)
 CONDITIONAL_TOP_RS = (2, 4)
 NODE_BUDGETS = (16, 32)
+FIXED_SHAPE_MARGIN_THRESHOLD = 0.25
 MISSING_LOGIT_POLICY = (
     "Full-vocabulary base and conditional log probabilities are gathered for every "
     "merged token. Missing logits are invalid and are never replaced by zero."
@@ -90,9 +104,12 @@ def validate_refinement_options(
     weight = float(refinement_weight)
     if not math.isfinite(weight) or not 0.0 <= weight <= 1.0:
         raise ValueError("refinement weight must be finite and in [0, 1]")
-    if verification_mode == "margin_guarded_replay" and not calibration_validated:
+    if (
+        verification_mode in MARGIN_GUARDED_VERIFICATION_MODES
+        and not calibration_validated
+    ):
         raise ValueError(
-            "margin_guarded_replay requires a provenance-matched NR calibration"
+            f"{verification_mode} requires a provenance-matched NR calibration"
         )
     return {
         "enabled": True,
@@ -108,6 +125,24 @@ def validate_refinement_options(
         "verification_mode": verification_mode,
         "calibration_validated": bool(calibration_validated),
     }
+
+
+def fallback_executor_for_mode(
+    verification_mode: str, *, guard_triggered: bool
+) -> str:
+    """Resolve the opt-in executor without changing legacy q=1 semantics."""
+
+    if verification_mode not in VERIFICATION_MODES:
+        raise ValueError(f"unsupported robust verification mode: {verification_mode}")
+    if verification_mode == "packed_native":
+        return "none"
+    if verification_mode.startswith("margin_guarded_") and not guard_triggered:
+        return "none"
+    if verification_mode in Q1_REPLAY_VERIFICATION_MODES:
+        return "q1_replay"
+    if verification_mode in FIXED_SHAPE_VERIFICATION_MODES:
+        return "fixed_shape_recheck"
+    raise RuntimeError("verification mode has no fallback executor")
 
 
 def build_conditional_remask_inputs(

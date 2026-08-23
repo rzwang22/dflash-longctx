@@ -4,5 +4,15 @@
   "title": "Phase 2D.2A fallback summary",
   "type": "object",
   "required": ["schema_version", "round_count", "fallback_round_count", "fallback_rate", "fallback_replay_token_count", "guard_false_positive_count", "guard_false_negative_count"],
-  "properties": {"schema_version": {"const": "1.0"}}
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "fallback_executor_distribution": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+    "fallback_target_forward_count": {"type": "integer", "minimum": 0},
+    "fixed_shape_fallback_round_count": {"type": "integer", "minimum": 0},
+    "packed_fixed_shape_decision_disagreement_count": {"type": "integer", "minimum": 0},
+    "fixed_shape_authoritative_commit_count": {"type": "integer", "minimum": 0},
+    "reference_attributed_supports_packed_count": {"type": "integer", "minimum": 0},
+    "reference_attributed_supports_fixed_shape_count": {"type": "integer", "minimum": 0},
+    "reference_supported_harmful_fixed_shape_correction_count": {"type": "integer", "minimum": 0}
+  }
 }

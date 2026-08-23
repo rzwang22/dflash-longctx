@@ -205,7 +205,12 @@ def aggregate_results(
         )
         accepted = sum(int(row["accepted_draft_token_count"]) for row in round_rows)
         fallback_rounds = [
-            row for row in round_rows if row["phase2d2"]["fallback_replay_executed"]
+            row
+            for row in round_rows
+            if row["phase2d2"].get(
+                "fallback_executed",
+                row["phase2d2"]["fallback_replay_executed"],
+            )
         ]
         formal_sample_medians = [
             statistics.median(

@@ -83,8 +83,12 @@ from .phase2d1_tree_policies import (
     top1_chain_tree,
 )
 from .phase2d2_refinement import (
+    FIXED_SHAPE_MARGIN_THRESHOLD,
+    FIXED_SHAPE_VERIFICATION_MODES,
+    MARGIN_GUARDED_VERIFICATION_MODES,
     build_conditional_remask_inputs,
     build_refined_tree,
+    fallback_executor_for_mode,
     select_refinement_prefixes,
     validate_refinement_options,
 )
@@ -518,6 +522,16 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         configured_phase2d2["decision_margin_threshold"] = (
             configured_margin_threshold
         )
+        if (
+            enable_phase2d2_refinement
+            and phase2d2_verification_mode
+            == "margin_guarded_fixed_shape_recheck"
+            and configured_margin_threshold != FIXED_SHAPE_MARGIN_THRESHOLD
+        ):
+            raise ValueError(
+                "margin_guarded_fixed_shape_recheck requires the frozen 0.25 "
+                "NR threshold"
+            )
         configured_selector = None
         if online_selector_mode is not None:
             if not enable_online_tree:
@@ -1518,12 +1532,20 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         linear_commit_source = committed_cache_source in {
             "canonical_recheck",
             "phase2d2_q1_replay",
+            "phase2d2_fixed_shape_recheck",
         }
         if committed_cache_source == "phase2d2_q1_replay":
             sibling_nodes_discarded = bool(
                 compaction.get("packed_temporary_kv_discarded")
             ) and all(
                 length == expected_compacted
+                for length in compaction["temporary_layer_lengths"]
+            )
+        elif committed_cache_source == "phase2d2_fixed_shape_recheck":
+            sibling_nodes_discarded = bool(
+                compaction.get("packed_temporary_kv_discarded")
+            ) and all(
+                length == int(compaction["prefix_length"]) + 16
                 for length in compaction["temporary_layer_lengths"]
             )
         else:
@@ -1676,6 +1698,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 "compacted_source": (
                     "shape-stable q_len=1 authoritative replay cache"
                     if committed_cache_source == "phase2d2_q1_replay"
+                    else "fixed-shape q_len=16 authoritative linear cache crop"
+                    if committed_cache_source == "phase2d2_fixed_shape_recheck"
                     else "canonical linear selected-path cache crop"
                     if committed_cache_source == "canonical_recheck"
                     else "path-aware gathered packed-tree cache"
@@ -2115,6 +2139,7 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
         context_length_before,
         block_size,
         return_decision_diagnostics=False,
+        committed_cache_source="canonical_recheck",
     ):
         """Recheck the native-selected path with the original linear block shape."""
 
@@ -2249,6 +2274,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             "canonical_linear_query_length": block_size,
             "canonical_cache_length": expected_length,
         }
+        if committed_cache_source != "canonical_recheck":
+            compaction["committed_cache_source"] = committed_cache_source
         return {
             **decision,
             "accepted_node_indices": accepted_indices,
@@ -2270,9 +2297,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
             ),
             "input_token_ids": linear_ids,
             "query_length": block_size,
+            "query_lengths": [block_size],
             **(
                 {
-                    "query_lengths": [block_size] * len(decision_records),
                     "attention_mask_form": "implicit_causal_fixed_linear_block",
                     "attention_mask_shape": None,
                     "position_ids": [
@@ -3292,6 +3319,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             or phase2d2_shadow_replay
                         )
                     )
+                    phase2d2_fixed_shape_mode = bool(
+                        phase2d2_enabled
+                        and phase2d2_verification_mode
+                        in FIXED_SHAPE_VERIFICATION_MODES
+                    )
+                    fixed_shape_snapshot_sha256_before_packed = None
+                    fixed_shape_snapshot_matches_preverification_cache = None
+                    fixed_shape_snapshot_unchanged_after_packed = None
+                    fixed_shape_snapshot_unchanged_after_recheck = None
+                    fixed_shape_clone_matches_round_entry = None
+                    fixed_shape_clone_storage_independent = None
                     if decision_stabilization != "off" or phase2d2_replay_capable:
                         snapshot_pair = timer.start()
                         with nvtx_range(
@@ -3301,6 +3339,26 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                                 past_key_values_target
                             )
                         timer.stop(snapshot_pair)
+                    if (
+                        phase2d2_fixed_shape_mode
+                        and return_diagnostics
+                        and not enable_profiling
+                    ):
+                        fixed_shape_snapshot_sha256_before_packed = (
+                            self._phase2d2_json_sha256(
+                                self._phase2c_cache_comparable_summary(
+                                    stabilization_prefix_cache
+                                )
+                            )
+                        )
+                        fixed_shape_snapshot_matches_preverification_cache = bool(
+                            fixed_shape_snapshot_sha256_before_packed
+                            == self._phase2d2_json_sha256(
+                                self._phase2c_cache_comparable_summary(
+                                    past_key_values_target
+                                )
+                            )
+                        )
                     record_divergence_round = (
                         enable_divergence_diagnostics and round_index < gold_max_rounds
                     )
@@ -3325,6 +3383,15 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     packed_temporary_layer_lengths = dynamic_cache_lengths(
                         past_key_values_target
                     )
+                    if fixed_shape_snapshot_sha256_before_packed is not None:
+                        fixed_shape_snapshot_unchanged_after_packed = bool(
+                            fixed_shape_snapshot_sha256_before_packed
+                            == self._phase2d2_json_sha256(
+                                self._phase2c_cache_comparable_summary(
+                                    stabilization_prefix_cache
+                                )
+                            )
+                        )
 
                     traverse_pair = timer.start()
                     with nvtx_range(torch, "phase2c.traverse", enable_profiling):
@@ -3364,7 +3431,8 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                     if (
                         return_diagnostics
                         or decision_stabilization == "margin"
-                        or phase2d2_verification_mode == "margin_guarded_replay"
+                        or phase2d2_verification_mode
+                        in MARGIN_GUARDED_VERIFICATION_MODES
                     ):
                         path_logits = packed_output.logits[0].index_select(
                             0, native_path_decision_indices
@@ -3609,20 +3677,25 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
 
                     phase2d2_guard_triggered = False
                     phase2d2_authoritative_replay_required = False
+                    phase2d2_fixed_shape_recheck_required = False
+                    phase2d2_fallback_executor = "none"
                     if phase2d2_enabled:
-                        if phase2d2_verification_mode == "always_replay":
-                            phase2d2_authoritative_replay_required = True
-                            trigger_reason = "phase2d2_mode_always_replay"
-                        elif phase2d2_verification_mode == "margin_guarded_replay":
+                        if phase2d2_verification_mode in {
+                            "always_replay",
+                            "always_fixed_shape_recheck",
+                        }:
+                            trigger_reason = (
+                                f"phase2d2_mode_{phase2d2_verification_mode}"
+                            )
+                        elif phase2d2_verification_mode in (
+                            MARGIN_GUARDED_VERIFICATION_MODES
+                        ):
                             threshold = float(
                                 phase2d2_config["decision_margin_threshold"]
                             )
                             phase2d2_guard_triggered = bool(
                                 minimum_path_margin is None
                                 or minimum_path_margin <= threshold
-                            )
-                            phase2d2_authoritative_replay_required = (
-                                phase2d2_guard_triggered
                             )
                             trigger_reason = (
                                 "phase2d2_required_margin_unobservable"
@@ -3633,7 +3706,17 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             )
                         else:
                             trigger_reason = "phase2d2_packed_native"
-                        recheck_triggered = phase2d2_authoritative_replay_required
+                        phase2d2_fallback_executor = fallback_executor_for_mode(
+                            phase2d2_verification_mode,
+                            guard_triggered=phase2d2_guard_triggered,
+                        )
+                        phase2d2_authoritative_replay_required = (
+                            phase2d2_fallback_executor == "q1_replay"
+                        )
+                        phase2d2_fixed_shape_recheck_required = (
+                            phase2d2_fallback_executor == "fixed_shape_recheck"
+                        )
+                        recheck_triggered = phase2d2_fallback_executor != "none"
                     else:
                         recheck_triggered = should_recheck(
                             decision_stabilization,
@@ -3657,7 +3740,10 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         phase2d2_enabled
                         and (
                             phase2d2_authoritative_replay_required
-                            or phase2d2_shadow_replay
+                            or (
+                                phase2d2_shadow_replay
+                                and not phase2d2_fixed_shape_recheck_required
+                            )
                         )
                     )
                     if phase2d2_replay_executed:
@@ -3672,6 +3758,58 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                                 native_traversal=traversal,
                                 context_length_before=context_length_before,
                             )
+                        timer.stop(canonical_pair)
+                    elif phase2d2_fixed_shape_recheck_required:
+                        canonical_pair = timer.start()
+                        with nvtx_range(
+                            torch,
+                            "phase2d2.fixed_shape_recheck",
+                            enable_profiling,
+                        ):
+                            fixed_shape_prefix_cache = clone_dynamic_cache(
+                                stabilization_prefix_cache
+                            )
+                            if fixed_shape_snapshot_sha256_before_packed is not None:
+                                fixed_shape_clone_matches_round_entry = bool(
+                                    fixed_shape_snapshot_sha256_before_packed
+                                    == self._phase2d2_json_sha256(
+                                        self._phase2c_cache_comparable_summary(
+                                            fixed_shape_prefix_cache
+                                        )
+                                    )
+                                )
+                                fixed_shape_clone_storage_independent = (
+                                    self._phase2d2_cache_storage_is_independent(
+                                        stabilization_prefix_cache,
+                                        fixed_shape_prefix_cache,
+                                    )
+                                )
+                            canonical = self._phase2c_canonical_selected_path_recheck(
+                                target=target,
+                                prefix_cache=fixed_shape_prefix_cache,
+                                tree=tree,
+                                native_traversal=traversal,
+                                context_length_before=context_length_before,
+                                block_size=block_size,
+                                return_decision_diagnostics=bool(
+                                    return_diagnostics and not enable_profiling
+                                ),
+                                committed_cache_source=(
+                                    "phase2d2_fixed_shape_recheck"
+                                ),
+                            )
+                            canonical["compaction"][
+                                "packed_temporary_kv_discarded"
+                            ] = True
+                            if fixed_shape_snapshot_sha256_before_packed is not None:
+                                fixed_shape_snapshot_unchanged_after_recheck = bool(
+                                    fixed_shape_snapshot_sha256_before_packed
+                                    == self._phase2d2_json_sha256(
+                                        self._phase2c_cache_comparable_summary(
+                                            stabilization_prefix_cache
+                                        )
+                                    )
+                                )
                         timer.stop(canonical_pair)
                     elif recheck_triggered:
                         canonical_pair = timer.start()
@@ -3689,16 +3827,24 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         timer.stop(canonical_pair)
 
                     selected_commit_source = (
-                        "canonical_recheck"
+                        "phase2d2_q1_replay"
                         if phase2d2_enabled
-                        and phase2d2_authoritative_replay_required
+                        and phase2d2_fallback_executor == "q1_replay"
+                        else "phase2d2_fixed_shape_recheck"
+                        if phase2d2_enabled
+                        and phase2d2_fallback_executor == "fixed_shape_recheck"
                         else stabilization_commit_source(
                             decision_stabilization, recheck_triggered
                         )
                     )
                     use_canonical_commit = bool(
                         canonical is not None
-                        and selected_commit_source == "canonical_recheck"
+                        and selected_commit_source
+                        in {
+                            "canonical_recheck",
+                            "phase2d2_q1_replay",
+                            "phase2d2_fixed_shape_recheck",
+                        }
                     )
                     compact_pair = None
                     kv_replacement_pair = None
@@ -4337,6 +4483,27 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             ],
                             int(traversal["next_root_token_id"].item()),
                         ]
+                        q1_canonical_available = bool(
+                            canonical_available and phase2d2_replay_executed
+                        )
+                        fixed_shape_canonical_available = bool(
+                            canonical_available
+                            and phase2d2_fixed_shape_recheck_required
+                        )
+                        fallback_executed = bool(
+                            use_canonical_commit
+                            and phase2d2_fallback_executor != "none"
+                        )
+                        fallback_forward_count = (
+                            len(canonical["decision_records"])
+                            if fallback_executed
+                            and phase2d2_fallback_executor == "q1_replay"
+                            else 1
+                            if fallback_executed
+                            and phase2d2_fallback_executor
+                            == "fixed_shape_recheck"
+                            else 0
+                        )
                         replay_tokens = (
                             [
                                 *[
@@ -4348,12 +4515,26 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                                 ],
                                 int(canonical["next_root_token_id"]),
                             ]
-                            if canonical_available
+                            if q1_canonical_available
+                            else None
+                        )
+                        fallback_tokens = (
+                            [
+                                *[
+                                    int(value)
+                                    for value in canonical["committed_tokens"]
+                                    .detach()
+                                    .cpu()
+                                    .tolist()
+                                ],
+                                int(canonical["next_root_token_id"]),
+                            ]
+                            if fallback_executed
                             else None
                         )
                         first_divergent_decision_depth = (
                             canonical["first_corrected_depth"] - 1
-                            if canonical_available
+                            if q1_canonical_available
                             and canonical["first_corrected_depth"] is not None
                             else None
                         )
@@ -4363,8 +4544,29 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             ]["decision_equal"]
                             if verifier_oracle_comparison is not None
                             else bool(
-                                canonical_available and canonical["decision_changed"]
+                                q1_canonical_available
+                                and canonical["decision_changed"]
                             )
+                        )
+                        packed_fixed_shape_decision_disagreement = (
+                            not verifier_oracle_comparison["pairwise"][
+                                "packed_native_vs_fixed_shape_recheck"
+                            ]["decision_equal"]
+                            if verifier_oracle_comparison is not None
+                            else bool(
+                                fixed_shape_canonical_available
+                                and canonical["decision_changed"]
+                            )
+                        )
+                        first_fixed_shape_disagreement_depth = (
+                            verifier_oracle_comparison["pairwise"][
+                                "packed_native_vs_fixed_shape_recheck"
+                            ]["first_disagreement_depth"]
+                            if verifier_oracle_comparison is not None
+                            else canonical["first_corrected_depth"] - 1
+                            if fixed_shape_canonical_available
+                            and canonical["first_corrected_depth"] is not None
+                            else None
                         )
                         refined_paths = {
                             tuple(row["path"])
@@ -4456,9 +4658,20 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             ],
                             "packed_tentative_output_token_ids": packed_tentative_tokens,
                             "replay_authoritative_output_token_ids": replay_tokens,
-                            "packed_replay_decision_equal": native_canonical_equal,
+                            "fallback_authoritative_output_token_ids": fallback_tokens,
+                            "packed_replay_decision_equal": (
+                                native_canonical_equal
+                                if q1_canonical_available
+                                else None
+                            ),
                             "packed_q1_decision_disagreement": (
                                 packed_q1_decision_disagreement
+                            ),
+                            "packed_fixed_shape_decision_disagreement": (
+                                packed_fixed_shape_decision_disagreement
+                            ),
+                            "packed_fixed_shape_first_disagreement_depth": (
+                                first_fixed_shape_disagreement_depth
                             ),
                             "guard_triggered_on_packed_q1_disagreement": bool(
                                 phase2d2_guard_triggered
@@ -4490,30 +4703,105 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             "authoritative_replay_required_by_mode": (
                                 phase2d2_authoritative_replay_required
                             ),
+                            "fallback_required_by_mode": bool(
+                                phase2d2_fallback_executor != "none"
+                            ),
                             "guard_trigger": trigger_reason,
+                            "fallback_executed": fallback_executed,
+                            "fallback_executor": (
+                                phase2d2_fallback_executor
+                                if fallback_executed
+                                else "none"
+                            ),
+                            "fallback_forward_count": fallback_forward_count,
                             "fallback_replay_executed": bool(
                                 phase2d2_authoritative_replay_required
-                                and canonical_available
+                                and q1_canonical_available
                             ),
                             "fallback_replay_token_count": (
                                 len(canonical["decision_records"])
                                 if phase2d2_authoritative_replay_required
-                                and canonical_available
+                                and q1_canonical_available
                                 else 0
                             ),
                             "fallback_query_lengths": (
                                 canonical["query_lengths"]
-                                if phase2d2_authoritative_replay_required
-                                and canonical_available
+                                if fallback_executed
                                 else []
                             ),
                             "diagnostic_shadow_replay_executed": bool(
-                                canonical_available and not use_canonical_commit
+                                q1_canonical_available and not use_canonical_commit
                             ),
                             "diagnostic_shadow_replay_query_lengths": (
                                 canonical["query_lengths"]
-                                if canonical_available and not use_canonical_commit
+                                if q1_canonical_available
+                                and not use_canonical_commit
                                 else []
+                            ),
+                            "fixed_shape_fallback_triggered": bool(
+                                phase2d2_fixed_shape_recheck_required
+                            ),
+                            "fixed_shape_fallback_executed": bool(
+                                fallback_executed
+                                and phase2d2_fallback_executor
+                                == "fixed_shape_recheck"
+                            ),
+                            "fixed_shape_forward_count": (
+                                1 if fixed_shape_canonical_available else 0
+                            ),
+                            "fixed_shape_query_lengths": (
+                                canonical["query_lengths"]
+                                if fixed_shape_canonical_available
+                                else []
+                            ),
+                            "fixed_shape_temporary_kv_layer_lengths": (
+                                canonical["compaction"]["temporary_layer_lengths"]
+                                if fixed_shape_canonical_available
+                                else []
+                            ),
+                            "fixed_shape_temporary_block_length": (
+                                block_size if fixed_shape_canonical_available else None
+                            ),
+                            "fixed_shape_cropped_committed_kv_length": (
+                                canonical["compaction"][
+                                    "expected_compacted_length"
+                                ]
+                                if fixed_shape_canonical_available
+                                else None
+                            ),
+                            "fixed_shape_mask_tail_discarded_count": (
+                                canonical["compaction"][
+                                    "discarded_canonical_tail_count"
+                                ]
+                                if fixed_shape_canonical_available
+                                else 0
+                            ),
+                            "fixed_shape_round_entry_snapshot_isolated": (
+                                bool(
+                                    fixed_shape_snapshot_unchanged_after_packed
+                                    and fixed_shape_snapshot_unchanged_after_recheck
+                                    and fixed_shape_snapshot_matches_preverification_cache
+                                    and fixed_shape_clone_matches_round_entry
+                                    and fixed_shape_clone_storage_independent
+                                )
+                                if fixed_shape_snapshot_sha256_before_packed
+                                is not None
+                                else None
+                            ),
+                            "fixed_shape_snapshot_unchanged_after_packed": (
+                                fixed_shape_snapshot_unchanged_after_packed
+                            ),
+                            "fixed_shape_snapshot_matches_preverification_cache": (
+                                fixed_shape_snapshot_matches_preverification_cache
+                            ),
+                            "fixed_shape_snapshot_unchanged_after_recheck": (
+                                fixed_shape_snapshot_unchanged_after_recheck
+                            ),
+                            "fixed_shape_clone_matches_round_entry": (
+                                fixed_shape_clone_matches_round_entry
+                            ),
+                            "fixed_shape_clone_storage_independent": (
+                                fixed_shape_clone_storage_independent
                             ),
                             "packed_temporary_kv_discarded": bool(
                                 use_canonical_commit
@@ -4521,6 +4809,9 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             "authoritative_committed_cache_length": start,
                             "authoritative_committed_target_kv_layer_lengths": (
                                 dynamic_cache_lengths(past_key_values_target)
+                            ),
+                            "authoritative_committed_target_hidden_length": int(
+                                target_hidden.shape[1]
                             ),
                             "authoritative_committed_token_ids": [
                                 int(value)
@@ -4532,6 +4823,16 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                             ],
                             "authoritative_next_root_token_id": int(
                                 effective_traversal["next_root_token_id"].item()
+                            ),
+                            "authoritative_next_root_absolute_sequence_position": start,
+                            "authoritative_next_root_transition_slot_count": 1,
+                            "authoritative_next_root_matches_output_transition": bool(
+                                int(output_ids[0, start].item())
+                                == int(
+                                    effective_traversal[
+                                        "next_root_token_id"
+                                    ].item()
+                                )
                             ),
                             "authoritative_next_root_kind": (
                                 "bonus"
@@ -4549,11 +4850,29 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                                     )
                                 )
                             ),
+                            "fixed_shape_mask_tail_absent_from_committed_cache": (
+                                bool(
+                                    fixed_shape_canonical_available
+                                    and all(
+                                        length == start
+                                        for length in dynamic_cache_lengths(
+                                            past_key_values_target
+                                        )
+                                    )
+                                )
+                                if fixed_shape_canonical_available
+                                else None
+                            ),
                             "terminal_round": accounting["stop_reason"] != "continue",
                             "truncated_round": accounting["truncated_token_count"] > 0,
                             "final_output_source": (
                                 "shape_stable_q1_replay"
                                 if use_canonical_commit
+                                and phase2d2_fallback_executor == "q1_replay"
+                                else "fixed_shape_recheck"
+                                if use_canonical_commit
+                                and phase2d2_fallback_executor
+                                == "fixed_shape_recheck"
                                 else "packed_native"
                             ),
                             "guard_prevented_output_divergence": bool(
@@ -4578,25 +4897,29 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                                 and canonical["decision_changed"]
                             ),
                             "packed_numerical_decision_divergence": bool(
-                                canonical_available and canonical["decision_changed"]
+                                q1_canonical_available
+                                and canonical["decision_changed"]
                             ),
                             "verifier_relevant_argmax_flip": bool(
                                 canonical_available and canonical["decision_changed"]
                             ),
                             "replay_decisions": (
                                 canonical["decision_records"]
-                                if canonical_available
+                                if q1_canonical_available
                                 else []
                             ),
-                            "formal_target_forward_count": 1
-                            + (
-                                len(canonical["decision_records"])
-                                if use_canonical_commit
-                                else 0
+                            "fallback_decisions": (
+                                canonical["decision_records"]
+                                if fallback_executed
+                                else []
+                            ),
+                            "formal_target_forward_count": (
+                                1 + fallback_forward_count
                             ),
                             "diagnostic_shadow_target_forward_count": (
                                 len(canonical["decision_records"])
-                                if canonical_available and not use_canonical_commit
+                                if q1_canonical_available
+                                and not use_canonical_commit
                                 else 0
                             ),
                         }
@@ -4836,13 +5159,13 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                         ],
                         "fallback_cuda_elapsed_ms": (
                             canonical_ms
-                            if record["phase2d2"]["fallback_replay_executed"]
+                            if record["phase2d2"]["fallback_executed"]
                             else None
                         ),
                         "fallback_cuda_elapsed_unavailable_reason": (
                             None
-                            if record["phase2d2"]["fallback_replay_executed"]
-                            else "fallback_replay_not_executed"
+                            if record["phase2d2"]["fallback_executed"]
+                            else "fallback_not_executed"
                         ),
                         "total_draft_cuda_elapsed_ms": record["timing"][
                             "total_draft_cuda_elapsed_ms"
@@ -4896,9 +5219,22 @@ class DFlashDraftModel(Qwen3PreTrainedModel):
                 "conditional_state_is_temporary": True,
                 "target_information_used_for_prefix_selection": False,
                 "verification_replay_query_length": (
-                    1 if phase2d2_enabled else None
+                    1
+                    if phase2d2_enabled
+                    and phase2d2_verification_mode
+                    in {"always_replay", "margin_guarded_replay"}
+                    else None
                 ),
+                "fixed_shape_recheck_query_length": (
+                    block_size
+                    if phase2d2_enabled
+                    and phase2d2_verification_mode
+                    in FIXED_SHAPE_VERIFICATION_MODES
+                    else None
+                ),
+                "fallback_accounting_is_executor_neutral": True,
                 "packed_temporary_kv_discarded_when_replay_authoritative": True,
+                "packed_temporary_kv_discarded_when_fallback_authoritative": True,
                 "formal_and_gold_target_forward_counts_separated": True,
             },
             "phase2c": {

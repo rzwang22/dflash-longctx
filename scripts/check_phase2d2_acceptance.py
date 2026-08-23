@@ -43,6 +43,11 @@ REQUIRED = (
     "phase2d2-decision.json",
     "terminal.log",
 )
+Q1_REPLAY_MODES = {"always_replay", "margin_guarded_replay"}
+FIXED_SHAPE_MODES = {
+    "always_fixed_shape_recheck",
+    "margin_guarded_fixed_shape_recheck",
+}
 
 
 def _json(path: Path) -> Any:
@@ -128,6 +133,114 @@ def _same_evidence_identity(left: dict[str, Any], right: dict[str, Any]) -> bool
             "configuration_id",
         )
     )
+
+
+def _validate_round_fallback_contract(row: dict[str, Any]) -> None:
+    """Validate mode-specific fallback geometry and authoritative cache state."""
+
+    phase = row["phase2d2"]
+    mode = phase["verification_mode"]
+    fallback_executed = phase.get(
+        "fallback_executed", phase["fallback_replay_executed"]
+    )
+    executor = phase.get(
+        "fallback_executor",
+        "q1_replay" if phase["fallback_replay_executed"] else "none",
+    )
+    query_lengths = phase["fallback_query_lengths"]
+
+    if mode in Q1_REPLAY_MODES:
+        if fallback_executed:
+            if executor != "q1_replay" or not query_lengths:
+                raise ValueError("legacy replay fallback executor is inconsistent")
+            if any(value != 1 for value in query_lengths):
+                raise ValueError("fallback replay used a query length other than one")
+            if not phase["fallback_replay_executed"]:
+                raise ValueError("legacy replay execution was not preserved")
+        if mode == "always_replay" and not fallback_executed:
+            raise ValueError("always_replay did not execute authoritative replay")
+        return
+
+    if mode not in FIXED_SHAPE_MODES:
+        if fallback_executed or executor != "none":
+            raise ValueError("packed_native unexpectedly executed a fallback")
+        return
+
+    expected_execution = (
+        True
+        if mode == "always_fixed_shape_recheck"
+        else bool(phase["guard_triggered"])
+    )
+    if fallback_executed != expected_execution:
+        raise ValueError("fixed-shape fallback execution disagrees with its mode")
+    if phase["fixed_shape_fallback_triggered"] != expected_execution:
+        raise ValueError("fixed-shape fallback trigger record is inconsistent")
+    if not expected_execution:
+        if executor != "none" or phase["final_output_source"] != "packed_native":
+            raise ValueError("non-triggered margin-fixed round changed packed commit")
+        if row["cache_compaction"].get("committed_cache_source") != "packed_native":
+            raise ValueError("non-triggered margin-fixed cache was not packed-native")
+        return
+
+    if executor != "fixed_shape_recheck":
+        raise ValueError("fixed-shape mode selected the wrong fallback executor")
+    if phase["fallback_replay_executed"]:
+        raise ValueError("fixed-shape fallback was mislabeled as q1 replay")
+    if query_lengths != [16] or phase["fixed_shape_query_lengths"] != [16]:
+        raise ValueError("fixed-shape fallback did not use one q_len=16 forward")
+    if phase["fallback_forward_count"] != 1 or phase["fixed_shape_forward_count"] != 1:
+        raise ValueError("fixed-shape fallback target-forward count is not one")
+    prefix = int(row["prefix_cache_length_before_round"])
+    committed = int(row["committed_token_count"])
+    expected_cropped = prefix + committed
+    temporary_lengths = phase["fixed_shape_temporary_kv_layer_lengths"]
+    if (
+        phase["fixed_shape_temporary_block_length"] != 16
+        or not temporary_lengths
+        or any(int(length) != prefix + 16 for length in temporary_lengths)
+    ):
+        raise ValueError("fixed-shape temporary KV is not a full 16-token block")
+    if (
+        phase["fixed_shape_cropped_committed_kv_length"] != expected_cropped
+        or phase["authoritative_committed_cache_length"] != expected_cropped
+    ):
+        raise ValueError("fixed-shape authoritative cache crop length is wrong")
+    expected_tail = 15 - int(row["accepted_draft_token_count"])
+    if phase["fixed_shape_mask_tail_discarded_count"] != expected_tail:
+        raise ValueError("fixed-shape MASK-tail discard count is wrong")
+    if phase["authoritative_committed_target_hidden_length"] != committed:
+        raise ValueError("fixed-shape target_hidden is not root plus accepted path")
+    if (
+        phase["authoritative_next_root_absolute_sequence_position"]
+        != expected_cropped
+        or phase["authoritative_next_root_transition_slot_count"] != 1
+        or phase["authoritative_next_root_matches_output_transition"] is not True
+    ):
+        raise ValueError("fixed-shape next-root transition is inconsistent")
+    if phase["fixed_shape_round_entry_snapshot_isolated"] is not True:
+        raise ValueError("fixed-shape round-entry cache isolation was not proven")
+    if phase["fixed_shape_snapshot_matches_preverification_cache"] is not True:
+        raise ValueError("fixed-shape snapshot does not match pre-verification KV")
+    if not phase["packed_temporary_kv_discarded"]:
+        raise ValueError("packed temporary KV was not discarded")
+    if phase["final_output_source"] != "fixed_shape_recheck":
+        raise ValueError("fixed-shape authoritative output provenance is wrong")
+    if (
+        row["cache_compaction"].get("committed_cache_source")
+        != "phase2d2_fixed_shape_recheck"
+    ):
+        raise ValueError("fixed-shape authoritative cache provenance is wrong")
+    if phase["fixed_shape_mask_tail_absent_from_committed_cache"] is not True:
+        raise ValueError("fixed-shape MASK-tail KV remained after crop")
+    if phase["correction_or_bonus_committed_in_current_round"]:
+        raise ValueError("fixed-shape correction/bonus entered current KV")
+    if not phase["sibling_kv_removed_from_committed_cache"]:
+        raise ValueError("fixed-shape authoritative cache retained sibling KV")
+    layer_lengths = phase["authoritative_committed_target_kv_layer_lengths"]
+    if not layer_lengths or any(
+        int(length) != expected_cropped for length in layer_lengths
+    ):
+        raise ValueError("fixed-shape target KV layer lengths disagree")
 
 
 def _causal_gold_kv_skip_evidence(
@@ -349,15 +462,7 @@ def check_output(output: Path) -> dict[str, Any]:
             raise ValueError("root/node-budget invariant failed")
         if phase["temporary_refinement_state_committed"]:
             raise ValueError("temporary refinement state was committed")
-        if phase["fallback_replay_executed"] and any(
-            value != 1 for value in phase["fallback_query_lengths"]
-        ):
-            raise ValueError("fallback replay used a query length other than one")
-        if (
-            phase["verification_mode"] == "always_replay"
-            and not phase["fallback_replay_executed"]
-        ):
-            raise ValueError("always_replay did not execute authoritative replay")
+        _validate_round_fallback_contract(row)
         if phase["correction_or_bonus_committed_in_current_round"]:
             raise ValueError("correction/bonus was committed in the current round")
         if not phase["sibling_kv_removed_from_committed_cache"]:

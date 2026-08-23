@@ -22,9 +22,13 @@ from dflash.phase2d2.metrics import (
     candidate_quality_for_round,
 )
 from dflash.phase2d2.refinement import (
+    FIXED_SHAPE_MARGIN_THRESHOLD,
+    FIXED_SHAPE_VERIFICATION_MODES,
+    VERIFICATION_MODES,
     audit_prefix_selection_inputs,
     build_conditional_remask_inputs,
     build_refined_tree,
+    fallback_executor_for_mode,
     select_refinement_prefixes,
     validate_refinement_options,
 )
@@ -55,6 +59,7 @@ from scripts.aggregate_phase2d2_decision import _stable_positive_by_task
 from scripts.check_phase2d2_acceptance import (
     _causal_gold_kv_skip_evidence,
     _validate_gold_kv_shape_evidence,
+    _validate_round_fallback_contract,
     check_output,
 )
 from scripts.phase2d2_build_nr_calibration import (
@@ -122,7 +127,7 @@ def _oracle_comparison_fixture() -> dict:
         },
         "packed_native": _oracle_path([10, 11, 12], query_lengths=[16]),
         "q1_replay": _oracle_path([10, 99], query_lengths=[1, 1]),
-        "fixed_shape_recheck": _oracle_path([10, 11, 12], query_lengths=[16, 16]),
+        "fixed_shape_recheck": _oracle_path([10, 11, 12], query_lengths=[16]),
         "pairwise": {
             "packed_native_vs_q1_replay": relation_different,
             "packed_native_vs_fixed_shape_recheck": relation_equal,
@@ -1378,6 +1383,269 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
             text=True,
         ).stdout.strip()
         self.assertEqual(changed, "")
+
+
+class FixedShapeFallbackTests(unittest.TestCase):
+    @staticmethod
+    def _round_fixture(
+        mode: str = "always_fixed_shape_recheck", *, triggered: bool = True
+    ) -> dict:
+        fixed = triggered
+        prefix = 1024
+        accepted = 3
+        committed = accepted + 1
+        return {
+            "prefix_cache_length_before_round": prefix,
+            "accepted_draft_token_count": accepted,
+            "committed_token_count": committed,
+            "cache_compaction": {
+                "committed_cache_source": (
+                    "phase2d2_fixed_shape_recheck" if fixed else "packed_native"
+                )
+            },
+            "phase2d2": {
+                "candidate_merge_mode": "base_only",
+                "initial_parallel_draft_forward_count": 1,
+                "conditional_refinement_forward_count": 0,
+                "base_only_conditional_refinement_bypassed": True,
+                "actual_verification_tree_source": "phase2c_frozen_selector_seed_tree",
+                "refined_tree_replaced_seed_tree": False,
+                "external_request_batch_size": 1,
+                "internal_branch_batch_size": 0,
+                "conditional_input_token_ids": [],
+                "temporary_refinement_state_committed": False,
+                "selected_tree_node_count": 16,
+                "actual_verified_node_count": 16,
+                "root_count": 1,
+                "fixed_root_inclusive_node_budget": 16,
+                "node_budget_invariant_passed": True,
+                "verification_mode": mode,
+                "guard_triggered": triggered
+                if mode == "margin_guarded_fixed_shape_recheck"
+                else False,
+                "fallback_replay_executed": False,
+                "fallback_executed": fixed,
+                "fallback_executor": (
+                    "fixed_shape_recheck" if fixed else "none"
+                ),
+                "fallback_forward_count": 1 if fixed else 0,
+                "fallback_query_lengths": [16] if fixed else [],
+                "fixed_shape_fallback_triggered": fixed,
+                "fixed_shape_fallback_executed": fixed,
+                "fixed_shape_forward_count": 1 if fixed else 0,
+                "fixed_shape_query_lengths": [16] if fixed else [],
+                "fixed_shape_temporary_kv_layer_lengths": (
+                    [prefix + 16, prefix + 16] if fixed else []
+                ),
+                "fixed_shape_temporary_block_length": 16 if fixed else None,
+                "fixed_shape_cropped_committed_kv_length": (
+                    prefix + committed if fixed else None
+                ),
+                "fixed_shape_mask_tail_discarded_count": (
+                    15 - accepted if fixed else 0
+                ),
+                "fixed_shape_round_entry_snapshot_isolated": True
+                if fixed
+                else None,
+                "fixed_shape_snapshot_matches_preverification_cache": True
+                if fixed
+                else None,
+                "packed_temporary_kv_discarded": fixed,
+                "authoritative_committed_cache_length": prefix + committed,
+                "authoritative_committed_target_kv_layer_lengths": [
+                    prefix + committed,
+                    prefix + committed,
+                ],
+                "authoritative_committed_target_hidden_length": committed,
+                "authoritative_next_root_absolute_sequence_position": (
+                    prefix + committed
+                ),
+                "authoritative_next_root_transition_slot_count": 1,
+                "authoritative_next_root_matches_output_transition": True,
+                "correction_or_bonus_committed_in_current_round": False,
+                "sibling_kv_removed_from_committed_cache": True,
+                "fixed_shape_mask_tail_absent_from_committed_cache": (
+                    True if fixed else None
+                ),
+                "final_output_source": (
+                    "fixed_shape_recheck" if fixed else "packed_native"
+                ),
+            },
+        }
+
+    def test_verification_modes_include_fixed_shape_modes(self) -> None:
+        self.assertEqual(
+            set(FIXED_SHAPE_VERIFICATION_MODES),
+            {
+                "always_fixed_shape_recheck",
+                "margin_guarded_fixed_shape_recheck",
+            },
+        )
+        self.assertTrue(set(FIXED_SHAPE_VERIFICATION_MODES) <= set(VERIFICATION_MODES))
+        parsed = build_parser().parse_args(
+            [
+                "--longbench-root",
+                "/datasets/LongBench",
+                "--materialized-draft-path",
+                "/models/instrumented",
+                "--frozen-selector-config",
+                "/outputs/frozen-selector.json",
+                "--verification-mode",
+                "always_fixed_shape_recheck",
+            ]
+        )
+        self.assertEqual(parsed.verification_mode, "always_fixed_shape_recheck")
+
+    def test_fallback_executor_preserves_legacy_q1_modes(self) -> None:
+        self.assertEqual(
+            fallback_executor_for_mode("always_replay", guard_triggered=False),
+            "q1_replay",
+        )
+        self.assertEqual(
+            fallback_executor_for_mode("margin_guarded_replay", guard_triggered=True),
+            "q1_replay",
+        )
+        self.assertEqual(
+            fallback_executor_for_mode("margin_guarded_replay", guard_triggered=False),
+            "none",
+        )
+
+    def test_fallback_executor_selects_fixed_shape_only_on_trigger(self) -> None:
+        self.assertEqual(
+            fallback_executor_for_mode(
+                "always_fixed_shape_recheck", guard_triggered=False
+            ),
+            "fixed_shape_recheck",
+        )
+        self.assertEqual(
+            fallback_executor_for_mode(
+                "margin_guarded_fixed_shape_recheck", guard_triggered=True
+            ),
+            "fixed_shape_recheck",
+        )
+        self.assertEqual(
+            fallback_executor_for_mode(
+                "margin_guarded_fixed_shape_recheck", guard_triggered=False
+            ),
+            "none",
+        )
+
+    def test_margin_fixed_requires_nr_calibration(self) -> None:
+        self.assertEqual(FIXED_SHAPE_MARGIN_THRESHOLD, 0.25)
+        with self.assertRaisesRegex(ValueError, "provenance-matched NR calibration"):
+            validate_refinement_options(
+                enabled=True,
+                merge_mode="base_only",
+                base_top_m=16,
+                conditional_top_r=2,
+                refine_depth=2,
+                refined_prefix_budget=2,
+                refinement_weight=0.5,
+                node_budget=16,
+                block_size=16,
+                external_batch_size=1,
+                verification_mode="margin_guarded_fixed_shape_recheck",
+                calibration_validated=False,
+            )
+
+    def test_always_fixed_shape_contract_is_q16_and_isolated(self) -> None:
+        _validate_round_fallback_contract(self._round_fixture())
+
+    def test_fixed_shape_round_schema_is_mode_specific(self) -> None:
+        schema = json.loads(
+            (
+                REPO_ROOT / "docs/schemas/phase2d2-round.schema.json"
+            ).read_text()
+        )["properties"]["phase2d2"]
+        row = self._round_fixture()
+        Draft202012Validator(schema).validate(row["phase2d2"])
+        row["phase2d2"]["fallback_query_lengths"] = [1]
+        errors = list(Draft202012Validator(schema).iter_errors(row["phase2d2"]))
+        self.assertTrue(errors)
+
+    def test_margin_fixed_triggered_contract_is_q16(self) -> None:
+        _validate_round_fallback_contract(
+            self._round_fixture("margin_guarded_fixed_shape_recheck")
+        )
+
+    def test_margin_fixed_nontrigger_preserves_packed_commit(self) -> None:
+        _validate_round_fallback_contract(
+            self._round_fixture(
+                "margin_guarded_fixed_shape_recheck", triggered=False
+            )
+        )
+
+    def test_fixed_shape_decisions_do_not_become_q1_candidate_labels(self) -> None:
+        quality = candidate_quality_for_round(
+            {
+                "phase2d2": {
+                    "replay_decisions": [],
+                    "fallback_decisions": [
+                        {"decision_depth": 0, "top1_token_id": 42}
+                    ],
+                    "candidate_merge_events": [],
+                    "tree_spec": {"nodes": []},
+                }
+            }
+        )
+        self.assertEqual(quality["availability"], "unavailable")
+        self.assertEqual(quality["unavailable_reason"], "q1_replay_not_executed")
+
+    def test_fixed_shape_rejects_q1_provenance(self) -> None:
+        row = self._round_fixture()
+        row["phase2d2"]["fallback_executor"] = "q1_replay"
+        with self.assertRaisesRegex(ValueError, "wrong fallback executor"):
+            _validate_round_fallback_contract(row)
+
+    def test_fixed_shape_rejects_unisolated_round_entry_snapshot(self) -> None:
+        row = self._round_fixture()
+        row["phase2d2"]["fixed_shape_round_entry_snapshot_isolated"] = False
+        with self.assertRaisesRegex(ValueError, "cache isolation"):
+            _validate_round_fallback_contract(row)
+
+    def test_fixed_shape_rejects_mask_tail_or_wrong_crop(self) -> None:
+        row = self._round_fixture()
+        row["phase2d2"]["fixed_shape_mask_tail_discarded_count"] -= 1
+        with self.assertRaisesRegex(ValueError, "MASK-tail discard"):
+            _validate_round_fallback_contract(row)
+        row = self._round_fixture()
+        row["phase2d2"]["fixed_shape_cropped_committed_kv_length"] += 1
+        with self.assertRaisesRegex(ValueError, "cache crop length"):
+            _validate_round_fallback_contract(row)
+
+    def test_fixed_shape_rejects_correction_sibling_or_hidden_commit(self) -> None:
+        row = self._round_fixture()
+        row["phase2d2"]["correction_or_bonus_committed_in_current_round"] = True
+        with self.assertRaisesRegex(ValueError, "correction/bonus"):
+            _validate_round_fallback_contract(row)
+        row = self._round_fixture()
+        row["phase2d2"]["sibling_kv_removed_from_committed_cache"] = False
+        with self.assertRaisesRegex(ValueError, "sibling"):
+            _validate_round_fallback_contract(row)
+        row = self._round_fixture()
+        row["phase2d2"]["authoritative_committed_target_hidden_length"] -= 1
+        with self.assertRaisesRegex(ValueError, "target_hidden"):
+            _validate_round_fallback_contract(row)
+
+    def test_fixed_shape_rejects_layer_length_or_commit_source(self) -> None:
+        row = self._round_fixture()
+        row["phase2d2"]["authoritative_committed_target_kv_layer_lengths"][0] -= 1
+        with self.assertRaisesRegex(ValueError, "layer lengths"):
+            _validate_round_fallback_contract(row)
+        row = self._round_fixture()
+        row["cache_compaction"]["committed_cache_source"] = "canonical_recheck"
+        with self.assertRaisesRegex(ValueError, "cache provenance"):
+            _validate_round_fallback_contract(row)
+
+    def test_instrumented_fixed_shape_reuses_canonical_recheck(self) -> None:
+        source = (
+            REPO_ROOT / "third_party/qwen3_8b_dflash_b16/instrumented/dflash.py"
+        ).read_text()
+        self.assertIn('"phase2d2.fixed_shape_recheck"', source)
+        self.assertIn('"phase2d2_fixed_shape_recheck"', source)
+        self.assertIn("fixed_shape_prefix_cache = clone_dynamic_cache", source)
+        self.assertIn("_phase2c_canonical_selected_path_recheck(", source)
+        self.assertNotIn("def _phase2d2_fixed_shape", source)
 
 
 if __name__ == "__main__":

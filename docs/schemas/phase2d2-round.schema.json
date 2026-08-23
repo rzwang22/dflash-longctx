@@ -22,11 +22,44 @@
         "root_count": {"const": 1},
         "fixed_root_inclusive_node_budget": {"enum": [16, 32]},
         "node_budget_invariant_passed": {"const": true},
-        "fallback_query_lengths": {"type": "array", "items": {"const": 1}},
+        "verification_mode": {"enum": ["packed_native", "always_replay", "margin_guarded_replay", "always_fixed_shape_recheck", "margin_guarded_fixed_shape_recheck"]},
+        "fallback_executed": {"type": "boolean"},
+        "fallback_executor": {"enum": ["none", "q1_replay", "fixed_shape_recheck"]},
+        "fallback_forward_count": {"type": "integer", "minimum": 0},
+        "fallback_query_lengths": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "fixed_shape_fallback_triggered": {"type": "boolean"},
+        "fixed_shape_fallback_executed": {"type": "boolean"},
+        "fixed_shape_forward_count": {"type": "integer", "minimum": 0, "maximum": 1},
+        "fixed_shape_query_lengths": {"type": "array", "items": {"const": 16}},
+        "fixed_shape_temporary_kv_layer_lengths": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "fixed_shape_temporary_block_length": {"type": ["integer", "null"]},
+        "fixed_shape_cropped_committed_kv_length": {"type": ["integer", "null"]},
+        "fixed_shape_mask_tail_discarded_count": {"type": "integer", "minimum": 0, "maximum": 15},
+        "fixed_shape_round_entry_snapshot_isolated": {"type": ["boolean", "null"]},
+        "fixed_shape_snapshot_matches_preverification_cache": {"type": ["boolean", "null"]},
         "authoritative_committed_target_kv_layer_lengths": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}},
+        "authoritative_committed_target_hidden_length": {"type": "integer", "minimum": 1},
+        "authoritative_next_root_absolute_sequence_position": {"type": "integer", "minimum": 0},
+        "authoritative_next_root_transition_slot_count": {"const": 1},
+        "authoritative_next_root_matches_output_transition": {"const": true},
         "correction_or_bonus_committed_in_current_round": {"const": false},
-        "sibling_kv_removed_from_committed_cache": {"const": true}
-      }
+        "sibling_kv_removed_from_committed_cache": {"const": true},
+        "fixed_shape_mask_tail_absent_from_committed_cache": {"type": ["boolean", "null"]},
+        "final_output_source": {"enum": ["packed_native", "shape_stable_q1_replay", "fixed_shape_recheck"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"verification_mode": {"enum": ["always_replay", "margin_guarded_replay"]}}},
+          "then": {"properties": {"fallback_query_lengths": {"items": {"const": 1}}}}
+        },
+        {
+          "if": {"properties": {"verification_mode": {"enum": ["always_fixed_shape_recheck", "margin_guarded_fixed_shape_recheck"]}}},
+          "then": {
+            "required": ["fallback_executed", "fallback_executor", "fallback_forward_count", "fixed_shape_fallback_triggered", "fixed_shape_fallback_executed", "fixed_shape_forward_count", "fixed_shape_query_lengths", "fixed_shape_temporary_kv_layer_lengths", "fixed_shape_temporary_block_length", "fixed_shape_cropped_committed_kv_length", "fixed_shape_mask_tail_discarded_count", "fixed_shape_round_entry_snapshot_isolated", "fixed_shape_snapshot_matches_preverification_cache", "authoritative_committed_target_hidden_length", "authoritative_next_root_absolute_sequence_position", "authoritative_next_root_transition_slot_count", "authoritative_next_root_matches_output_transition", "fixed_shape_mask_tail_absent_from_committed_cache"],
+            "properties": {"fallback_query_lengths": {"items": {"const": 16}}}
+          }
+        }
+      ]
     }
   }
 }
