@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h2-frozen-cohort.schema.json",
+  "title": "Phase 2D.2A-H2.0 frozen held-out cohort",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "selection_seed", "selection_hash_formula", "selection_uses_model_outputs", "replacement_after_h2_execution_begins_allowed", "short_context_length", "common_independent_task_long_context_length", "common_long_context_selection_order", "common_long_context_selection_audit", "govreport_replication_long_context_length", "govreport_long_context_selection_order", "govreport_long_context_selection_audit", "independent_tasks", "independent_task_count", "govreport_contributes_to_independent_task_count", "tasks", "model_forward_executed"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H2.0"},
+    "status": {"const": "frozen_not_executed"},
+    "selection_seed": {"const": "phase2d2a-h2-heldout-v1"},
+    "selection_uses_model_outputs": {"const": false},
+    "replacement_after_h2_execution_begins_allowed": {"const": false},
+    "short_context_length": {"const": 1024},
+    "common_independent_task_long_context_length": {"enum": [4096, 8192, 16384]},
+    "common_long_context_selection_order": {"const": [16384, 8192, 4096]},
+    "govreport_replication_long_context_length": {"enum": [4096, 8192, 16384]},
+    "govreport_long_context_selection_order": {"const": [16384, 8192, 4096]},
+    "independent_tasks": {"const": ["qasper", "hotpotqa"]},
+    "independent_task_count": {"const": 2},
+    "govreport_contributes_to_independent_task_count": {"const": false},
+    "tasks": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["task", "task_role", "contributes_to_independent_task_count", "requested_physical_sample_count", "frozen_physical_sample_count", "short_context_length", "long_context_length", "paired_context_lengths", "selected_physical_samples"],
+        "properties": {
+          "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+          "selected_physical_samples": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["selection_rank", "selection_hash", "sample_id", "source_sample_id", "source_text_sha256", "eligible_at_both_required_contexts", "short_context_is_nested_prefix_of_long_context", "contexts"],
+              "properties": {
+                "eligible_at_both_required_contexts": {"const": true},
+                "short_context_is_nested_prefix_of_long_context": {"const": true}
+              }
+            }
+          }
+        }
+      }
+    },
+    "model_forward_executed": {"const": false}
+  }
+}

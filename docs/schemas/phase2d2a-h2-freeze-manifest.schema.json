@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h2-freeze-manifest.schema.json",
+  "title": "Phase 2D.2A-H2.0 freeze manifest",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "created_at_utc", "repository_commit", "branch", "tokenizer_provenance", "h11_prerequisite_provenance", "exclusion_provenance_sha256", "inventory_sha256", "frozen_content_component_sha256", "freeze_content_sha256", "freeze_content_hash_scope", "h2_execution_must_require_exact_freeze_content_sha256", "model_forward_executed", "target_model_loaded", "draft_model_loaded", "cuda_required", "h2_primary_execution_authorized", "h2_secondary_execution_authorized", "no_replacement_after_execution_begins", "artifacts", "error"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H2.0"},
+    "status": {"enum": ["frozen_not_executed", "insufficient_common_long_context_eligibility", "insufficient_govreport_replication_eligibility", "insufficient_requested_sample_count"]},
+    "freeze_content_hash_scope": {"const": ["frozen_cohort", "primary_matrix", "secondary_matrix", "aggregation_rules"]},
+    "h2_execution_must_require_exact_freeze_content_sha256": {"type": "boolean"},
+    "model_forward_executed": {"const": false},
+    "target_model_loaded": {"const": false},
+    "draft_model_loaded": {"const": false},
+    "cuda_required": {"const": false},
+    "h2_primary_execution_authorized": {"const": false},
+    "h2_secondary_execution_authorized": {"const": false},
+    "no_replacement_after_execution_begins": {"const": true},
+    "freeze_content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "error": {"type": ["object", "null"]}
+  }
+}

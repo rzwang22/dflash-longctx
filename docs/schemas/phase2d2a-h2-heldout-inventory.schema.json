@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h2-heldout-inventory.schema.json",
+  "title": "Phase 2D.2A-H2.0 target-blind held-out inventory",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "mode", "longbench_root", "dataset_split", "inventory_context_lengths", "primary_cross_task_32k_anchor_allowed", "model_forward_executed", "cuda_required", "exclusion_applied_before_selection", "selection_seed", "tasks"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H2.0"},
+    "status": {"const": "complete"},
+    "mode": {"const": "target_blind_token_length_inventory"},
+    "inventory_context_lengths": {"const": [1024, 4096, 8192, 16384, 32768]},
+    "primary_cross_task_32k_anchor_allowed": {"const": false},
+    "model_forward_executed": {"const": false},
+    "cuda_required": {"const": false},
+    "exclusion_applied_before_selection": {"const": true},
+    "selection_seed": {"const": "phase2d2a-h2-heldout-v1"},
+    "tasks": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["task", "task_role", "requested_physical_sample_count", "source_record_count", "usable_record_count", "unusable_record_count", "source_document_token_length_distribution", "prompt_template", "contexts"],
+        "properties": {
+          "task": {"enum": ["gov_report", "qasper", "hotpotqa"]},
+          "task_role": {"enum": ["same_task_replication_only", "independent_held_out_task"]},
+          "requested_physical_sample_count": {"enum": [3, 8]},
+          "source_record_count": {"type": "integer", "minimum": 0},
+          "usable_record_count": {"type": "integer", "minimum": 0},
+          "unusable_record_count": {"type": "integer", "minimum": 0},
+          "contexts": {
+            "type": "array",
+            "minItems": 5,
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "required": ["nominal_prompt_length", "eligible_before_exclusion_count", "excluded_previous_sample_count", "eligible_sample_count", "eligible_document_token_length_distribution", "eligible_sample_ids", "eligible_source_sample_ids", "eligible_source_text_sha256", "excluded_samples", "eligible_samples"],
+              "properties": {
+                "nominal_prompt_length": {"enum": [1024, 4096, 8192, 16384, 32768]},
+                "eligible_before_exclusion_count": {"type": "integer", "minimum": 0},
+                "excluded_previous_sample_count": {"type": "integer", "minimum": 0},
+                "eligible_sample_count": {"type": "integer", "minimum": 0},
+                "eligible_samples": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["sample_id", "source_sample_id", "source_text_sha256", "source_index", "document_token_length", "source_full_prompt_length", "fixed_prompt_length", "selection_hash", "actual_prompt_length", "nominal_prompt_length_shortfall", "context_prefix_characters", "context_prefix_sha256", "input_token_ids_sha256"]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

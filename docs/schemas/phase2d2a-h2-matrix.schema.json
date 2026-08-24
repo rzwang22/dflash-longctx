@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h2-matrix.schema.json",
+  "title": "Phase 2D.2A-H2 frozen execution matrix",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "matrix_role", "node_budget", "actual_work_regime", "secondary_can_override_primary_conclusion", "frozen_configuration_families", "frozen_refinement_families", "family_selected_or_removed", "row_count", "rows", "model_forward_executed", "execution_authorized"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H2.0"},
+    "status": {"const": "frozen_not_executed"},
+    "matrix_role": {"enum": ["primary_same_actual_verification_work", "secondary_budget_cap_expansion_ablation"]},
+    "node_budget": {"enum": [16, 32]},
+    "actual_work_regime": {"enum": ["same_actual_verification_work", "budget_cap_expansion"]},
+    "secondary_can_override_primary_conclusion": {"const": false},
+    "frozen_configuration_families": {"const": ["base_only", "conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+    "frozen_refinement_families": {"const": ["conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+    "family_selected_or_removed": {"const": false},
+    "row_count": {"type": "integer", "minimum": 1},
+    "rows": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["task", "task_role", "sample_id", "source_sample_id", "source_text_sha256", "selection_rank", "selection_hash", "nominal_prompt_length", "actual_prompt_length", "context_prefix_sha256", "configuration_family", "candidate_merge_mode", "frozen_refinement_configuration_id", "node_budget", "evaluation_role", "verification_mode", "online_selector_mode", "max_new_tokens", "warmup_runs", "timing_repeats", "dtype", "external_batch_size", "candidate_label_authority", "candidate_label_source", "q1_replay_used_as_target_label_source", "execution_authorized"],
+        "properties": {
+          "configuration_family": {"enum": ["base_only", "conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+          "node_budget": {"enum": [16, 32]},
+          "verification_mode": {"const": "always_fixed_shape_recheck"},
+          "online_selector_mode": {"const": "top1_packed_tree"},
+          "max_new_tokens": {"const": 128},
+          "warmup_runs": {"const": 1},
+          "timing_repeats": {"const": 3},
+          "dtype": {"const": "bfloat16"},
+          "external_batch_size": {"const": 1},
+          "candidate_label_authority": {"const": "original_dflash_reference"},
+          "candidate_label_source": {"const": "original_dflash_absolute_continuation"},
+          "q1_replay_used_as_target_label_source": {"const": false},
+          "execution_authorized": {"const": false}
+        }
+      }
+    },
+    "model_forward_executed": {"const": false},
+    "execution_authorized": {"const": false}
+  }
+}
