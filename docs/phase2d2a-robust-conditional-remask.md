@@ -142,6 +142,12 @@ survival, and first pruning are computed from the Original-DFlash reference path
 Conditional candidate membership is evaluated only for a refined branch whose
 prefix matches that reference parent path.
 
+Every `offline-online-comparison.json` row carries the same complete evidence
+identity as its source refinement round: schema version, task, sample and source
+sample IDs, nominal and actual prompt lengths, configuration ID, and round index.
+The checker rejects missing fields, duplicate identities, or any identity mismatch
+before interpreting candidate-quality values.
+
 This provenance repair does not reselect the preregistered refinement set. The
 set remains exactly
 `conditional_rerank-d1-p1-r2-w0.5`, `union-d2-p2-r2-w0.5`, and
@@ -244,7 +250,11 @@ Phase G changes only the repository-side evaluation runner, metrics, schemas,
 checker, tests, and documentation. It does not change any file in the
 instrumented custom-model dependency closure, so the fixed-shape-qualified
 materialization from Phase F must be reused; no rematerialization is required.
-Run only this one-sample provenance smoke, inspect the printed fields, and stop:
+The smoke is pinned to `always_fixed_shape_recheck`: packed-native and the
+margin-triggered mode are not token-exact on this refined known case, while the
+always-fixed trajectory is validated. This is infrastructure/provenance
+validation only and is not candidate-benefit evidence. Run only this one-sample
+smoke, inspect the printed fields, and stop:
 
 ```bash
 cd ~/data/dflash-longctx
@@ -255,10 +265,9 @@ git pull --ff-only origin codex/phase2d2a-robust-conditional-remask
 source .venv/bin/activate
 export TARGET_MODEL_DIR=/mnt/sevenT/wrz_data/models/Qwen3-8B-b968826d
 export DRAFT_MODEL_DIR=/mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16-phase2d2a-instrumented-33e7159c3d50
-export LONGBENCH_ROOT=/mnt/sevenT/wrz_data/datasets/LongBench
+export LONGBENCH_ROOT=/mnt/sevenT/wrz_data/datasets/LongBench/data
 export FROZEN_SELECTOR=outputs/phase2d1b-frozen-selector/frozen-selector.json
-export FROZEN_REFINEMENT=outputs/phase2d2a-frozen-refinement.json
-export NR_CALIBRATION=outputs/phase2d2a-nr-calibration
+export FROZEN_REFINEMENT=outputs/phase2d2a-frozen-refinement-66ce72888b34.json
 export PHASE2D2G_OUT=outputs/phase2d2a-g-provenance-smoke-$(date +%Y%m%d-%H%M%S)
 
 python experiments/phase2d2_robust_conditional_refinement.py \
@@ -272,8 +281,7 @@ python experiments/phase2d2_robust_conditional_refinement.py \
   --context-lengths 1K --pilot-samples 1 --max-new-tokens 32 \
   --warmup-runs 0 --timing-repeats 1 \
   --node-budget 16 --dtype bfloat16 --device cuda \
-  --verification-mode margin_guarded_fixed_shape_recheck \
-  --nr-calibration-dir "$NR_CALIBRATION" \
+  --verification-mode always_fixed_shape_recheck \
   --output-dir "$PHASE2D2G_OUT"
 
 python scripts/check_phase2d2_acceptance.py "$PHASE2D2G_OUT"
@@ -288,6 +296,7 @@ root = Path(sys.argv[1])
 correctness = json.loads((root / "correctness-summary.json").read_text())
 offline = json.loads((root / "offline-online-comparison.json").read_text())
 rows = offline["rows"]
+rounds = [json.loads(line) for line in (root / "refinement-rounds.jsonl").read_text().splitlines() if line]
 print("actual_execution_correctness_passed:", correctness["actual_execution_correctness_passed"])
 print("target_label_authority:", offline["target_label_authority"])
 print("target_label_source:", offline["target_label_source"])
@@ -295,6 +304,12 @@ print("q1_label_use:", offline["q1_replay_used_as_target_label_source"])
 print("runtime_label_use:", sorted({row["target_label_used_for_runtime_selection"] for row in rows}))
 print("alignment:", Counter((row["reference_alignment_available"], row["reference_alignment_reason"]) for row in rows))
 print("target_label_evidence:", Counter((row["target_label_evidence_available"], row["target_label_evidence_unavailable_reason"]) for row in rows))
+identity_fields = ("schema_version", "task", "sample_id", "source_sample_id", "nominal_prompt_length", "actual_prompt_length", "configuration_id", "round_index")
+print("offline_identity_complete:", all(all(field in row for field in identity_fields) for row in rows))
+offline_identities = [tuple(row[field] for field in identity_fields) for row in rows]
+round_identities = [tuple(row[field] for field in identity_fields) for row in rounds]
+print("offline_identity_unique:", len(offline_identities) == len(set(offline_identities)))
+print("offline_identity_matches_rounds:", Counter(offline_identities) == Counter(round_identities))
 print("available_selected_tree_rows:", sum(row["availability"] == "available" and row["selected_tree_coverage_rate_at_fixed_n"] is not None for row in rows))
 print("available_refined_only_rows:", sum(row["availability"] == "available" and row["refined_only_target_recovery_count"] is not None for row in rows))
 PY

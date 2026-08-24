@@ -55,6 +55,22 @@ FROZEN_REFINEMENT_CONFIGURATION_SET = [
     "union-d2-p2-r2-w0.5",
     "union-d4-p2-r4-w0.5",
 ]
+OFFLINE_IDENTITY_FIELDS = (
+    "schema_version",
+    "task",
+    "sample_id",
+    "source_sample_id",
+    "nominal_prompt_length",
+    "actual_prompt_length",
+    "configuration_id",
+    "round_index",
+)
+OFFLINE_IDENTITY_ANCHOR_FIELDS = (
+    "task",
+    "sample_id",
+    "nominal_prompt_length",
+    "round_index",
+)
 
 
 def _json(path: Path) -> Any:
@@ -205,6 +221,52 @@ def _validate_candidate_quality_provenance(
         raise ValueError("correct-prefix survival depth is inconsistent")
     if quality["first_pruning_depth"] != first_pruning:
         raise ValueError("first pruning depth is inconsistent")
+
+
+def _validate_offline_round_identities(
+    offline_rows: Any, rounds: list[dict[str, Any]]
+) -> None:
+    """Require one complete offline identity for every refinement round."""
+
+    if not isinstance(offline_rows, list):
+        raise TypeError("offline-online rows must be a list")
+    if len(offline_rows) != len(rounds):
+        raise ValueError("offline candidate-quality row count is incomplete")
+
+    def indexed(
+        rows: list[dict[str, Any]], *, artifact: str
+    ) -> dict[tuple[Any, ...], dict[str, Any]]:
+        result = {}
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise TypeError(f"{artifact} row {index} is not an object")
+            missing = [field for field in OFFLINE_IDENTITY_FIELDS if field not in row]
+            if missing:
+                raise ValueError(
+                    f"{artifact} row {index} lacks identity fields: {missing}"
+                )
+            anchor = tuple(row[field] for field in OFFLINE_IDENTITY_ANCHOR_FIELDS)
+            if anchor in result:
+                raise ValueError(f"duplicate {artifact} identity: {anchor}")
+            result[anchor] = row
+        return result
+
+    offline_by_anchor = indexed(offline_rows, artifact="offline-online")
+    rounds_by_anchor = indexed(rounds, artifact="refinement-round")
+    if set(offline_by_anchor) != set(rounds_by_anchor):
+        raise ValueError("offline and refinement-round identity sets differ")
+    for anchor, offline in offline_by_anchor.items():
+        round_row = rounds_by_anchor[anchor]
+        mismatched = [
+            field
+            for field in OFFLINE_IDENTITY_FIELDS
+            if offline[field] != round_row[field]
+        ]
+        if mismatched:
+            raise ValueError(
+                f"offline identity differs from refinement round {anchor}: "
+                f"{mismatched}"
+            )
 
 
 def _same_evidence_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -459,6 +521,7 @@ def check_output(output: Path) -> dict[str, Any]:
         )
     if not samples or not rounds:
         raise ValueError("Phase 2D.2A run has no sample/round evidence")
+    _validate_offline_round_identities(offline_online.get("rows"), rounds)
     _validate(manifest, "phase2d2-manifest.schema.json")
     _validate(correctness, "phase2d2-correctness-summary.schema.json")
     _validate(decision, "phase2d2-decision.schema.json")
@@ -580,8 +643,6 @@ def check_output(output: Path) -> dict[str, Any]:
             CANDIDATE_LABEL_SOURCE
         ):
             raise ValueError("source provenance lacks Original-DFlash candidate labels")
-        if len(offline_online.get("rows", [])) != len(rounds):
-            raise ValueError("offline candidate-quality row count is incomplete")
         offline_by_identity = {
             (
                 row["task"],

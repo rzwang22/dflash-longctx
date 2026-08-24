@@ -53,6 +53,7 @@ from experiments.phase2d2_robust_conditional_refinement import (
     _evaluate_output_contract,
     _first_divergent_generated_offset,
     _generation_options,
+    _offline_online_rows,
     _output_identity_metadata,
     _output_relations,
     _persist,
@@ -66,6 +67,7 @@ from scripts.check_phase2d2_acceptance import (
     _causal_gold_kv_skip_evidence,
     _validate_candidate_quality_provenance,
     _validate_gold_kv_shape_evidence,
+    _validate_offline_round_identities,
     _validate_round_fallback_contract,
     check_output,
 )
@@ -1476,6 +1478,65 @@ class CandidateQualityProvenanceTests(unittest.TestCase):
                 },
             },
         }
+
+    @staticmethod
+    def _identity_round(*, round_index: int = 0) -> dict:
+        return {
+            "schema_version": "1.0",
+            "task": "gov_report",
+            "sample_id": "gov_report-fd287bbfd3bdbdc9",
+            "source_sample_id": "gov_report-fd287bbfd3bdbdc9",
+            "nominal_prompt_length": 1024,
+            "actual_prompt_length": 1024,
+            "configuration_id": "union-d2-p2-r2-w0.5-n16",
+            "round_index": round_index,
+            "candidate_quality": {
+                "target_label_authority": CANDIDATE_LABEL_AUTHORITY,
+                "target_label_source": CANDIDATE_LABEL_SOURCE,
+                "q1_replay_used_as_target_label_source": False,
+                "target_label_used_for_runtime_selection": False,
+            },
+        }
+
+    def test_offline_rows_preserve_complete_refinement_identity(self) -> None:
+        round_row = self._identity_round()
+        offline = _offline_online_rows([round_row])
+        self.assertEqual(offline[0]["configuration_id"], round_row["configuration_id"])
+        for field in (
+            "schema_version",
+            "task",
+            "sample_id",
+            "source_sample_id",
+            "nominal_prompt_length",
+            "actual_prompt_length",
+            "configuration_id",
+            "round_index",
+        ):
+            self.assertEqual(offline[0][field], round_row[field])
+        _validate_offline_round_identities(offline, [round_row])
+
+    def test_missing_offline_configuration_is_rejected_cleanly(self) -> None:
+        round_row = self._identity_round()
+        offline = _offline_online_rows([round_row])
+        offline[0].pop("configuration_id")
+        with self.assertRaisesRegex(ValueError, "lacks identity.*configuration_id"):
+            _validate_offline_round_identities(offline, [round_row])
+
+    def test_mismatched_offline_configuration_is_rejected(self) -> None:
+        round_row = self._identity_round()
+        offline = _offline_online_rows([round_row])
+        offline[0]["configuration_id"] = "wrong-configuration"
+        with self.assertRaisesRegex(ValueError, "differs.*configuration_id"):
+            _validate_offline_round_identities(offline, [round_row])
+
+    def test_duplicate_offline_identity_is_rejected(self) -> None:
+        first = self._identity_round(round_index=0)
+        second = self._identity_round(round_index=1)
+        duplicate = _offline_online_rows([first])[0]
+        with self.assertRaisesRegex(ValueError, "duplicate offline-online identity"):
+            _validate_offline_round_identities(
+                [duplicate, deepcopy(duplicate)], [first, second]
+            )
 
     def test_no_implicit_q1_label_evidence(self) -> None:
         quality = candidate_quality_for_round(self._runner_round())

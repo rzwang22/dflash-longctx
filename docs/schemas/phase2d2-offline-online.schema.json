@@ -13,6 +13,22 @@
     "mixed_target_label_authorities": {"const": false},
     "q1_replay_used_as_target_label_source": {"const": false},
     "frozen_refinement_configuration_set_reselected": {"const": false},
-    "rows": {"type": "array"}
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["schema_version", "task", "sample_id", "source_sample_id", "nominal_prompt_length", "actual_prompt_length", "configuration_id", "round_index"],
+        "properties": {
+          "schema_version": {"const": "1.0"},
+          "task": {"type": "string", "minLength": 1},
+          "sample_id": {"type": "string", "minLength": 1},
+          "source_sample_id": {"type": "string", "minLength": 1},
+          "nominal_prompt_length": {"type": "integer", "minimum": 1},
+          "actual_prompt_length": {"type": "integer", "minimum": 1},
+          "configuration_id": {"type": "string", "minLength": 1},
+          "round_index": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
   }
 }

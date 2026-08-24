@@ -77,6 +77,16 @@ FROZEN_REFINEMENT_CONFIGURATION_SET = (
     "union-d2-p2-r2-w0.5",
     "union-d4-p2-r4-w0.5",
 )
+OFFLINE_IDENTITY_FIELDS = (
+    "schema_version",
+    "task",
+    "sample_id",
+    "source_sample_id",
+    "nominal_prompt_length",
+    "actual_prompt_length",
+    "configuration_id",
+    "round_index",
+)
 ROOT_ARTIFACTS = (
     "manifest.json",
     "environment.json",
@@ -237,6 +247,25 @@ def _validate_phase2d2g_frozen_configuration_set(
             "Phase 2D.2A-G must preserve the exact preregistered refinement "
             "configuration set"
         )
+
+
+def _offline_online_rows(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach complete round identity to post-hoc candidate-quality records."""
+
+    result = []
+    for index, row in enumerate(rounds):
+        missing = [field for field in OFFLINE_IDENTITY_FIELDS if field not in row]
+        if missing:
+            raise ValueError(
+                f"refinement round {index} lacks offline identity fields: {missing}"
+            )
+        result.append(
+            {
+                **row["candidate_quality"],
+                **{field: row[field] for field in OFFLINE_IDENTITY_FIELDS},
+            }
+        )
+    return result
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -1929,17 +1958,7 @@ def _persist(
         ],
         "q1_replay_used_as_target_label_source": False,
         "frozen_refinement_configuration_set_reselected": False,
-        "rows": [
-            {
-                "schema_version": SCHEMA_VERSION,
-                "task": row["task"],
-                "sample_id": row["sample_id"],
-                "nominal_prompt_length": row["nominal_prompt_length"],
-                "round_index": row["round_index"],
-                **row["candidate_quality"],
-            }
-            for row in rounds
-        ],
+        "rows": _offline_online_rows(rounds),
     }
     stable_coverage = (
         all(row["refined_only_target_recovery_gain"] > 0 for row in comparison["rows"])
