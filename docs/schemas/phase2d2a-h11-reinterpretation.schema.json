@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h11-reinterpretation.schema.json",
+  "title": "Phase 2D.2A-H1.1 reinterpretation",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "source", "original_h1_final_phase2d2a_decision", "final_phase2d2a_decision", "original_cap_based_classifications_preserved", "primary_same_work_classification_is_secondary_descriptive_view", "winner_selected", "frozen_refinement_families", "frozen_family_selected_or_removed", "configuration_rows", "regime_rows", "cost_decomposition", "latency_interpretation", "legacy_mixed_known_sample_classification_deleted_or_rewritten"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H1.1"},
+    "status": {"const": "complete"},
+    "original_h1_final_phase2d2a_decision": {"const": "insufficient_evidence"},
+    "final_phase2d2a_decision": {"const": "insufficient_evidence"},
+    "original_cap_based_classifications_preserved": {"const": true},
+    "primary_same_work_classification_is_secondary_descriptive_view": {"const": true},
+    "winner_selected": {"const": false},
+    "frozen_refinement_families": {"const": ["conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+    "frozen_family_selected_or_removed": {"const": false},
+    "configuration_rows": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["schema_version", "refined_family", "original_cap_based_h1_classification", "original_h1_classification_preserved_unchanged", "primary_same_work_classification", "same_work_valid_pair_count", "same_work_joint_positive_pair_count", "same_work_evidence_complete", "significance_threshold_used", "frozen_family_selected_or_removed"],
+        "properties": {
+          "original_h1_classification_preserved_unchanged": {"const": true},
+          "original_cap_based_h1_classification": {"const": "mixed_known_sample"},
+          "primary_same_work_classification": {"enum": ["consistent_positive_same_work", "mixed_same_work", "no_positive_same_work_signal", "insufficient_same_work_evidence"]},
+          "significance_threshold_used": {"const": false},
+          "frozen_family_selected_or_removed": {"const": false}
+        }
+      }
+    },
+    "regime_rows": {"type": "array", "minItems": 12, "maxItems": 12},
+    "cost_decomposition": {
+      "type": "object",
+      "required": ["rows", "dependency_modeling_cost_share_distribution", "correctness_preserving_verifier_cost_share_distribution", "combined_additional_work_share_distribution", "largest_cost_component_distribution", "dependency_modeling_and_verifier_costs_separated", "lightweight_causal_adapter_claimed_to_solve_fixed_shape_verifier_overhead"],
+      "properties": {
+        "dependency_modeling_and_verifier_costs_separated": {"const": true},
+        "lightweight_causal_adapter_claimed_to_solve_fixed_shape_verifier_overhead": {"const": false}
+      }
+    },
+    "latency_interpretation": {
+      "type": "object",
+      "required": ["rows", "interpretation_label", "robust_speedup_claimed", "reason", "raw_formal_timing_values_preserved_in_h1_source"],
+      "properties": {
+        "rows": {
+          "type": "array",
+          "minItems": 12,
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "required": ["refined_family", "nominal_prompt_length", "node_budget", "base_formal_timing", "refined_formal_timing", "formal_pair_comparison", "nominal_latency_relative_change", "formal_timing_repeat_count", "physical_sample_count", "robust_speedup_claimed"],
+            "properties": {
+              "formal_timing_repeat_count": {"const": 3},
+              "physical_sample_count": {"const": 1},
+              "robust_speedup_claimed": {"const": false}
+            }
+          }
+        },
+        "interpretation_label": {"const": "nominal_latency_change"},
+        "robust_speedup_claimed": {"const": false},
+        "reason": {"const": "one_physical_sample_and_three_formal_repeats"},
+        "raw_formal_timing_values_preserved_in_h1_source": {"const": true}
+      }
+    },
+    "legacy_mixed_known_sample_classification_deleted_or_rewritten": {"const": false}
+  }
+}

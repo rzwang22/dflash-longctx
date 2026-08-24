@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h11-budget-utilization.schema.json",
+  "title": "Phase 2D.2A-H1.1 budget utilization",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "source", "direct_actual_work_field", "configured_budget_not_substituted_for_actual_work", "matrix_cell_count", "rows", "utilization_groups", "pair_regimes", "all_n16_pairs_same_actual_verification_work", "all_n32_pairs_budget_cap_expansion", "h1_direct_regime_hypothesis_confirmed"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H1.1"},
+    "status": {"const": "complete"},
+    "direct_actual_work_field": {"const": "phase2d2.actual_verified_node_count"},
+    "configured_budget_not_substituted_for_actual_work": {"const": true},
+    "matrix_cell_count": {"const": 16},
+    "rows": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "configuration_family", "configured_node_budget", "round_count", "actual_verified_node_counts", "total_actual_verified_node_count", "actual_verified_nodes_per_round", "actual_verified_node_count_distribution", "selected_tree_node_counts", "selected_tree_node_count_distribution", "selected_tree_equals_actual_verified_every_round", "node_budget_utilization_rate", "utilization_classification", "actual_work_source", "configured_budget_not_substituted_for_actual_work"],
+        "properties": {
+          "schema_version": {"const": "1.0"},
+          "task": {"const": "gov_report"},
+          "sample_id": {"const": "gov_report-fd287bbfd3bdbdc9"},
+          "nominal_prompt_length": {"enum": [1024, 16384]},
+          "configured_node_budget": {"enum": [16, 32]},
+          "round_count": {"type": "integer", "minimum": 1},
+          "total_actual_verified_node_count": {"type": "integer", "minimum": 1},
+          "selected_tree_equals_actual_verified_every_round": {"const": true},
+          "node_budget_utilization_rate": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+          "utilization_classification": {"enum": ["full_utilization", "underutilized"]},
+          "actual_work_source": {"const": "refinement-rounds.phase2d2.actual_verified_node_count"},
+          "configured_budget_not_substituted_for_actual_work": {"const": true}
+        }
+      }
+    },
+    "pair_regimes": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "required": ["refined_family", "nominal_prompt_length", "node_budget", "regime", "delta_actual_verified_nodes_per_round", "marginal_yield_available", "configured_node_budget_used_to_infer_regime", "regime_evidence_source"],
+        "properties": {
+          "regime": {"enum": ["same_actual_verification_work", "budget_cap_expansion", "different_actual_verification_work"]},
+          "configured_node_budget_used_to_infer_regime": {"const": false},
+          "regime_evidence_source": {"const": "direct_actual_verified_node_count"}
+        }
+      }
+    },
+    "all_n16_pairs_same_actual_verification_work": {"type": "boolean"},
+    "all_n32_pairs_budget_cap_expansion": {"type": "boolean"},
+    "h1_direct_regime_hypothesis_confirmed": {"type": "boolean"}
+  }
+}

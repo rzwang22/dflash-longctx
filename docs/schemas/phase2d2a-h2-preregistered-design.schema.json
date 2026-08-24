@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h2-preregistered-design.schema.json",
+  "title": "Phase 2D.2A-H2 preregistered design",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "emitted_only_after_direct_h1_node_audit", "direct_h1_regime_confirmation", "primary_h2_mechanism_evaluation", "secondary_h2_budget_expansion_ablation", "frozen_refinement_families", "frozen_family_selected_or_removed", "winner_selected_from_h1", "verification_mode", "candidate_label_authority", "candidate_label_source", "q1_replay_used_as_target_label_source", "h2_execution_authorized", "non_executing_design_recommendation_only"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H2-preregistration"},
+    "status": {"const": "preregistered_not_executed"},
+    "emitted_only_after_direct_h1_node_audit": {"const": true},
+    "direct_h1_regime_confirmation": {"const": true},
+    "primary_h2_mechanism_evaluation": {
+      "const": {"node_budget": 16, "regime": "same_actual_verification_work"}
+    },
+    "secondary_h2_budget_expansion_ablation": {
+      "const": {"node_budget": 32, "regime": "budget_cap_expansion"}
+    },
+    "frozen_refinement_families": {"const": ["conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+    "frozen_family_selected_or_removed": {"const": false},
+    "winner_selected_from_h1": {"const": false},
+    "verification_mode": {"const": "always_fixed_shape_recheck"},
+    "candidate_label_authority": {"const": "original_dflash_reference"},
+    "candidate_label_source": {"const": "original_dflash_absolute_continuation"},
+    "q1_replay_used_as_target_label_source": {"const": false},
+    "h2_execution_authorized": {"const": false},
+    "non_executing_design_recommendation_only": {"const": true}
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h11-mechanism-decomposition.schema.json",
+  "title": "Phase 2D.2A-H1.1 mechanism decomposition",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "source", "candidate_label_authority", "candidate_label_source", "q1_replay_used_as_target_label_source", "unavailable_candidate_rows_excluded_from_denominators", "causal_exclusivity_claimed", "rows", "mechanism_signal_distribution"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H1.1"},
+    "status": {"const": "complete"},
+    "candidate_label_authority": {"const": "original_dflash_reference"},
+    "candidate_label_source": {"const": "original_dflash_absolute_continuation"},
+    "q1_replay_used_as_target_label_source": {"const": false},
+    "unavailable_candidate_rows_excluded_from_denominators": {"const": true},
+    "causal_exclusivity_claimed": {"const": false},
+    "rows": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "required": ["schema_version", "task", "sample_id", "refined_family", "nominal_prompt_length", "node_budget", "candidate_quality_available_round_count", "candidate_quality_unavailable_round_count", "labelled_reference_position_count", "unavailable_reason_distribution", "base_candidate_coverage_rate", "conditional_candidate_coverage_rate", "merged_candidate_coverage_rate", "selected_tree_coverage_rate", "selected_tree_coverage_absolute_gain_vs_base_cell", "refined_only_target_recovery_count", "refined_only_target_recovery_rate", "target_token_rank_improvement_distribution", "correct_prefix_survival_depth_distribution", "candidate_label_authority", "candidate_label_source", "q1_replay_used_as_target_label_source", "unavailable_rows_excluded_from_denominators", "mechanism_signal", "descriptive_post_hoc_interpretation_only", "causal_exclusivity_claimed", "refined_only_recovery_zero_treated_as_failure", "interpretation"],
+        "properties": {
+          "schema_version": {"const": "1.0"},
+          "task": {"const": "gov_report"},
+          "candidate_label_authority": {"const": "original_dflash_reference"},
+          "candidate_label_source": {"const": "original_dflash_absolute_continuation"},
+          "q1_replay_used_as_target_label_source": {"const": false},
+          "unavailable_rows_excluded_from_denominators": {"const": true},
+          "mechanism_signal": {"enum": ["new_candidate_availability_signal", "reranking_or_tree_reallocation_signal", "no_observed_candidate_mechanism_gain"]},
+          "descriptive_post_hoc_interpretation_only": {"const": true},
+          "causal_exclusivity_claimed": {"const": false},
+          "refined_only_recovery_zero_treated_as_failure": {"const": false}
+        }
+      }
+    }
+  }
+}
