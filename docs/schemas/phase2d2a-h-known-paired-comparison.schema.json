@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h-known-paired-comparison.schema.json",
+  "title": "Phase 2D.2A-H1 paired comparison",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "pairing_key_fields", "same_n_and_same_context_pairing_required", "correctness_failed_cells_excluded_from_gains", "unavailable_candidate_rows_excluded_from_denominators", "primary_online_metric", "rows"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H1"},
+    "status": {"const": "complete"},
+    "pairing_key_fields": {"const": ["task", "sample_id", "context_length", "node_budget"]},
+    "same_n_and_same_context_pairing_required": {"const": true},
+    "correctness_failed_cells_excluded_from_gains": {"const": true},
+    "unavailable_candidate_rows_excluded_from_denominators": {"const": true},
+    "primary_online_metric": {"const": "accepted_draft_tokens_per_verified_node"},
+    "rows": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "node_budget", "pairing_key", "base_family", "refined_family", "correctness_valid", "invalid_reason", "candidate_benefit_evidence_sufficient", "candidate_quality", "online_efficiency", "formal_timing", "component_cost", "sign_matrix"],
+        "properties": {
+          "schema_version": {"const": "1.0"},
+          "task": {"const": "gov_report"},
+          "sample_id": {"const": "gov_report-fd287bbfd3bdbdc9"},
+          "nominal_prompt_length": {"enum": [1024, 16384]},
+          "node_budget": {"enum": [16, 32]},
+          "base_family": {"const": "base_only"},
+          "refined_family": {"enum": ["conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+          "correctness_valid": {"type": "boolean"},
+          "candidate_benefit_evidence_sufficient": {"type": "boolean"},
+          "sign_matrix": {
+            "type": "object",
+            "required": ["coverage_gain", "accepted_per_verified_gain", "latency"],
+            "properties": {
+              "coverage_gain": {"enum": ["+", "0", "-", "unavailable"]},
+              "accepted_per_verified_gain": {"enum": ["+", "0", "-", "unavailable"]},
+              "latency": {"enum": ["faster", "neutral", "slower", "unavailable"]}
+            }
+          }
+        }
+      }
+    }
+  }
+}

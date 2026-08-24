@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h-known-config-summary.schema.json",
+  "title": "Phase 2D.2A-H1 configuration summary",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "classification_scope", "winner_selected", "frozen_refinement_configuration_set_reselected", "rows"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H1"},
+    "status": {"const": "complete"},
+    "classification_scope": {"const": "descriptive_known_sample_only"},
+    "winner_selected": {"const": false},
+    "frozen_refinement_configuration_set_reselected": {"const": false},
+    "rows": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["schema_version", "refined_family", "pair_count", "valid_pair_count", "invalid_pair_count", "candidate_evidence_insufficient_pair_count", "joint_positive_pair_count", "known_sample_stability_classification", "classification_is_descriptive_only", "winner_selected", "matrix"],
+        "properties": {
+          "schema_version": {"const": "1.0"},
+          "pair_count": {"const": 4},
+          "known_sample_stability_classification": {"enum": ["consistent_positive_known_sample", "mixed_known_sample", "no_positive_known_sample_signal", "invalid_due_to_correctness", "insufficient_candidate_label_evidence"]},
+          "classification_is_descriptive_only": {"const": true},
+          "winner_selected": {"const": false},
+          "matrix": {"type": "array", "minItems": 4, "maxItems": 4}
+        }
+      }
+    }
+  }
+}

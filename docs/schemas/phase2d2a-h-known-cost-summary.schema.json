@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h-known-cost-summary.schema.json",
+  "title": "Phase 2D.2A-H1 cost summary",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "timer_semantics_audited", "formal_latency_source", "component_timing_source", "nested_timer_double_counting_avoided", "dependency_modeling_and_verifier_costs_separated", "conditional_full_pass_exact_ratio_available", "conditional_full_pass_exact_ratio_unavailable_reason", "rows"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H1"},
+    "status": {"const": "complete"},
+    "timer_semantics_audited": {"const": true},
+    "formal_latency_source": {"const": "unprofiled_control_repeats"},
+    "component_timing_source": {"const": "separate_profile_and_diagnostics_paths"},
+    "nested_timer_double_counting_avoided": {"const": true},
+    "dependency_modeling_and_verifier_costs_separated": {"const": true},
+    "conditional_full_pass_exact_ratio_available": {"const": false},
+    "rows": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "required": ["schema_version", "task", "sample_id", "nominal_prompt_length", "node_budget", "refined_family", "correctness_valid", "eligible_for_cost_conclusions", "dependency_modeling_cost", "correctness_preserving_verifier_cost", "combined_additional_work", "conditional_over_initial_draft_ratio", "conditional_over_initial_draft_ratio_unavailable_reason", "nested_timer_double_counting_avoided", "always_fixed_verifier_cost_attributed_to_conditional_remask"],
+        "properties": {
+          "schema_version": {"const": "1.0"},
+          "task": {"const": "gov_report"},
+          "nominal_prompt_length": {"enum": [1024, 16384]},
+          "node_budget": {"enum": [16, 32]},
+          "eligible_for_cost_conclusions": {"type": "boolean"},
+          "conditional_over_initial_draft_ratio": {"type": "null"},
+          "nested_timer_double_counting_avoided": {"const": true},
+          "always_fixed_verifier_cost_attributed_to_conditional_remask": {"const": false}
+        }
+      }
+    }
+  }
+}

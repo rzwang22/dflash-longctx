@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h-known-manifest.schema.json",
+  "title": "Phase 2D.2A-H1 known-sample manifest",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "input_directory_count", "matrix_expected_cell_count", "matrix_observed_cell_count", "matrix_complete", "known_task", "known_sample_id", "context_lengths", "node_budgets", "configuration_families", "refinement_families", "provenance", "candidate_quality_target_label_authority", "candidate_quality_target_label_source", "q1_replay_used_as_target_label_source", "target_labels_used_for_runtime_selection", "invalid_cell_count", "cells", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H1"},
+    "status": {"const": "complete"},
+    "input_directory_count": {"const": 16},
+    "matrix_expected_cell_count": {"const": 16},
+    "matrix_observed_cell_count": {"const": 16},
+    "matrix_complete": {"const": true},
+    "known_task": {"const": "gov_report"},
+    "known_sample_id": {"const": "gov_report-fd287bbfd3bdbdc9"},
+    "context_lengths": {"const": [1024, 16384]},
+    "node_budgets": {"const": [16, 32]},
+    "configuration_families": {"const": ["base_only", "conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+    "refinement_families": {"const": ["conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+    "candidate_quality_target_label_authority": {"const": "original_dflash_reference"},
+    "candidate_quality_target_label_source": {"const": "original_dflash_absolute_continuation"},
+    "q1_replay_used_as_target_label_source": {"const": false},
+    "target_labels_used_for_runtime_selection": {"const": false},
+    "invalid_cell_count": {"type": "integer", "minimum": 0, "maximum": 16},
+    "provenance": {
+      "type": "object",
+      "required": ["repository_commit", "target_model_revision", "draft_model_revision", "materialization_id", "selector_hash", "frozen_refinement_hash", "online_selector_mode", "verification_mode", "dtype", "device", "block_size", "max_new_tokens", "timing_repeats", "warmup_runs", "batch_size", "temperature", "frozen_refinement_configuration_set", "frozen_refinement_configuration_set_reselected"],
+      "properties": {
+        "online_selector_mode": {"const": "top1_packed_tree"},
+        "verification_mode": {"const": "always_fixed_shape_recheck"},
+        "dtype": {"const": "bfloat16"},
+        "device": {"const": "cuda:0"},
+        "block_size": {"const": 16},
+        "max_new_tokens": {"const": 128},
+        "timing_repeats": {"const": 3},
+        "warmup_runs": {"const": 1},
+        "batch_size": {"const": 1},
+        "temperature": {"const": 0.0},
+        "frozen_refinement_configuration_set_reselected": {"const": false}
+      }
+    },
+    "cells": {
+      "type": "array",
+      "minItems": 16,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "required": ["schema_version", "input_directory", "task", "sample_id", "source_sample_id", "source_text_sha256", "context_prefix_sha256", "nominal_prompt_length", "actual_prompt_length", "node_budget", "configuration_family", "configuration_id", "provenance", "correctness", "candidate_quality", "online_efficiency", "formal_timing", "component_cost"],
+        "properties": {
+          "schema_version": {"const": "1.0"},
+          "task": {"const": "gov_report"},
+          "sample_id": {"const": "gov_report-fd287bbfd3bdbdc9"},
+          "nominal_prompt_length": {"enum": [1024, 16384]},
+          "node_budget": {"enum": [16, 32]},
+          "configuration_family": {"enum": ["base_only", "conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+          "correctness": {
+            "type": "object",
+            "required": ["runner_status", "checker_status", "original_dflash_reference_tree_output_exact", "formal_repeat_stable", "profile_formal_output_exact", "diagnostic_formal_output_exact", "structural_correctness_passed", "actual_execution_correctness_passed", "correctness_valid", "target_only_is_auxiliary"],
+            "properties": {
+              "checker_status": {"enum": ["accepted", "rejected"]},
+              "correctness_valid": {"type": "boolean"},
+              "target_only_is_auxiliary": {"const": true}
+            }
+          },
+          "candidate_quality": {
+            "type": "object",
+            "required": ["candidate_quality_total_round_count", "candidate_quality_available_round_count", "candidate_quality_unavailable_round_count", "labelled_reference_position_count", "unavailable_reason_distribution", "target_label_authority", "target_label_source", "q1_replay_used_as_target_label_source", "target_labels_used_for_runtime_selection", "zero_placeholder_rows_excluded_from_denominators"],
+            "properties": {
+              "target_label_authority": {"const": "original_dflash_reference"},
+              "target_label_source": {"const": "original_dflash_absolute_continuation"},
+              "q1_replay_used_as_target_label_source": {"const": false},
+              "target_labels_used_for_runtime_selection": {"const": false},
+              "zero_placeholder_rows_excluded_from_denominators": {"const": true}
+            }
+          }
+        }
+      }
+    },
+    "artifacts": {"type": "array", "minItems": 8, "items": {"type": "string"}}
+  }
+}

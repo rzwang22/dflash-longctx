@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h-known-decision.schema.json",
+  "title": "Phase 2D.2A-H1 decision",
+  "type": "object",
+  "required": ["schema_version", "phase", "status", "final_phase2d2a_decision", "reason", "independent_task_count", "h1_is_known_sample_mechanism_and_cost_study", "h2_held_out_cross_task_evidence_required", "winner_selected", "frozen_refinement_configuration_set_reselected", "legacy_guard_false_negative_count_used_as_h1_gate", "always_fixed_correctness_criteria", "known_sample_classifications", "prohibited_final_decisions_not_issued"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H1"},
+    "status": {"const": "complete"},
+    "final_phase2d2a_decision": {"const": "insufficient_evidence"},
+    "reason": {"const": "H1_contains_one_task_and_no_independent_held_out_task_evidence"},
+    "independent_task_count": {"const": 1},
+    "h1_is_known_sample_mechanism_and_cost_study": {"const": true},
+    "h2_held_out_cross_task_evidence_required": {"const": true},
+    "winner_selected": {"const": false},
+    "frozen_refinement_configuration_set_reselected": {"const": false},
+    "legacy_guard_false_negative_count_used_as_h1_gate": {"const": false},
+    "known_sample_classifications": {
+      "type": "object",
+      "required": ["conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]
+    }
+  }
+}
