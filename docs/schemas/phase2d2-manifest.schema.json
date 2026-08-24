@@ -12,7 +12,19 @@
     "repository": {"type": "object"},
     "configuration": {"type": "object"},
     "workload": {"type": "object"},
-    "phase2d2": {"type": "object", "required": ["configuration_id", "candidate_merge_mode", "node_budget", "verification_mode", "online_selector_mode", "frozen_selector_hash", "evidence_role"]},
+    "phase2d2": {
+      "type": "object",
+      "required": ["configuration_id", "candidate_merge_mode", "node_budget", "verification_mode", "online_selector_mode", "frozen_selector_hash", "evidence_role"],
+      "properties": {
+        "frozen_refinement_configuration_set": {"const": ["conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+        "frozen_refinement_configuration_set_reselected": {"const": false},
+        "candidate_quality_target_label_authority": {"const": "original_dflash_reference"},
+        "candidate_quality_target_label_source": {"const": "original_dflash_absolute_continuation"},
+        "candidate_quality_target_labels_used_for_runtime_selection": {"const": false},
+        "candidate_quality_q1_replay_used_as_target_label_source": {"const": false},
+        "candidate_quality_evidence_role": {"const": "post_hoc_evaluation_only"}
+      }
+    },
     "materialization": {"type": "object", "required": ["id", "instrumented_custom_code_changed", "independent_new_directory_required"]},
     "source_audit": {"type": "object"},
     "measurement_policy": {"type": "object"},

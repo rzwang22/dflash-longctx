@@ -32,6 +32,8 @@ from dflash.phase2c.gold import (
 from dflash.phase2d1.runtime import validate_frozen_selector
 from dflash.phase2d2.freeze import validate_frozen_refinement
 from dflash.phase2d2.metrics import (
+    CANDIDATE_LABEL_AUTHORITY,
+    CANDIDATE_LABEL_SOURCE,
     aggregate_results,
     build_phase2d2_decision,
     candidate_quality_for_round,
@@ -70,6 +72,11 @@ SCHEMA_VERSION = "1.0"
 BASELINE_SHA = "1ba29e8ce4a165c03af997c2f3b3b595ab79c1d2"
 BRANCH = "codex/phase2d2a-robust-conditional-remask"
 BASE_CONTROL_SELECTOR_MODE = "top1_packed_tree"
+FROZEN_REFINEMENT_CONFIGURATION_SET = (
+    "conditional_rerank-d1-p1-r2-w0.5",
+    "union-d2-p2-r2-w0.5",
+    "union-d4-p2-r4-w0.5",
+)
 ROOT_ARTIFACTS = (
     "manifest.json",
     "environment.json",
@@ -217,6 +224,21 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _validate_phase2d2g_frozen_configuration_set(
+    frozen: dict[str, Any],
+) -> None:
+    observed = [
+        row.get("configuration_id") for row in frozen.get("configurations", [])
+    ]
+    if len(observed) != len(FROZEN_REFINEMENT_CONFIGURATION_SET) or set(
+        observed
+    ) != set(FROZEN_REFINEMENT_CONFIGURATION_SET):
+        raise ValueError(
+            "Phase 2D.2A-G must preserve the exact preregistered refinement "
+            "configuration set"
+        )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = validate_phase1b_args(build_parser().parse_args(argv))
     if args.inspect_workload_only:
@@ -252,6 +274,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.frozen_refinement_config is not None:
         frozen = validate_frozen_refinement(_load_json(args.frozen_refinement_config))
+        _validate_phase2d2g_frozen_configuration_set(frozen)
         matches = [
             row
             for row in frozen.get("configurations", [])
@@ -433,6 +456,190 @@ def _sha256_ids(values: list[int]) -> str:
     ).hexdigest()
 
 
+def _original_dflash_reference_alignment(
+    *,
+    prompt_token_ids: list[int],
+    original_dflash_generated_token_ids: list[int],
+    semantic_generated_prefix_length: int,
+    semantic_prefix_token_sha256: str,
+) -> dict[str, Any]:
+    """Align one semantic prefix to Original DFlash by absolute offset and hash."""
+
+    prefix = int(semantic_generated_prefix_length)
+    expected_hash = _sha256_ids(
+        [
+            *prompt_token_ids,
+            *original_dflash_generated_token_ids[: max(0, prefix)],
+        ]
+    )
+    matches = semantic_prefix_token_sha256 == expected_hash
+    reason = None
+    if prefix < 0:
+        reason = "negative_semantic_generated_prefix_length"
+    elif prefix > len(original_dflash_generated_token_ids):
+        reason = "generated_prefix_beyond_original_dflash_output"
+    elif not matches:
+        reason = "semantic_prefix_hash_differs_from_original_dflash"
+    return {
+        "label_authority": CANDIDATE_LABEL_AUTHORITY,
+        "label_source": CANDIDATE_LABEL_SOURCE,
+        "semantic_generated_prefix_length": prefix,
+        "semantic_prefix_token_sha256": semantic_prefix_token_sha256,
+        "expected_original_dflash_prefix_token_sha256": expected_hash,
+        "semantic_prefix_matches_original_dflash": matches,
+        "reference_alignment_available": reason is None,
+        "reference_alignment_reason": reason,
+        "target_label_used_for_runtime_selection": False,
+        "target_labels_used_for_runtime_selection": False,
+    }
+
+
+def _candidate_quality_label_evidence(
+    round_row: dict[str, Any],
+    *,
+    prompt_token_ids: list[int],
+    diagnostic_generated_token_ids: list[int],
+    original_dflash_generated_token_ids: list[int],
+) -> dict[str, Any]:
+    """Build post-hoc Original-DFlash labels for one absolute tree prefix."""
+
+    base = {
+        "label_authority": CANDIDATE_LABEL_AUTHORITY,
+        "label_source": CANDIDATE_LABEL_SOURCE,
+        "target_label_used_for_runtime_selection": False,
+        "target_labels_used_for_runtime_selection": False,
+        "semantic_generated_prefix_length": None,
+        "semantic_prefix_token_sha256": None,
+        "reference_alignment_available": False,
+        "reference_alignment_reason": "artifact_identity_inconsistent",
+        "target_label_evidence_available": False,
+        "target_label_evidence_unavailable_reason": (
+            "artifact_identity_inconsistent"
+        ),
+        "target_labels": [],
+        "candidate_label_position_count": 0,
+        "artifact_identity_checks": {},
+    }
+    try:
+        prefix = int(round_row["generated_root_offset"])
+        phase = round_row["phase2d2"]
+        events = phase["candidate_merge_events"]
+        tree_spec = phase["tree_spec"]
+        positions = sorted({int(row["position_index"]) for row in events})
+        tree_nodes = tree_spec["nodes"]
+    except (KeyError, TypeError, ValueError):
+        return base
+
+    identity_checks = {
+        "generated_root_offset_nonnegative": prefix >= 0,
+        "prefix_cache_length_matches_prompt_plus_generated_prefix": (
+            int(round_row.get("prefix_cache_length_before_round", -1))
+            == len(prompt_token_ids) + prefix
+        ),
+        "candidate_positions_are_complete_dflash_block_suffix": (
+            positions == list(range(1, 16))
+        ),
+        "tree_node_count_matches_tree_spec": (
+            int(tree_spec.get("actual_total_node_count", -1)) == len(tree_nodes)
+        ),
+    }
+    base.update(
+        {
+            "semantic_generated_prefix_length": prefix,
+            "candidate_label_position_count": len(positions),
+            "artifact_identity_checks": identity_checks,
+        }
+    )
+    if 0 <= prefix <= len(diagnostic_generated_token_ids):
+        base["semantic_prefix_token_sha256"] = _sha256_ids(
+            [*prompt_token_ids, *diagnostic_generated_token_ids[:prefix]]
+        )
+    if not all(identity_checks.values()):
+        return base
+    if prefix > len(diagnostic_generated_token_ids):
+        return {
+            **base,
+            "reference_alignment_reason": (
+                "semantic_generated_prefix_beyond_diagnostic_output"
+            ),
+            "target_label_evidence_unavailable_reason": (
+                "semantic_generated_prefix_beyond_diagnostic_output"
+            ),
+        }
+
+    semantic_hash = base["semantic_prefix_token_sha256"]
+    alignment = _original_dflash_reference_alignment(
+        prompt_token_ids=prompt_token_ids,
+        original_dflash_generated_token_ids=original_dflash_generated_token_ids,
+        semantic_generated_prefix_length=prefix,
+        semantic_prefix_token_sha256=semantic_hash,
+    )
+    evidence = {**base, **alignment}
+    if not alignment["reference_alignment_available"]:
+        return {
+            **evidence,
+            "target_label_evidence_unavailable_reason": alignment[
+                "reference_alignment_reason"
+            ],
+        }
+
+    maximum_position = positions[-1]
+    if prefix >= len(diagnostic_generated_token_ids):
+        return {
+            **evidence,
+            "target_label_evidence_unavailable_reason": (
+                "round_root_outside_diagnostic_output"
+            ),
+        }
+    if prefix >= len(original_dflash_generated_token_ids):
+        return {
+            **evidence,
+            "target_label_evidence_unavailable_reason": (
+                "round_root_outside_original_dflash_output"
+            ),
+        }
+    if (
+        diagnostic_generated_token_ids[prefix]
+        != original_dflash_generated_token_ids[prefix]
+    ):
+        return {
+            **evidence,
+            "target_label_evidence_unavailable_reason": (
+                "round_root_differs_from_original_dflash"
+            ),
+        }
+    if prefix + maximum_position >= len(original_dflash_generated_token_ids):
+        return {
+            **evidence,
+            "target_label_evidence_unavailable_reason": (
+                "original_dflash_continuation_truncated_for_candidate_positions"
+            ),
+        }
+
+    target_labels = [
+        {
+            "position_index": position,
+            "absolute_generated_token_offset": prefix + position,
+            "target_token_id": int(
+                original_dflash_generated_token_ids[prefix + position]
+            ),
+            "label_authority": CANDIDATE_LABEL_AUTHORITY,
+            "label_source": CANDIDATE_LABEL_SOURCE,
+            "target_label_used_for_runtime_selection": False,
+        }
+        for position in positions
+    ]
+    return {
+        **evidence,
+        "reference_alignment_available": True,
+        "reference_alignment_reason": None,
+        "target_label_evidence_available": True,
+        "target_label_evidence_unavailable_reason": None,
+        "round_root_token_id": int(original_dflash_generated_token_ids[prefix]),
+        "target_labels": target_labels,
+    }
+
+
 def _generated_ids(tensor: Any, prompt_length: int) -> list[int]:
     return [int(value) for value in tensor[0, prompt_length:].detach().cpu().tolist()]
 
@@ -466,12 +673,17 @@ def _attribute_verifier_oracle_comparisons(
     original_dflash_generated_token_ids: list[int],
 ) -> list[dict[str, Any]]:
     attributed = []
-    full_reference = [*prompt_token_ids, *original_dflash_generated_token_ids]
     for source in rows:
         row = dict(source)
         prefix = int(row["generated_prefix_length"])
-        expected_prefix = full_reference[: len(prompt_token_ids) + prefix]
-        expected_hash = _sha256_ids(expected_prefix)
+        alignment = _original_dflash_reference_alignment(
+            prompt_token_ids=prompt_token_ids,
+            original_dflash_generated_token_ids=(
+                original_dflash_generated_token_ids
+            ),
+            semantic_generated_prefix_length=prefix,
+            semantic_prefix_token_sha256=row["semantic_prefix_token_sha256"],
+        )
         pairwise = row["pairwise"]
         disagreement_depths = [
             value["first_disagreement_depth"]
@@ -483,9 +695,9 @@ def _attribute_verifier_oracle_comparisons(
         support = {
             "attribution_available": False,
             "attribution_unavailable_reason": None,
-            "semantic_prefix_matches_original_dflash": (
-                row["semantic_prefix_token_sha256"] == expected_hash
-            ),
+            "semantic_prefix_matches_original_dflash": alignment[
+                "semantic_prefix_matches_original_dflash"
+            ],
             "first_verifier_disagreement_depth": first_depth,
             "first_verifier_disagreement_absolute_generated_offset": (
                 prefix + first_depth + 1 if first_depth is not None else None
@@ -494,14 +706,10 @@ def _attribute_verifier_oracle_comparisons(
             "q1_replay_matches_original_dflash": None,
             "fixed_shape_recheck_matches_original_dflash": None,
         }
-        if prefix > len(original_dflash_generated_token_ids):
-            support["attribution_unavailable_reason"] = (
-                "generated_prefix_beyond_original_dflash_output"
-            )
-        elif not support["semantic_prefix_matches_original_dflash"]:
-            support["attribution_unavailable_reason"] = (
-                "semantic_prefix_hash_differs_from_original_dflash"
-            )
+        if not alignment["reference_alignment_available"]:
+            support["attribution_unavailable_reason"] = alignment[
+                "reference_alignment_reason"
+            ]
         else:
             paths = (
                 ("packed_native", "packed_native_matches_original_dflash"),
@@ -828,6 +1036,7 @@ def _run_one(
         diagnostic_generated=diagnostic_generated,
         formal_repeat_output_ids_equal=formal_equal,
     )
+    prompt_token_ids = [int(value) for value in workload["input_ids"]]
     raw_oracle_comparisons = [
         row["phase2d2"]["verifier_oracle_comparison"]
         for row in diagnostic["rounds"]
@@ -835,7 +1044,7 @@ def _run_one(
     ]
     oracle_comparisons = _attribute_verifier_oracle_comparisons(
         raw_oracle_comparisons,
-        prompt_token_ids=[int(value) for value in workload["input_ids"]],
+        prompt_token_ids=prompt_token_ids,
         original_dflash_generated_token_ids=reference_generated,
     )
     oracle_by_round = {row["round_index"]: row for row in oracle_comparisons}
@@ -936,11 +1145,24 @@ def _run_one(
                 "component_timing_source": "diagnostics_path",
             }
         )
-        current["candidate_quality"] = candidate_quality_for_round(current)
+        label_evidence = _candidate_quality_label_evidence(
+            current,
+            prompt_token_ids=prompt_token_ids,
+            diagnostic_generated_token_ids=diagnostic_generated,
+            original_dflash_generated_token_ids=reference_generated,
+        )
+        current["candidate_quality"] = candidate_quality_for_round(
+            current,
+            label_evidence=label_evidence,
+        )
         phase["candidate_refinement_improved_coverage"] = bool(
             current["candidate_quality"]["refined_only_target_recovery_count"]
         )
-        phase["candidate_refinement_improved_coverage_unavailable_reason"] = None
+        phase["candidate_refinement_improved_coverage_unavailable_reason"] = (
+            current["candidate_quality"]["unavailable_reason"]
+            if current["candidate_quality"]["availability"] != "available"
+            else None
+        )
         rounds.append(current)
     evidence_common = {
         "schema_version": SCHEMA_VERSION,
@@ -1698,6 +1920,15 @@ def _persist(
         "status": "diagnostic",
         "online_acceptance_measured": True,
         "offline_target_labels_not_used_at_runtime": True,
+        "target_label_authority": summary[
+            "candidate_quality_target_label_authority"
+        ],
+        "target_label_source": summary["candidate_quality_target_label_source"],
+        "mixed_target_label_authorities": summary[
+            "candidate_quality_mixed_label_authorities"
+        ],
+        "q1_replay_used_as_target_label_source": False,
+        "frozen_refinement_configuration_set_reselected": False,
         "rows": [
             {
                 "schema_version": SCHEMA_VERSION,
@@ -1820,6 +2051,15 @@ def _run_config(args: argparse.Namespace) -> dict[str, Any]:
             else None
         ),
         "frozen_refinement_configuration_id": args.frozen_refinement_config_id,
+        "frozen_refinement_configuration_set": list(
+            FROZEN_REFINEMENT_CONFIGURATION_SET
+        ),
+        "frozen_refinement_configuration_set_reselected": False,
+        "candidate_quality_target_label_authority": CANDIDATE_LABEL_AUTHORITY,
+        "candidate_quality_target_label_source": CANDIDATE_LABEL_SOURCE,
+        "candidate_quality_target_labels_used_for_runtime_selection": False,
+        "candidate_quality_q1_replay_used_as_target_label_source": False,
+        "candidate_quality_evidence_role": "post_hoc_evaluation_only",
         "evidence_role": args.evidence_role,
         "nr_calibration_hash": (
             args.nr_calibration["calibration_sha256"]
@@ -1887,6 +2127,17 @@ def main(argv: list[str] | None = None) -> int:
                         "recheck run only on independent diagnostic cache clones"
                     ),
                 },
+                "candidate_quality_labeling": {
+                    "authority": CANDIDATE_LABEL_AUTHORITY,
+                    "source": CANDIDATE_LABEL_SOURCE,
+                    "alignment": (
+                        "absolute generated-prefix length plus semantic prefix "
+                        "token SHA-256"
+                    ),
+                    "q1_replay_is_label_authority": False,
+                    "target_only_is_label_authority": False,
+                    "runtime_selection_uses_target_labels": False,
+                },
             },
             "measurement_policy": {
                 "formal_end_to_end": "unprofiled control repeats",
@@ -1897,6 +2148,8 @@ def main(argv: list[str] | None = None) -> int:
                 "target_only_is_auxiliary_numerical_control": True,
                 "original_dflash_is_token_exact_reference": True,
                 "fixed_target_budget_includes_root": True,
+                "candidate_quality_is_post_hoc_only": True,
+                "frozen_refinement_configuration_set_reselected": False,
             },
             "artifacts": [*ROOT_ARTIFACTS, *GOLD_ARTIFACTS],
         }
@@ -1908,6 +2161,11 @@ def main(argv: list[str] | None = None) -> int:
         "baseline_sha": BASELINE_SHA,
         "materialization_id": preflight["materialization"]["materialization_id"],
         "frozen_selector_hash": args.frozen_selector["config_sha256"],
+        "candidate_quality_target_label_authority": CANDIDATE_LABEL_AUTHORITY,
+        "candidate_quality_target_label_source": CANDIDATE_LABEL_SOURCE,
+        "candidate_quality_target_labels_used_for_runtime_selection": False,
+        "candidate_quality_q1_replay_used_as_target_label_source": False,
+        "frozen_refinement_configuration_set_reselected": False,
         "nr_calibration_hash": (
             preflight["calibration"]["calibration_sha256"]
             if preflight["calibration"] is not None

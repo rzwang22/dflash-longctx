@@ -7,6 +7,22 @@
   "properties": {
     "schema_version": {"const": "1.0"},
     "round_index": {"type": "integer", "minimum": 0},
+    "candidate_quality": {
+      "type": "object",
+      "properties": {
+        "availability": {"enum": ["available", "unavailable"]},
+        "target_label_authority": {"const": "original_dflash_reference"},
+        "target_label_source": {"const": "original_dflash_absolute_continuation"},
+        "target_label_used_for_runtime_selection": {"const": false},
+        "semantic_generated_prefix_length": {"type": ["integer", "null"], "minimum": 0},
+        "semantic_prefix_token_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "reference_alignment_available": {"type": "boolean"},
+        "reference_alignment_reason": {"type": ["string", "null"]},
+        "target_label_evidence_available": {"type": "boolean"},
+        "target_label_evidence_unavailable_reason": {"type": ["string", "null"]},
+        "positions": {"type": "array"}
+      }
+    },
     "phase2d2": {
       "type": "object",
       "required": ["candidate_merge_mode", "initial_parallel_draft_forward_count", "conditional_refinement_forward_count", "base_only_conditional_refinement_bypassed", "actual_verification_tree_source", "refined_tree_replaced_seed_tree", "external_request_batch_size", "internal_branch_batch_size", "conditional_input_token_ids", "temporary_refinement_state_committed", "selected_tree_node_count", "actual_verified_node_count", "root_count", "fixed_root_inclusive_node_budget", "node_budget_invariant_passed", "verification_mode", "fallback_replay_executed", "fallback_query_lengths", "authoritative_committed_cache_length", "authoritative_committed_target_kv_layer_lengths", "correction_or_bonus_committed_in_current_round", "sibling_kv_removed_from_committed_cache", "final_output_source"],

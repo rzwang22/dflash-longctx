@@ -5,7 +5,11 @@ from __future__ import annotations
 import math
 import statistics
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from typing import Any
+
+CANDIDATE_LABEL_AUTHORITY = "original_dflash_reference"
+CANDIDATE_LABEL_SOURCE = "original_dflash_absolute_continuation"
 
 DECISIONS = (
     "proceed_to_lightweight_causal_adapter",
@@ -36,61 +40,186 @@ def distribution(values: list[float | int | None]) -> dict[str, Any]:
     }
 
 
-def candidate_quality_for_round(round_row: dict[str, Any]) -> dict[str, Any]:
-    """Label replay-observed target tokens without feeding labels into selection."""
+def _candidate_quality_provenance(
+    label_evidence: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    evidence = label_evidence or {}
+    return {
+        "label_authority": evidence.get("label_authority"),
+        "label_source": evidence.get("label_source"),
+        "target_label_authority": evidence.get("label_authority"),
+        "target_label_source": evidence.get("label_source"),
+        "target_label_used_for_runtime_selection": bool(
+            evidence.get("target_label_used_for_runtime_selection", False)
+        ),
+        "target_labels_used_for_runtime_selection": bool(
+            evidence.get("target_labels_used_for_runtime_selection", False)
+        ),
+        "semantic_generated_prefix_length": evidence.get(
+            "semantic_generated_prefix_length"
+        ),
+        "semantic_prefix_token_sha256": evidence.get(
+            "semantic_prefix_token_sha256"
+        ),
+        "reference_alignment_available": bool(
+            evidence.get("reference_alignment_available", False)
+        ),
+        "reference_alignment_reason": evidence.get("reference_alignment_reason"),
+        "target_label_evidence_available": bool(
+            evidence.get(
+                "target_label_evidence_available",
+                evidence.get("reference_alignment_available", False),
+            )
+        ),
+        "target_label_evidence_unavailable_reason": evidence.get(
+            "target_label_evidence_unavailable_reason"
+        ),
+        "label_evidence_role": "post_hoc_evaluation_only",
+        "q1_replay_used_as_target_label_source": False,
+        "target_only_used_as_target_label_source": False,
+        "fixed_shape_used_as_target_label_authority": False,
+    }
+
+
+def _unavailable_candidate_quality(
+    *,
+    label_evidence: Mapping[str, Any] | None,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        **_candidate_quality_provenance(label_evidence),
+        "availability": "unavailable",
+        "unavailable_reason": reason,
+        "positions": [],
+        "base_membership_count": 0,
+        "conditional_membership_count": 0,
+        "merged_membership_count": 0,
+        "selected_tree_membership_count": 0,
+        "refined_only_target_recovery_count": 0,
+        "correct_prefix_survival_depth": 0,
+        "first_pruning_depth": None,
+        "base_candidate_coverage_rate": None,
+        "conditional_candidate_coverage_rate": None,
+        "merged_candidate_coverage_rate": None,
+        "selected_tree_coverage_rate_at_fixed_n": None,
+        "offline_oracle_coverage": None,
+        "offline_oracle_coverage_unavailable_reason": (
+            "Phase_2B_offline_oracle_artifact_not_supplied"
+        ),
+    }
+
+
+def candidate_quality_for_round(
+    round_row: dict[str, Any],
+    *,
+    label_evidence: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Measure selected candidates against an explicit post-hoc label source.
+
+    ``replay_decisions`` deliberately remains a legacy diagnostic artifact but is
+    never read here.  The caller must establish semantic-prefix alignment and pass
+    the resulting Original-DFlash continuation labels explicitly.
+    """
+
+    if label_evidence is None:
+        return _unavailable_candidate_quality(
+            label_evidence=None,
+            reason="explicit_label_evidence_not_provided",
+        )
+    if (
+        label_evidence.get("target_label_used_for_runtime_selection") is not False
+        or label_evidence.get("target_labels_used_for_runtime_selection") is not False
+    ):
+        raise ValueError("candidate-quality labels must remain post-hoc only")
+    if label_evidence.get("label_authority") != CANDIDATE_LABEL_AUTHORITY:
+        return _unavailable_candidate_quality(
+            label_evidence=label_evidence,
+            reason="unsupported_target_label_authority",
+        )
+    if label_evidence.get("label_source") != CANDIDATE_LABEL_SOURCE:
+        return _unavailable_candidate_quality(
+            label_evidence=label_evidence,
+            reason="unsupported_target_label_source",
+        )
+    if not label_evidence.get("reference_alignment_available"):
+        return _unavailable_candidate_quality(
+            label_evidence=label_evidence,
+            reason=(
+                label_evidence.get("reference_alignment_reason")
+                or "original_dflash_reference_alignment_unavailable"
+            ),
+        )
+    if not label_evidence.get("target_label_evidence_available", True):
+        return _unavailable_candidate_quality(
+            label_evidence=label_evidence,
+            reason=(
+                label_evidence.get("target_label_evidence_unavailable_reason")
+                or "original_dflash_target_labels_unavailable"
+            ),
+        )
+
+    labels = label_evidence.get("target_labels")
+    if not isinstance(labels, list) or not labels:
+        return _unavailable_candidate_quality(
+            label_evidence=label_evidence,
+            reason="original_dflash_target_labels_unavailable",
+        )
+    expected_positions = list(range(1, len(labels) + 1))
+    observed_positions = [int(row.get("position_index", -1)) for row in labels]
+    if observed_positions != expected_positions:
+        return _unavailable_candidate_quality(
+            label_evidence=label_evidence,
+            reason="artifact_identity_inconsistent",
+        )
 
     phase = round_row["phase2d2"]
-    decisions = phase.get("replay_decisions", [])
     events = phase.get("candidate_merge_events", [])
     tree_nodes = phase.get("tree_spec", {}).get("nodes", [])
-    nodes_by_index = {
-        int(row["node_index"]): row for row in tree_nodes if "node_index" in row
+    selected_tree_paths = {
+        tuple(int(value) for value in row.get("path", [])) for row in tree_nodes
     }
     rows = []
-    for decision in decisions:
-        position = int(decision["decision_depth"]) + 1
-        token = int(decision["top1_token_id"])
-        parent = nodes_by_index.get(int(decision.get("parent_node_index", -1)), {})
-        parent_path = tuple(int(value) for value in parent.get("path", []))
-        matching = [
-            row
-            for row in events
-            if int(row["position_index"]) == position
-            and (
-                row.get("parent_refined_prefix") is None
-                or (
-                    position <= len(row["parent_refined_prefix"])
-                    or parent_path[: len(row["parent_refined_prefix"])]
-                    == tuple(int(value) for value in row["parent_refined_prefix"])
-                )
-            )
+    reference_path: tuple[int, ...] = ()
+    provenance = _candidate_quality_provenance(label_evidence)
+    for label in labels:
+        position = int(label["position_index"])
+        token = int(label["target_token_id"])
+        reference_parent_path = reference_path
+        reference_path = (*reference_path, token)
+        positional_events = [
+            row for row in events if int(row["position_index"]) == position
         ]
+        base_events = [row for row in positional_events if row.get("base_rank") is not None]
+        conditional_branches = [
+            row
+            for row in positional_events
+            if row.get("parent_refined_prefix") is not None
+            and bool(row.get("candidate_active_after_refined_prefix", True))
+        ]
+        matching_conditional = []
+        for event in conditional_branches:
+            refined_prefix = tuple(
+                int(value) for value in event["parent_refined_prefix"]
+            )
+            if (
+                len(refined_prefix) <= len(reference_parent_path)
+                and reference_parent_path[: len(refined_prefix)] == refined_prefix
+            ):
+                matching_conditional.append(event)
+        conditional_set_available = bool(matching_conditional)
         base = [
             row
-            for row in matching
+            for row in base_events
             if int(row["token_id"]) == token and row.get("base_rank") is not None
         ]
         conditional = [
             row
-            for row in matching
+            for row in matching_conditional
             if int(row["token_id"]) == token
-            and (
-                row.get("parent_refined_prefix") is None
-                or position > len(row["parent_refined_prefix"])
-            )
             and row.get("conditional_rank") is not None
         ]
-        merged = [
-            row
-            for row in matching
-            if int(row["token_id"]) == token
-            and (
-                row.get("parent_refined_prefix") is None
-                or position > len(row["parent_refined_prefix"])
-                or row.get("base_rank") is not None
-            )
-        ]
-        accepted = decision.get("accepted_candidate_token") == token
+        merged = bool(base or conditional)
+        selected = reference_path in selected_tree_paths
         best_base_rank = min((int(row["base_rank"]) for row in base), default=None)
         best_conditional_rank = min(
             (int(row["conditional_rank"]) for row in conditional), default=None
@@ -98,11 +227,20 @@ def candidate_quality_for_round(round_row: dict[str, Any]) -> dict[str, Any]:
         rows.append(
             {
                 "position_index": position,
+                "absolute_generated_token_offset": int(
+                    label["absolute_generated_token_offset"]
+                ),
                 "target_token_id": token,
                 "base_top_m_membership": bool(base),
                 "conditional_top_r_membership": bool(conditional),
-                "merged_membership": bool(merged),
-                "selected_tree_membership": bool(accepted),
+                "conditional_candidate_set_available": conditional_set_available,
+                "conditional_candidate_set_unavailable_reason": (
+                    None
+                    if conditional_set_available
+                    else "reference_parent_prefix_not_selected_for_conditional_refinement"
+                ),
+                "merged_membership": merged,
+                "selected_tree_membership": selected,
                 "refined_only_target_recovery": bool(conditional and not base),
                 "best_base_rank": best_base_rank,
                 "best_conditional_rank": best_conditional_rank,
@@ -112,7 +250,25 @@ def candidate_quality_for_round(round_row: dict[str, Any]) -> dict[str, Any]:
                     else None
                 ),
                 "target_label_used_for_runtime_selection": False,
-                "parent_tree_path": list(parent_path),
+                "target_label_authority": CANDIDATE_LABEL_AUTHORITY,
+                "target_label_source": CANDIDATE_LABEL_SOURCE,
+                "semantic_generated_prefix_length": provenance[
+                    "semantic_generated_prefix_length"
+                ],
+                "semantic_prefix_token_sha256": provenance[
+                    "semantic_prefix_token_sha256"
+                ],
+                "reference_alignment_available": True,
+                "reference_alignment_reason": None,
+                "reference_parent_prefix_token_ids": list(reference_parent_path),
+                "reference_prefix_through_position_token_ids": list(reference_path),
+                "parent_tree_path": list(reference_parent_path),
+                "matching_conditional_refined_prefixes": sorted(
+                    {
+                        tuple(int(value) for value in row["parent_refined_prefix"])
+                        for row in matching_conditional
+                    }
+                ),
             }
         )
     survival_depth = 0
@@ -133,8 +289,9 @@ def candidate_quality_for_round(round_row: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     return {
-        "availability": "available" if decisions else "unavailable",
-        "unavailable_reason": None if decisions else "q1_replay_not_executed",
+        **provenance,
+        "availability": "available",
+        "unavailable_reason": None,
         "positions": rows,
         "base_membership_count": sum(row["base_top_m_membership"] for row in rows),
         "conditional_membership_count": sum(
@@ -177,6 +334,35 @@ def candidate_quality_for_round(round_row: dict[str, Any]) -> dict[str, Any]:
 def aggregate_results(
     samples: list[dict[str, Any]], rounds: list[dict[str, Any]]
 ) -> dict[str, Any]:
+    quality_rows = [row.get("candidate_quality", {}) for row in rounds]
+    specified_authorities = {
+        row.get("target_label_authority")
+        for row in quality_rows
+        if row.get("target_label_authority") is not None
+    }
+    specified_sources = {
+        row.get("target_label_source")
+        for row in quality_rows
+        if row.get("target_label_source") is not None
+    }
+    unspecified_provenance_count = sum(
+        row.get("target_label_authority") is None for row in quality_rows
+    )
+    if len(specified_authorities) > 1 or (
+        specified_authorities and unspecified_provenance_count
+    ):
+        raise ValueError("mixed candidate-quality target-label authorities")
+    if len(specified_sources) > 1 or (specified_sources and unspecified_provenance_count):
+        raise ValueError("mixed candidate-quality target-label sources")
+    if any(
+        row.get("target_label_used_for_runtime_selection") is True
+        or row.get("target_labels_used_for_runtime_selection") is True
+        for row in quality_rows
+    ):
+        raise ValueError("candidate-quality target labels entered runtime selection")
+    target_label_authority = next(iter(specified_authorities), None)
+    target_label_source = next(iter(specified_sources), None)
+
     groups: dict[tuple[str, int, str], dict[str, list[dict[str, Any]]]] = defaultdict(
         lambda: {"samples": [], "rounds": []}
     )
@@ -219,6 +405,7 @@ def aggregate_results(
             for row in sample_rows
         ]
         total_formal_ms = sum(formal_sample_medians)
+        group_quality = [row["candidate_quality"] for row in round_rows]
         aggregates.append(
             {
                 "schema_version": "1.0",
@@ -329,6 +516,19 @@ def aggregate_results(
                     )
                     else None
                 ),
+                "candidate_quality_target_label_authority": target_label_authority,
+                "candidate_quality_target_label_source": target_label_source,
+                "candidate_quality_available_round_count": sum(
+                    row.get("availability") == "available" for row in group_quality
+                ),
+                "candidate_quality_unavailable_round_count": sum(
+                    row.get("availability") != "available" for row in group_quality
+                ),
+                "candidate_quality_reference_alignment_available_round_count": sum(
+                    row.get("reference_alignment_available") is True
+                    for row in group_quality
+                ),
+                "candidate_quality_target_labels_used_for_runtime_selection": False,
             }
         )
     return {
@@ -339,6 +539,19 @@ def aggregate_results(
         "aggregates": aggregates,
         "configuration_distribution": dict(
             Counter(sample["configuration_id"] for sample in samples)
+        ),
+        "candidate_quality_target_label_authority": target_label_authority,
+        "candidate_quality_target_label_source": target_label_source,
+        "candidate_quality_mixed_label_authorities": False,
+        "candidate_quality_target_labels_used_for_runtime_selection": False,
+        "candidate_quality_available_round_count": sum(
+            row.get("availability") == "available" for row in quality_rows
+        ),
+        "candidate_quality_unavailable_round_count": sum(
+            row.get("availability") != "available" for row in quality_rows
+        ),
+        "candidate_quality_reference_alignment_available_round_count": sum(
+            row.get("reference_alignment_available") is True for row in quality_rows
         ),
         "metrics_reported_per_generation_round_returned_and_committed_token": True,
     }

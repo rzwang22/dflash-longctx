@@ -4,5 +4,15 @@
   "title": "Phase 2D.2A offline/online labels",
   "type": "object",
   "required": ["schema_version", "status", "online_acceptance_measured", "offline_target_labels_not_used_at_runtime", "rows"],
-  "properties": {"schema_version": {"const": "1.0"}, "online_acceptance_measured": {"const": true}, "offline_target_labels_not_used_at_runtime": {"const": true}, "rows": {"type": "array"}}
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "online_acceptance_measured": {"const": true},
+    "offline_target_labels_not_used_at_runtime": {"const": true},
+    "target_label_authority": {"enum": ["original_dflash_reference", null]},
+    "target_label_source": {"enum": ["original_dflash_absolute_continuation", null]},
+    "mixed_target_label_authorities": {"const": false},
+    "q1_replay_used_as_target_label_source": {"const": false},
+    "frozen_refinement_configuration_set_reselected": {"const": false},
+    "rows": {"type": "array"}
+  }
 }

@@ -4,5 +4,14 @@
   "title": "Phase 2D.2A refinement summary",
   "type": "object",
   "required": ["schema_version", "status", "sample_count", "round_count", "aggregates", "metrics_reported_per_generation_round_returned_and_committed_token"],
-  "properties": {"schema_version": {"const": "1.0"}, "aggregates": {"type": "array"}}
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "aggregates": {"type": "array"},
+    "candidate_quality_target_label_authority": {"enum": ["original_dflash_reference", null]},
+    "candidate_quality_target_label_source": {"enum": ["original_dflash_absolute_continuation", null]},
+    "candidate_quality_mixed_label_authorities": {"const": false},
+    "candidate_quality_target_labels_used_for_runtime_selection": {"const": false},
+    "candidate_quality_available_round_count": {"type": "integer", "minimum": 0},
+    "candidate_quality_unavailable_round_count": {"type": "integer", "minimum": 0}
+  }
 }

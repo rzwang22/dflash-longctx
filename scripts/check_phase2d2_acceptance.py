@@ -48,6 +48,13 @@ FIXED_SHAPE_MODES = {
     "always_fixed_shape_recheck",
     "margin_guarded_fixed_shape_recheck",
 }
+CANDIDATE_LABEL_AUTHORITY = "original_dflash_reference"
+CANDIDATE_LABEL_SOURCE = "original_dflash_absolute_continuation"
+FROZEN_REFINEMENT_CONFIGURATION_SET = [
+    "conditional_rerank-d1-p1-r2-w0.5",
+    "union-d2-p2-r2-w0.5",
+    "union-d4-p2-r4-w0.5",
+]
 
 
 def _json(path: Path) -> Any:
@@ -121,6 +128,83 @@ def _validate_gold_kv_shape_evidence(row: dict[str, Any]) -> None:
         raise ValueError("KV Gold shapes do not all match")
     if row.get("structural_status") != "pass":
         raise ValueError("KV Gold structural status did not pass")
+
+
+def _validate_candidate_quality_provenance(
+    row: dict[str, Any], *, sample: dict[str, Any]
+) -> None:
+    quality = row["candidate_quality"]
+    _validate(quality, "phase2d2-candidate-quality.schema.json")
+    if quality["target_label_authority"] != CANDIDATE_LABEL_AUTHORITY:
+        raise ValueError("candidate-quality target-label authority is not Original DFlash")
+    if quality["target_label_source"] != CANDIDATE_LABEL_SOURCE:
+        raise ValueError("candidate-quality target-label source is not absolute continuation")
+    if quality["label_authority"] != quality["target_label_authority"] or quality[
+        "label_source"
+    ] != quality["target_label_source"]:
+        raise ValueError("candidate-quality label provenance aliases disagree")
+    if quality["target_label_used_for_runtime_selection"] or quality[
+        "target_labels_used_for_runtime_selection"
+    ]:
+        raise ValueError("candidate-quality target labels entered runtime selection")
+    if quality["q1_replay_used_as_target_label_source"] or quality[
+        "target_only_used_as_target_label_source"
+    ]:
+        raise ValueError("an auxiliary numerical control became a target-label source")
+    if quality["semantic_generated_prefix_length"] != int(
+        row["generated_root_offset"]
+    ):
+        raise ValueError("candidate-quality semantic prefix offset is inconsistent")
+    if quality["availability"] == "unavailable":
+        if quality["reference_alignment_available"]:
+            if quality["reference_alignment_reason"] is not None:
+                raise ValueError("available reference alignment has a failure reason")
+        elif not quality["reference_alignment_reason"]:
+            raise ValueError("unavailable reference alignment lacks a reason")
+        if (
+            quality["target_label_evidence_available"]
+            or not quality["target_label_evidence_unavailable_reason"]
+            or quality["positions"]
+        ):
+            raise ValueError("unavailable candidate-quality provenance is incomplete")
+        return
+    if not quality["reference_alignment_available"]:
+        raise ValueError("available candidate-quality row lacks reference alignment")
+    if not quality["target_label_evidence_available"]:
+        raise ValueError("available candidate-quality row lacks target labels")
+
+    reference = sample["original_dflash_reference"]["generated_output_token_ids"]
+    prefix = int(row["generated_root_offset"])
+    selected_paths = {
+        tuple(int(value) for value in node.get("path", []))
+        for node in row["phase2d2"]["tree_spec"]["nodes"]
+    }
+    expected_survival = 0
+    first_pruning = None
+    for position in quality["positions"]:
+        depth = int(position["position_index"])
+        offset = int(position["absolute_generated_token_offset"])
+        if offset != prefix + depth or offset >= len(reference):
+            raise ValueError("candidate-quality absolute target-label offset is invalid")
+        if int(position["target_token_id"]) != int(reference[offset]):
+            raise ValueError("candidate-quality target token is not Original DFlash")
+        expected_parent = [int(value) for value in reference[prefix + 1 : offset]]
+        expected_path = [int(value) for value in reference[prefix + 1 : offset + 1]]
+        if position["reference_parent_prefix_token_ids"] != expected_parent:
+            raise ValueError("candidate-quality reference parent prefix is inconsistent")
+        if position["reference_prefix_through_position_token_ids"] != expected_path:
+            raise ValueError("candidate-quality reference path is inconsistent")
+        expected_selected = tuple(expected_path) in selected_paths
+        if position["selected_tree_membership"] is not expected_selected:
+            raise ValueError("selected-tree coverage does not follow reference path")
+        if expected_selected and first_pruning is None:
+            expected_survival += 1
+        elif first_pruning is None:
+            first_pruning = depth
+    if quality["correct_prefix_survival_depth"] != expected_survival:
+        raise ValueError("correct-prefix survival depth is inconsistent")
+    if quality["first_pruning_depth"] != first_pruning:
+        raise ValueError("first pruning depth is inconsistent")
 
 
 def _same_evidence_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -351,6 +435,7 @@ def check_output(output: Path) -> dict[str, Any]:
     if missing:
         raise ValueError(f"missing Phase 2D.2A artifacts: {missing}")
     manifest = _json(output / "manifest.json")
+    provenance = _json(output / "source-provenance.json")
     correctness = _json(output / "correctness-summary.json")
     samples = _jsonl(output / "samples.jsonl")
     rounds = _jsonl(output / "refinement-rounds.jsonl")
@@ -359,6 +444,8 @@ def check_output(output: Path) -> dict[str, Any]:
     robust_events = _jsonl(output / "robust-verification-events.jsonl")
     decision = _json(output / "phase2d2-decision.json")
     output_divergence = _json(output / "output-divergence.json")
+    summary = _json(output / "refinement-summary.json")
+    offline_online = _json(output / "offline-online-comparison.json")
     gold_logits_path = output / "gold-logit-checks.jsonl"
     gold_logits = _jsonl(gold_logits_path) if gold_logits_path.is_file() else []
     gold_kv_path = output / "gold-kv-checks.jsonl"
@@ -375,7 +462,7 @@ def check_output(output: Path) -> dict[str, Any]:
     _validate(manifest, "phase2d2-manifest.schema.json")
     _validate(correctness, "phase2d2-correctness-summary.schema.json")
     _validate(decision, "phase2d2-decision.schema.json")
-    _validate(_json(output / "refinement-summary.json"), "phase2d2-summary.schema.json")
+    _validate(summary, "phase2d2-summary.schema.json")
     _validate(
         _json(output / "fixed-budget-comparison.json"),
         "phase2d2-fixed-budget-comparison.schema.json",
@@ -389,7 +476,7 @@ def check_output(output: Path) -> dict[str, Any]:
         "phase2d2-output-divergence.schema.json",
     )
     _validate(
-        _json(output / "offline-online-comparison.json"),
+        offline_online,
         "phase2d2-offline-online.schema.json",
     )
     _validate(
@@ -428,6 +515,109 @@ def check_output(output: Path) -> dict[str, Any]:
             != expected_target_warnings
         ):
             raise ValueError("target-only auxiliary output status is inconsistent")
+    sample_by_identity = {
+        (
+            row["task"],
+            row["sample_id"],
+            int(row["nominal_prompt_length"]),
+            row["configuration_id"],
+        ): row
+        for row in samples
+    }
+    phase_config = manifest["phase2d2"]
+    candidate_provenance_present = (
+        phase_config.get("candidate_quality_target_label_authority") is not None
+    )
+    if candidate_provenance_present:
+        expected_phase_provenance = {
+            "candidate_quality_target_label_authority": CANDIDATE_LABEL_AUTHORITY,
+            "candidate_quality_target_label_source": CANDIDATE_LABEL_SOURCE,
+            "candidate_quality_target_labels_used_for_runtime_selection": False,
+            "candidate_quality_q1_replay_used_as_target_label_source": False,
+            "candidate_quality_evidence_role": "post_hoc_evaluation_only",
+            "frozen_refinement_configuration_set": (
+                FROZEN_REFINEMENT_CONFIGURATION_SET
+            ),
+            "frozen_refinement_configuration_set_reselected": False,
+        }
+        for field, expected in expected_phase_provenance.items():
+            if phase_config.get(field) != expected:
+                raise ValueError(f"manifest candidate-label provenance mismatch: {field}")
+        expected_artifact_provenance = {
+            "target_label_authority": CANDIDATE_LABEL_AUTHORITY,
+            "target_label_source": CANDIDATE_LABEL_SOURCE,
+            "mixed_target_label_authorities": False,
+            "q1_replay_used_as_target_label_source": False,
+            "frozen_refinement_configuration_set_reselected": False,
+        }
+        for field, expected in expected_artifact_provenance.items():
+            if offline_online.get(field) != expected:
+                raise ValueError(f"offline candidate-label provenance mismatch: {field}")
+        expected_summary_provenance = {
+            "candidate_quality_target_label_authority": CANDIDATE_LABEL_AUTHORITY,
+            "candidate_quality_target_label_source": CANDIDATE_LABEL_SOURCE,
+            "candidate_quality_mixed_label_authorities": False,
+            "candidate_quality_target_labels_used_for_runtime_selection": False,
+        }
+        for field, expected in expected_summary_provenance.items():
+            if summary.get(field) != expected:
+                raise ValueError(f"summary candidate-label provenance mismatch: {field}")
+        if any(
+            aggregate.get("candidate_quality_target_label_authority")
+            != CANDIDATE_LABEL_AUTHORITY
+            or aggregate.get("candidate_quality_target_label_source")
+            != CANDIDATE_LABEL_SOURCE
+            or aggregate.get(
+                "candidate_quality_target_labels_used_for_runtime_selection"
+            )
+            is not False
+            for aggregate in summary.get("aggregates", [])
+        ):
+            raise ValueError("aggregate candidate-label provenance is mixed")
+        if provenance.get("candidate_quality_target_label_authority") != (
+            CANDIDATE_LABEL_AUTHORITY
+        ) or provenance.get("candidate_quality_target_label_source") != (
+            CANDIDATE_LABEL_SOURCE
+        ):
+            raise ValueError("source provenance lacks Original-DFlash candidate labels")
+        if len(offline_online.get("rows", [])) != len(rounds):
+            raise ValueError("offline candidate-quality row count is incomplete")
+        offline_by_identity = {
+            (
+                row["task"],
+                row["sample_id"],
+                int(row["nominal_prompt_length"]),
+                row["configuration_id"],
+                int(row["round_index"]),
+            ): row
+            for row in offline_online["rows"]
+        }
+        for round_row in rounds:
+            identity = (
+                round_row["task"],
+                round_row["sample_id"],
+                int(round_row["nominal_prompt_length"]),
+                round_row["configuration_id"],
+                int(round_row["round_index"]),
+            )
+            offline_row = offline_by_identity.get(identity)
+            if offline_row is None or any(
+                offline_row.get(field)
+                != round_row["candidate_quality"].get(field)
+                for field in (
+                    "target_label_authority",
+                    "target_label_source",
+                    "target_label_used_for_runtime_selection",
+                    "semantic_generated_prefix_length",
+                    "semantic_prefix_token_sha256",
+                    "reference_alignment_available",
+                    "reference_alignment_reason",
+                    "target_label_evidence_available",
+                    "target_label_evidence_unavailable_reason",
+                )
+            ):
+                raise ValueError("offline candidate-quality provenance is inconsistent")
+
     for row in rounds:
         _validate(row, "phase2d2-round.schema.json")
         phase = row["phase2d2"]
@@ -462,6 +652,17 @@ def check_output(output: Path) -> dict[str, Any]:
             raise ValueError("root/node-budget invariant failed")
         if phase["temporary_refinement_state_committed"]:
             raise ValueError("temporary refinement state was committed")
+        if candidate_provenance_present:
+            identity = (
+                row["task"],
+                row["sample_id"],
+                int(row["nominal_prompt_length"]),
+                row["configuration_id"],
+            )
+            sample = sample_by_identity.get(identity)
+            if sample is None:
+                raise ValueError("candidate-quality round lacks matching sample")
+            _validate_candidate_quality_provenance(row, sample=sample)
         _validate_round_fallback_contract(row)
         if phase["correction_or_bonus_committed_in_current_round"]:
             raise ValueError("correction/bonus was committed in the current round")
@@ -549,6 +750,11 @@ def check_output(output: Path) -> dict[str, Any]:
         "decision": decision["decision"],
         "causal_downstream_gold_kv_skip_count": len(causal_gold_kv_skips),
         "causal_downstream_gold_kv_skips": causal_gold_kv_skips,
+        "candidate_quality_label_provenance": (
+            "original_dflash_absolute_continuation"
+            if candidate_provenance_present
+            else "legacy_artifact_without_explicit_label_provenance"
+        ),
     }
 
 

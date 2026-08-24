@@ -18,6 +18,9 @@ from dflash.phase2d2.freeze import (
     validate_frozen_refinement,
 )
 from dflash.phase2d2.metrics import (
+    CANDIDATE_LABEL_AUTHORITY,
+    CANDIDATE_LABEL_SOURCE,
+    aggregate_results,
     build_phase2d2_decision,
     candidate_quality_for_round,
 )
@@ -41,9 +44,11 @@ from dflash.phase2d2.robustness import (
 from dflash.phase2d2.tensor import repeat_dynamic_cache_batch
 from experiments.phase2d2_robust_conditional_refinement import (
     BASE_CONTROL_SELECTOR_MODE,
+    FROZEN_REFINEMENT_CONFIGURATION_SET,
     GOLD_ARTIFACTS,
     ROOT_ARTIFACTS,
     _attribute_verifier_oracle_comparisons,
+    _candidate_quality_label_evidence,
     _comparison,
     _evaluate_output_contract,
     _first_divergent_generated_offset,
@@ -52,12 +57,14 @@ from experiments.phase2d2_robust_conditional_refinement import (
     _output_relations,
     _persist,
     _sample_timing_row,
+    _validate_phase2d2g_frozen_configuration_set,
     _verifier_oracle_summary,
     build_parser,
 )
 from scripts.aggregate_phase2d2_decision import _stable_positive_by_task
 from scripts.check_phase2d2_acceptance import (
     _causal_gold_kv_skip_evidence,
+    _validate_candidate_quality_provenance,
     _validate_gold_kv_shape_evidence,
     _validate_round_fallback_contract,
     check_output,
@@ -69,6 +76,50 @@ from scripts.phase2d2_build_nr_calibration import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _candidate_label_evidence(tokens: list[int], *, prefix: int = 0) -> dict:
+    return {
+        "label_authority": CANDIDATE_LABEL_AUTHORITY,
+        "label_source": CANDIDATE_LABEL_SOURCE,
+        "semantic_generated_prefix_length": prefix,
+        "semantic_prefix_token_sha256": "a" * 64,
+        "reference_alignment_available": True,
+        "reference_alignment_reason": None,
+        "target_label_used_for_runtime_selection": False,
+        "target_labels_used_for_runtime_selection": False,
+        "target_labels": [
+            {
+                "position_index": index,
+                "absolute_generated_token_offset": prefix + index,
+                "target_token_id": token,
+            }
+            for index, token in enumerate(tokens, 1)
+        ],
+    }
+
+
+def _candidate_quality_round(
+    tokens: list[int],
+    *,
+    selected_paths: list[list[int]] | None = None,
+    events: list[dict] | None = None,
+) -> dict:
+    paths = selected_paths or [[]]
+    return {
+        "phase2d2": {
+            "replay_decisions": [
+                {"decision_depth": 0, "top1_token_id": 999999}
+            ],
+            "candidate_merge_events": events or [],
+            "tree_spec": {
+                "nodes": [
+                    {"node_index": index, "path": path}
+                    for index, path in enumerate(paths)
+                ]
+            },
+        }
+    }
 
 
 def _oracle_path(sequence: list[int], *, query_lengths: list[int]) -> dict:
@@ -1071,20 +1122,31 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
         self.assertFalse(relations["original_dflash_reference_output_ids_equal"])
 
     def test_candidate_quality_is_evaluation_only(self) -> None:
-        row = {
-            "phase2d2": {
-                "replay_decisions": [{"decision_depth": 0, "top1_token_id": 101}],
-                "candidate_merge_events": [
-                    {
-                        "position_index": 1,
-                        "token_id": 101,
-                        "base_rank": None,
-                        "conditional_rank": 1,
-                    }
-                ],
-            }
-        }
-        quality = candidate_quality_for_round(row)
+        row = _candidate_quality_round(
+            [101, 202],
+            selected_paths=[[], [101], [101, 202]],
+            events=[
+                {
+                    "position_index": 1,
+                    "token_id": 101,
+                    "base_rank": 1,
+                    "conditional_rank": 1,
+                    "parent_refined_prefix": [101],
+                    "candidate_active_after_refined_prefix": False,
+                },
+                {
+                    "position_index": 2,
+                    "token_id": 202,
+                    "base_rank": None,
+                    "conditional_rank": 1,
+                    "parent_refined_prefix": [101],
+                    "candidate_active_after_refined_prefix": True,
+                },
+            ],
+        )
+        quality = candidate_quality_for_round(
+            row, label_evidence=_candidate_label_evidence([101, 202])
+        )
         self.assertEqual(quality["refined_only_target_recovery_count"], 1)
         self.assertFalse(
             quality["positions"][0]["target_label_used_for_runtime_selection"]
@@ -1385,6 +1447,284 @@ class MetricsFreezeAndSchemaTests(unittest.TestCase):
         self.assertEqual(changed, "")
 
 
+class CandidateQualityProvenanceTests(unittest.TestCase):
+    @staticmethod
+    def _runner_round(*, prefix: int = 0) -> dict:
+        events = [
+            {
+                "position_index": position,
+                "token_id": 100 + position,
+                "base_rank": 1,
+                "conditional_rank": None,
+                "parent_refined_prefix": None,
+                "candidate_active_after_refined_prefix": True,
+            }
+            for position in range(1, 16)
+        ]
+        nodes = [{"node_index": 0, "path": []}]
+        return {
+            "generated_root_offset": prefix,
+            "prefix_cache_length_before_round": 2 + prefix,
+            "phase2d2": {
+                "replay_decisions": [
+                    {"decision_depth": 0, "top1_token_id": 999999}
+                ],
+                "candidate_merge_events": events,
+                "tree_spec": {
+                    "actual_total_node_count": len(nodes),
+                    "nodes": nodes,
+                },
+            },
+        }
+
+    def test_no_implicit_q1_label_evidence(self) -> None:
+        quality = candidate_quality_for_round(self._runner_round())
+        self.assertEqual(quality["availability"], "unavailable")
+        self.assertEqual(
+            quality["unavailable_reason"], "explicit_label_evidence_not_provided"
+        )
+        self.assertFalse(quality["q1_replay_used_as_target_label_source"])
+
+    def test_corrupting_q1_does_not_change_candidate_metrics(self) -> None:
+        row = _candidate_quality_round(
+            [101],
+            selected_paths=[[], [101]],
+            events=[
+                {
+                    "position_index": 1,
+                    "token_id": 101,
+                    "base_rank": 2,
+                    "conditional_rank": None,
+                    "parent_refined_prefix": None,
+                }
+            ],
+        )
+        evidence = _candidate_label_evidence([101])
+        left = candidate_quality_for_round(row, label_evidence=evidence)
+        row["phase2d2"]["replay_decisions"] = [
+            {"decision_depth": 14, "top1_token_id": -12345}
+        ]
+        right = candidate_quality_for_round(row, label_evidence=evidence)
+        self.assertEqual(left, right)
+
+    def test_original_dflash_continuation_supplies_target_tokens(self) -> None:
+        prompt = [1, 2]
+        reference = [10, *range(101, 116), 500]
+        row = self._runner_round()
+        evidence = _candidate_quality_label_evidence(
+            row,
+            prompt_token_ids=prompt,
+            diagnostic_generated_token_ids=reference,
+            original_dflash_generated_token_ids=reference,
+        )
+        quality = candidate_quality_for_round(row, label_evidence=evidence)
+        self.assertEqual(
+            [item["target_token_id"] for item in quality["positions"]],
+            list(range(101, 116)),
+        )
+        self.assertNotEqual(
+            quality["positions"][0]["target_token_id"],
+            row["phase2d2"]["replay_decisions"][0]["top1_token_id"],
+        )
+
+    def test_selected_coverage_and_survival_follow_reference_path(self) -> None:
+        tokens = [101, 202, 303]
+        row = _candidate_quality_round(
+            tokens,
+            selected_paths=[[], [101], [101, 202], [999, 202, 303]],
+        )
+        quality = candidate_quality_for_round(
+            row, label_evidence=_candidate_label_evidence(tokens)
+        )
+        self.assertEqual(
+            [item["selected_tree_membership"] for item in quality["positions"]],
+            [True, True, False],
+        )
+        self.assertEqual(quality["correct_prefix_survival_depth"], 2)
+        self.assertEqual(quality["first_pruning_depth"], 3)
+
+    def test_conditional_membership_uses_original_reference_parent(self) -> None:
+        row = _candidate_quality_round(
+            [101, 202],
+            events=[
+                {
+                    "position_index": 1,
+                    "token_id": 101,
+                    "base_rank": 1,
+                    "conditional_rank": None,
+                    "parent_refined_prefix": None,
+                },
+                {
+                    "position_index": 2,
+                    "token_id": 202,
+                    "base_rank": None,
+                    "conditional_rank": 1,
+                    "parent_refined_prefix": [999],
+                    "candidate_active_after_refined_prefix": True,
+                },
+                {
+                    "position_index": 2,
+                    "token_id": 202,
+                    "base_rank": None,
+                    "conditional_rank": 2,
+                    "parent_refined_prefix": [101],
+                    "candidate_active_after_refined_prefix": True,
+                },
+            ],
+        )
+        quality = candidate_quality_for_round(
+            row, label_evidence=_candidate_label_evidence([101, 202])
+        )
+        second = quality["positions"][1]
+        self.assertTrue(second["conditional_top_r_membership"])
+        self.assertEqual(second["best_conditional_rank"], 2)
+        self.assertEqual(second["matching_conditional_refined_prefixes"], [(101,)])
+
+    def test_prefix_hash_mismatch_is_unavailable_without_q1_fallback(self) -> None:
+        prompt = [1, 2]
+        reference = [10, *range(101, 117)]
+        diagnostic = [99, *reference[1:]]
+        row = self._runner_round(prefix=1)
+        evidence = _candidate_quality_label_evidence(
+            row,
+            prompt_token_ids=prompt,
+            diagnostic_generated_token_ids=diagnostic,
+            original_dflash_generated_token_ids=reference,
+        )
+        quality = candidate_quality_for_round(row, label_evidence=evidence)
+        self.assertEqual(quality["availability"], "unavailable")
+        self.assertEqual(
+            quality["unavailable_reason"],
+            "semantic_prefix_hash_differs_from_original_dflash",
+        )
+        self.assertFalse(quality["q1_replay_used_as_target_label_source"])
+        self.assertEqual(quality["positions"], [])
+
+    def test_truncated_reference_does_not_fall_back_to_q1(self) -> None:
+        row = self._runner_round()
+        evidence = _candidate_quality_label_evidence(
+            row,
+            prompt_token_ids=[1, 2],
+            diagnostic_generated_token_ids=[10, 11, 12],
+            original_dflash_generated_token_ids=[10, 11, 12],
+        )
+        quality = candidate_quality_for_round(row, label_evidence=evidence)
+        self.assertEqual(quality["availability"], "unavailable")
+        self.assertEqual(
+            quality["unavailable_reason"],
+            "original_dflash_continuation_truncated_for_candidate_positions",
+        )
+        self.assertTrue(quality["reference_alignment_available"])
+        self.assertFalse(quality["target_label_evidence_available"])
+
+    def test_target_only_cannot_become_label_authority(self) -> None:
+        evidence = {
+            **_candidate_label_evidence([101]),
+            "label_authority": "target_only",
+        }
+        quality = candidate_quality_for_round(
+            _candidate_quality_round([101]), label_evidence=evidence
+        )
+        self.assertEqual(quality["availability"], "unavailable")
+        self.assertEqual(
+            quality["unavailable_reason"], "unsupported_target_label_authority"
+        )
+
+    def test_runtime_label_use_is_rejected(self) -> None:
+        evidence = {
+            **_candidate_label_evidence([101]),
+            "target_label_used_for_runtime_selection": True,
+        }
+        with self.assertRaisesRegex(ValueError, "post-hoc"):
+            candidate_quality_for_round(
+                _candidate_quality_round([101]), label_evidence=evidence
+            )
+
+    def test_mixed_label_authorities_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mixed.*authorities"):
+            aggregate_results(
+                [],
+                [
+                    {
+                        "candidate_quality": {
+                            "target_label_authority": CANDIDATE_LABEL_AUTHORITY,
+                            "target_label_source": CANDIDATE_LABEL_SOURCE,
+                        }
+                    },
+                    {
+                        "candidate_quality": {
+                            "target_label_authority": "q1_replay",
+                            "target_label_source": "q1_replay_decisions",
+                        }
+                    },
+                ],
+            )
+
+    def test_checker_recomputes_original_reference_path_membership(self) -> None:
+        row = {
+            "generated_root_offset": 0,
+            **_candidate_quality_round(
+                [101, 202],
+                selected_paths=[[], [101], [101, 202]],
+            ),
+        }
+        row["candidate_quality"] = candidate_quality_for_round(
+            row, label_evidence=_candidate_label_evidence([101, 202])
+        )
+        row = json.loads(json.dumps(row))
+        sample = {
+            "original_dflash_reference": {
+                "generated_output_token_ids": [10, 101, 202]
+            }
+        }
+        _validate_candidate_quality_provenance(row, sample=sample)
+        row["candidate_quality"]["positions"][1]["selected_tree_membership"] = False
+        with self.assertRaisesRegex(ValueError, "reference path"):
+            _validate_candidate_quality_provenance(row, sample=sample)
+
+    def test_frozen_refinement_set_is_invariant(self) -> None:
+        self.assertEqual(
+            FROZEN_REFINEMENT_CONFIGURATION_SET,
+            (
+                "conditional_rerank-d1-p1-r2-w0.5",
+                "union-d2-p2-r2-w0.5",
+                "union-d4-p2-r4-w0.5",
+            ),
+        )
+        _validate_phase2d2g_frozen_configuration_set(
+            {
+                "configurations": [
+                    {"configuration_id": value}
+                    for value in FROZEN_REFINEMENT_CONFIGURATION_SET
+                ]
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "exact preregistered"):
+            _validate_phase2d2g_frozen_configuration_set(
+                {
+                    "configurations": [
+                        {"configuration_id": "union-d2-p2-r2-w0.5"}
+                    ]
+                }
+            )
+
+    def test_metrics_only_patch_does_not_touch_instrumented_model(self) -> None:
+        changed = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--name-only",
+                "--",
+                "third_party/qwen3_8b_dflash_b16/instrumented/dflash.py",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(changed, "")
+
+
 class FixedShapeFallbackTests(unittest.TestCase):
     @staticmethod
     def _round_fixture(
@@ -1589,7 +1929,9 @@ class FixedShapeFallbackTests(unittest.TestCase):
             }
         )
         self.assertEqual(quality["availability"], "unavailable")
-        self.assertEqual(quality["unavailable_reason"], "q1_replay_not_executed")
+        self.assertEqual(
+            quality["unavailable_reason"], "explicit_label_evidence_not_provided"
+        )
 
     def test_fixed_shape_rejects_q1_provenance(self) -> None:
         row = self._round_fixture()
