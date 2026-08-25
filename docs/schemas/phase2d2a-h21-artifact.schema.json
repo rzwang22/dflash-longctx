@@ -11,6 +11,7 @@
       "enum": [
         "execution_manifest",
         "execution_plan",
+        "sentinel_gate",
         "cell_summary",
         "sample_paired_comparison",
         "task_context_summary",
@@ -24,6 +25,7 @@
       "enum": [
         "planned_not_executed",
         "partial_execution",
+        "infrastructure_failure",
         "execution_complete",
         "complete",
         "incomplete_execution"
@@ -58,6 +60,18 @@
           "matrix_expected_row_count": {"const": 112},
           "winner_selected": {"const": false},
           "final_phase2d2a_branch_entered": {"const": false}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"artifact_type": {"const": "sentinel_gate"}}},
+      "then": {
+        "required": ["passed", "requested_execution_ids", "cell_gates", "failure_reasons"],
+        "properties": {
+          "passed": {"type": "boolean"},
+          "requested_execution_ids": {"type": "array", "minItems": 2, "maxItems": 2},
+          "cell_gates": {"type": "array", "minItems": 2, "maxItems": 2},
+          "failure_reasons": {"type": "array", "items": {"type": "string"}}
         }
       }
     },

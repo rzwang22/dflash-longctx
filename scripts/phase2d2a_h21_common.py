@@ -92,6 +92,7 @@ EXECUTION_MANIFEST_NAME = "phase2d2a-h21-execution-manifest.json"
 EXECUTION_PLAN_NAME = "phase2d2a-h21-execution-plan.json"
 SUBRUN_INDEX_NAME = "phase2d2a-h21-subrun-index.jsonl"
 EXTERNAL_STATUS_NAME = "h21-external-status.json"
+SENTINEL_GATE_NAME = "phase2d2a-h21-sentinel-gate.json"
 
 AGGREGATE_JSON_ARTIFACTS = (
     "phase2d2a-h21-cell-summary.json",

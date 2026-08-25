@@ -30,7 +30,7 @@
     "execution_start_utc": {"type": "string"},
     "execution_end_utc": {"type": "string"},
     "execution_start_status": {"enum": ["started", "blocked_dependency"]},
-    "execution_end_status": {"enum": ["completed", "incomplete", "blocked_dependency"]},
+    "execution_end_status": {"enum": ["completed", "incomplete", "blocked_dependency", "infrastructure_failed"]},
     "runner_return_code": {"type": ["integer", "null"]},
     "external_phase2d2_checker_return_code": {"type": ["integer", "null"]},
     "result_identity_valid": {"type": "boolean"},

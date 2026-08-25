@@ -50,6 +50,33 @@ Scientific checker failures with complete, identity-valid artifacts are kept
 as `correctness_invalid`; broken or missing evidence is
 `infrastructure_failed` and makes the matrix incomplete.
 
+The configured child Python entry point is normalized with absolute-path
+semantics without dereferencing symlinks. In particular, a uv-backed
+`.venv/bin/python` remains `.venv/bin/python`; converting it with
+`Path.resolve()`/`realpath()` would instead launch the bare uv CPython and lose
+the virtualenv site-packages. Execution mode runs a child-process preflight
+with that exact entry point before creating any scientific result directory.
+The preflight records the parent and child executable, symlink/realpath
+diagnostics, child Python version, and import results for `jsonschema`, `torch`,
+and `transformers` in the execution manifest. Plan-only mode does not run this
+execution preflight.
+
+An execution preflight failure stops with nonzero status and leaves all 112
+rows `not_started`. After scheduling begins, an incomplete artifact set,
+identity failure, dependency/import/model-load failure, or other
+infrastructure failure is persisted for the current row and trips a circuit
+breaker; no later row is launched. Complete identity-valid scientific
+artifacts rejected by the Phase2D2 correctness checker remain
+`correctness_invalid` and do not trip this infrastructure circuit breaker.
+
+`--sentinel-pair-only` writes
+`phase2d2a-h21-sentinel-gate.json`. Its return code is zero only when both
+frozen cells completed with runner/checker RC 0, retained their exact frozen
+identity, contain every required Phase2D2 artifact, and pass the hard
+Original-DFlash/tree correctness checks. Infrastructure failure, incomplete
+evidence, blocked dependency, or scientific correctness rejection makes the
+sentinel return nonzero without deleting evidence.
+
 ## Aggregation semantics
 
 The aggregator retains all 112 cells and all 84 exact refined/base pairs.
@@ -89,6 +116,7 @@ The output root contains:
 - `phase2d2a-h21-execution-manifest.json`;
 - `phase2d2a-h21-execution-plan.json`;
 - `phase2d2a-h21-subrun-index.jsonl`;
+- optional `phase2d2a-h21-sentinel-gate.json` after a sentinel invocation;
 - `phase2d2a-h21-cell-summary.json` and `.csv`;
 - `phase2d2a-h21-sample-paired-comparison.json` and `.csv`;
 - `phase2d2a-h21-task-context-summary.json` and `.csv`;
@@ -126,13 +154,41 @@ export DRAFT_MODEL_DIR="/mnt/sevenT/wrz_data/models/Qwen3-8B-DFlash-b16-phase2d2
 export LONGBENCH_ROOT="/mnt/sevenT/wrz_data/datasets/LongBench/data"
 export FROZEN_SELECTOR="$PWD/outputs/phase2d1b-frozen-selector/frozen-selector.json"
 export FROZEN_REFINEMENT="$PWD/outputs/phase2d2a-frozen-refinement-66ce72888b34.json"
-export H21_OUTPUT_ROOT="$PWD/outputs/phase2d2a-h21-primary-n16"
+export H21_CODE_SHA="$(git rev-parse --short=12 HEAD)"
+export H21_OUTPUT_ROOT="$PWD/outputs/phase2d2a-h21-primary-n16-${H21_CODE_SHA}"
+export CHILD_PYTHON="$PWD/.venv/bin/python"
 
 python scripts/check_phase2d2a_h2_freeze.py "$FREEZE_DIR"
 echo "H20_CHECKER_RC=$?"
 ```
 
-### H2.1-B — plan-only validation (zero model forwards)
+Do not reuse or delete the failed
+`outputs/phase2d2a-h21-primary-n16-495a6a819cd9` root. It is immutable failure
+provenance. The new root is bound to the new repository commit while the H2.0
+freeze directory and content SHA remain unchanged.
+
+### H2.1-B — verify the exact child interpreter
+
+```bash
+python - "$CHILD_PYTHON" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+child = Path(sys.argv[1])
+print("parent_sys_executable:", sys.executable)
+print("configured_child_executable:", os.path.abspath(child))
+print("configured_child_is_symlink:", child.is_symlink())
+print("configured_child_realpath:", os.path.realpath(child))
+print("symlink_entry_preserved:", os.path.abspath(child) != os.path.realpath(child))
+PY
+echo "H21_PARENT_CHILD_PATH_RC=$?"
+
+"$CHILD_PYTHON" -c 'import jsonschema, torch, transformers, sys; print("child_sys_executable:", sys.executable); print("imports: jsonschema/torch/transformers OK")'
+echo "H21_CHILD_IMPORT_RC=$?"
+```
+
+### H2.1-C — plan-only validation (zero model forwards)
 
 ```bash
 python scripts/run_phase2d2a_h21_primary.py \
@@ -143,14 +199,15 @@ python scripts/run_phase2d2a_h21_primary.py \
   --materialized-draft-path "$DRAFT_MODEL_DIR" \
   --longbench-root "$LONGBENCH_ROOT" \
   --frozen-selector-config "$FROZEN_SELECTOR" \
-  --frozen-refinement-config "$FROZEN_REFINEMENT"
+  --frozen-refinement-config "$FROZEN_REFINEMENT" \
+  --python-executable "$CHILD_PYTHON"
 echo "H21_PLAN_RC=$?"
 ```
 
 Expected plan counts are GovReport 24, Qasper 24, HotpotQA 64, total 112,
 with 112 model-load groups.
 
-### H2.1-C — optional frozen sentinel pair
+### H2.1-D — frozen sentinel pair
 
 The sentinel is the first frozen Qasper 1K base cell plus the first frozen
 refinement family. Both cells remain part of the final matrix; their result may
@@ -166,48 +223,79 @@ python scripts/run_phase2d2a_h21_primary.py \
   --longbench-root "$LONGBENCH_ROOT" \
   --frozen-selector-config "$FROZEN_SELECTOR" \
   --frozen-refinement-config "$FROZEN_REFINEMENT" \
+  --python-executable "$CHILD_PYTHON" \
   --execute-frozen-primary \
   --sentinel-pair-only
-echo "H21_SENTINEL_RC=$?"
+H21_SENTINEL_RC=$?
+echo "H21_SENTINEL_RC=$H21_SENTINEL_RC"
+
+python - "$H21_OUTPUT_ROOT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]) / "phase2d2a-h21-sentinel-gate.json"
+print(json.dumps(json.loads(path.read_text()), indent=2, sort_keys=True))
+PY
+echo "H21_SENTINEL_GATE_PRINT_RC=$?"
 ```
 
-### H2.1-D — resume/execute the complete frozen primary matrix
+Do not proceed unless `H21_SENTINEL_RC=0` and the printed gate has
+`"passed": true` for both frozen cells.
+
+### H2.1-E — conditionally resume/execute the complete frozen primary matrix
 
 ```bash
-python scripts/run_phase2d2a_h21_primary.py \
-  --freeze-dir "$FREEZE_DIR" \
-  --freeze-content-sha256 "$FREEZE_SHA" \
-  --output-root "$H21_OUTPUT_ROOT" \
-  --target-model-path "$TARGET_MODEL_DIR" \
-  --materialized-draft-path "$DRAFT_MODEL_DIR" \
-  --longbench-root "$LONGBENCH_ROOT" \
-  --frozen-selector-config "$FROZEN_SELECTOR" \
-  --frozen-refinement-config "$FROZEN_REFINEMENT" \
-  --execute-frozen-primary
-echo "H21_PRIMARY_EXECUTOR_RC=$?"
+if [ "$H21_SENTINEL_RC" -eq 0 ]; then
+  python scripts/run_phase2d2a_h21_primary.py \
+    --freeze-dir "$FREEZE_DIR" \
+    --freeze-content-sha256 "$FREEZE_SHA" \
+    --output-root "$H21_OUTPUT_ROOT" \
+    --target-model-path "$TARGET_MODEL_DIR" \
+    --materialized-draft-path "$DRAFT_MODEL_DIR" \
+    --longbench-root "$LONGBENCH_ROOT" \
+    --frozen-selector-config "$FROZEN_SELECTOR" \
+    --frozen-refinement-config "$FROZEN_REFINEMENT" \
+    --python-executable "$CHILD_PYTHON" \
+    --execute-frozen-primary
+  H21_PRIMARY_EXECUTOR_RC=$?
+  echo "H21_PRIMARY_EXECUTOR_RC=$H21_PRIMARY_EXECUTOR_RC"
+else
+  H21_PRIMARY_EXECUTOR_RC=1
+  echo "H21 primary skipped because sentinel did not pass"
+fi
 ```
 
-### H2.1-E — aggregate
+### H2.1-F — aggregate only after complete execution
 
 ```bash
-python scripts/aggregate_phase2d2a_h21_primary.py \
-  --freeze-dir "$FREEZE_DIR" \
-  --freeze-content-sha256 "$FREEZE_SHA" \
-  --output-root "$H21_OUTPUT_ROOT"
-echo "H21_AGGREGATOR_RC=$?"
+if [ "$H21_PRIMARY_EXECUTOR_RC" -eq 0 ]; then
+  python scripts/aggregate_phase2d2a_h21_primary.py \
+    --freeze-dir "$FREEZE_DIR" \
+    --freeze-content-sha256 "$FREEZE_SHA" \
+    --output-root "$H21_OUTPUT_ROOT"
+  H21_AGGREGATOR_RC=$?
+  echo "H21_AGGREGATOR_RC=$H21_AGGREGATOR_RC"
+else
+  echo "H2.1 aggregation skipped because primary execution is incomplete"
+fi
 ```
 
-### H2.1-F — acceptance checker
+### H2.1-G — acceptance checker
 
 ```bash
-python scripts/check_phase2d2a_h21_acceptance.py \
-  --freeze-dir "$FREEZE_DIR" \
-  --freeze-content-sha256 "$FREEZE_SHA" \
-  --output-root "$H21_OUTPUT_ROOT"
-echo "H21_ACCEPTANCE_RC=$?"
+if [ "${H21_AGGREGATOR_RC:-1}" -eq 0 ]; then
+  python scripts/check_phase2d2a_h21_acceptance.py \
+    --freeze-dir "$FREEZE_DIR" \
+    --freeze-content-sha256 "$FREEZE_SHA" \
+    --output-root "$H21_OUTPUT_ROOT"
+  echo "H21_ACCEPTANCE_RC=$?"
+else
+  echo "H2.1 acceptance skipped because aggregation did not pass"
+fi
 ```
 
-### H2.1-G — print the primary evidence
+### H2.1-H — print the primary evidence
 
 ```bash
 python - "$H21_OUTPUT_ROOT" <<'PY'

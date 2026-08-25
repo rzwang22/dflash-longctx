@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
+import venv
+from argparse import Namespace
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
@@ -39,10 +45,19 @@ from scripts.phase2d2a_h21_common import (
     write_json,
 )
 from scripts.run_phase2d2a_h21_primary import (
+    _absolute_without_symlink_dereference,
+    _child_environment_preflight,
     _execute_row,
+    _index_rows,
+    _probe_child_environment,
+    _run_rows_with_circuit_breaker,
     _runner_command,
+    _runtime_paths,
+    _sentinel_cell_gate,
+    _sentinel_gate_return_code,
     _sentinel_rows,
     _status_for_row,
+    main as run_h21_main,
 )
 from tests.test_phase2d2_h2_freeze import _exclusions, _inventory
 
@@ -705,6 +720,272 @@ class Phase2D2H21Tests(unittest.TestCase):
         cells[-1]["provenance"]["repository_commit"] = "changed"
         with self.assertRaisesRegex(ValueError, "repository_commit"):
             validate_cell_provenance(cells)
+
+    def test_39_venv_python_symlink_is_not_dereferenced(self) -> None:
+        root = self.root / "python-symlink"
+        root.mkdir()
+        entry = root / "python"
+        entry.symlink_to(Path(sys.executable).resolve())
+        normalized = _absolute_without_symlink_dereference(entry)
+        self.assertEqual(normalized, os.path.abspath(entry))
+        self.assertTrue(Path(normalized).is_symlink())
+        self.assertNotEqual(normalized, os.path.realpath(entry))
+
+    def test_40_runtime_python_uses_abspath_not_realpath(self) -> None:
+        entry = self.root / "python-symlink" / "python"
+        args = Namespace(
+            target_model_path=None,
+            materialized_draft_path=None,
+            longbench_root=None,
+            frozen_selector_config=None,
+            frozen_refinement_config=None,
+            python_executable=str(entry.parent / ".." / entry.parent.name / entry.name),
+        )
+        observed = _runtime_paths(args)["python_executable"]
+        self.assertEqual(observed, os.path.abspath(args.python_executable))
+        self.assertNotEqual(observed, os.path.realpath(args.python_executable))
+
+    def test_41_child_sees_package_installed_only_in_virtualenv(self) -> None:
+        environment = self.root / "child-only-venv"
+        venv.EnvBuilder(with_pip=False).create(environment)
+        child = environment / "bin" / "python"
+        site_packages = Path(
+            subprocess.check_output(
+                [
+                    str(child),
+                    "-c",
+                    "import site; print(site.getsitepackages()[0])",
+                ],
+                text=True,
+            ).strip()
+        )
+        module_name = "h21_child_only_fixture"
+        (site_packages / f"{module_name}.py").write_text(
+            "__version__ = 'fixture-only'\n", encoding="utf-8"
+        )
+        probe = _probe_child_environment(str(child), (module_name,))
+        self.assertEqual(probe["status"], "passed")
+        self.assertTrue(probe["required_imports"][module_name]["available"])
+        self.assertEqual(
+            probe["required_imports"][module_name]["version"], "fixture-only"
+        )
+
+    def test_42_child_environment_preflight_passes_valid_interpreter(self) -> None:
+        paths = {"python_executable": sys.executable}
+        with patch(
+            "scripts.run_phase2d2a_h21_primary.REQUIRED_CHILD_IMPORTS", ("json",)
+        ):
+            probe = _child_environment_preflight(paths)
+        self.assertEqual(probe["status"], "passed")
+        self.assertTrue(probe["required_imports"]["json"]["available"])
+        self.assertEqual(probe["configured_child_executable"], sys.executable)
+
+    def test_43_missing_child_import_fails_preflight(self) -> None:
+        missing = "h21_package_that_must_not_exist"
+        with patch(
+            "scripts.run_phase2d2a_h21_primary.REQUIRED_CHILD_IMPORTS", (missing,)
+        ):
+            probe = _child_environment_preflight({"python_executable": sys.executable})
+        self.assertEqual(probe["status"], "failed")
+        self.assertFalse(probe["required_imports"][missing]["available"])
+
+    def test_44_preflight_failure_creates_zero_scientific_directories(self) -> None:
+        runtime = self.root / "preflight-runtime"
+        for name in ("target", "draft", "longbench"):
+            (runtime / name).mkdir(parents=True)
+        for name in ("selector.json", "refinement.json"):
+            (runtime / name).write_text("{}\n", encoding="utf-8")
+        output = self.root / "preflight-failure-output"
+        failed_probe = {
+            "status": "failed",
+            "parent_sys_executable": sys.executable,
+            "configured_child_executable": sys.executable,
+            "configured_child_is_symlink": Path(sys.executable).is_symlink(),
+            "configured_child_realpath": os.path.realpath(sys.executable),
+            "configured_child_abspath": os.path.abspath(sys.executable),
+            "symlink_preserved": True,
+            "child_sys_executable": sys.executable,
+            "child_python_version": None,
+            "required_imports": {
+                "torch": {
+                    "available": False,
+                    "error": "ModuleNotFoundError",
+                    "version": None,
+                }
+            },
+            "required_import_status": False,
+            "return_code": 1,
+            "probe_error": None,
+            "command": [sys.executable, "-c", "probe"],
+            "stdout": "",
+            "stderr": "",
+        }
+        argv = [
+            "--freeze-dir",
+            str(self.freeze_dir),
+            "--freeze-content-sha256",
+            self.freeze_sha,
+            "--output-root",
+            str(output),
+            "--target-model-path",
+            str(runtime / "target"),
+            "--materialized-draft-path",
+            str(runtime / "draft"),
+            "--longbench-root",
+            str(runtime / "longbench"),
+            "--frozen-selector-config",
+            str(runtime / "selector.json"),
+            "--frozen-refinement-config",
+            str(runtime / "refinement.json"),
+            "--execute-frozen-primary",
+        ]
+        with (
+            patch(
+                "scripts.run_phase2d2a_h21_primary.validate_h21_freeze",
+                return_value=self.bundle,
+            ),
+            patch(
+                "scripts.run_phase2d2a_h21_primary._child_environment_preflight",
+                return_value=failed_probe,
+            ),
+            patch("scripts.run_phase2d2a_h21_primary._execute_row") as execute,
+        ):
+            return_code = run_h21_main(argv)
+        self.assertEqual(return_code, 1)
+        execute.assert_not_called()
+        self.assertFalse((output / "runs").exists())
+        index = [
+            json.loads(line)
+            for line in (output / "phase2d2a-h21-subrun-index.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertEqual(
+            {row["execution_end_status"] for row in index}, {"not_started"}
+        )
+        manifest = json.loads(
+            (output / "phase2d2a-h21-execution-manifest.json").read_text()
+        )
+        self.assertEqual(manifest["status"], "infrastructure_failure")
+        self.assertFalse(manifest["model_forward_executed"])
+
+    def test_45_sentinel_infrastructure_failure_returns_nonzero(self) -> None:
+        row = self.plan["rows"][0]
+        status = {
+            "execution_end_status": "infrastructure_failed",
+            "runner_return_code": 1,
+            "external_phase2d2_checker_return_code": None,
+            "result_identity_valid": False,
+        }
+        gate = _sentinel_cell_gate(
+            row,
+            status,
+            complete_required_artifacts=False,
+            hard_correctness_accepted=False,
+        )
+        self.assertEqual(_sentinel_gate_return_code({"passed": gate["passed"]}), 1)
+
+    def test_46_sentinel_scientific_failure_returns_nonzero(self) -> None:
+        row = self.plan["rows"][0]
+        status = {
+            "execution_end_status": "completed",
+            "runner_return_code": 0,
+            "external_phase2d2_checker_return_code": 1,
+            "result_identity_valid": True,
+        }
+        gate = _sentinel_cell_gate(
+            row,
+            status,
+            complete_required_artifacts=True,
+            hard_correctness_accepted=False,
+        )
+        self.assertEqual(_sentinel_gate_return_code({"passed": gate["passed"]}), 1)
+
+    def test_47_sentinel_valid_pair_returns_zero(self) -> None:
+        status = {
+            "execution_end_status": "completed",
+            "runner_return_code": 0,
+            "external_phase2d2_checker_return_code": 0,
+            "result_identity_valid": True,
+        }
+        gates = [
+            _sentinel_cell_gate(
+                row,
+                status,
+                complete_required_artifacts=True,
+                hard_correctness_accepted=True,
+            )
+            for row in _sentinel_rows(self.plan)
+        ]
+        self.assertTrue(all(gate["passed"] for gate in gates))
+        self.assertEqual(_sentinel_gate_return_code({"passed": True}), 0)
+
+    def test_48_full_execution_circuits_on_first_infrastructure_failure(self) -> None:
+        rows = self.plan["rows"][:4]
+        scheduled = []
+
+        def execute(row: dict) -> str:
+            scheduled.append(row["execution_id"])
+            return "infrastructure_failed"
+
+        circuit = _run_rows_with_circuit_breaker(rows, execute)
+        self.assertTrue(circuit["triggered"])
+        self.assertEqual(circuit["scheduled_row_count"], 1)
+        self.assertEqual(scheduled, [rows[0]["execution_id"]])
+
+    def test_49_untouched_rows_remain_not_started_after_circuit_break(self) -> None:
+        output = self.root / "circuit-index"
+        row = self.plan["rows"][0]
+        status = {
+            "schema_version": "1.0",
+            "phase": "2D.2A-H2.1",
+            "freeze_content_sha256": self.freeze_sha,
+            "execution_id": row["execution_id"],
+            "frozen_matrix_row_identity": matrix_identity(row),
+            "repository_commit": "a" * 40,
+            "execution_start_utc": "start",
+            "execution_end_utc": "end",
+            "execution_start_status": "started",
+            "execution_end_status": "infrastructure_failed",
+            "runner_return_code": 1,
+            "external_phase2d2_checker_return_code": None,
+            "result_identity_valid": False,
+            "result_identity_error": "missing dependency",
+            "command": ["python"],
+        }
+        write_json(
+            output / row["result_relative_dir"] / "h21-external-status.json",
+            status,
+        )
+        index = _index_rows(output, self.plan)
+        self.assertEqual(index[0]["execution_end_status"], "infrastructure_failed")
+        self.assertEqual(
+            sum(item["execution_end_status"] == "not_started" for item in index),
+            111,
+        )
+
+    def test_50_scientific_invalid_does_not_trigger_infrastructure_circuit(
+        self,
+    ) -> None:
+        rows = self.plan["rows"][:4]
+        circuit = _run_rows_with_circuit_breaker(rows, lambda _row: "completed")
+        self.assertFalse(circuit["triggered"])
+        self.assertEqual(circuit["scheduled_row_count"], len(rows))
+
+    def test_51_sentinel_schema_records_hard_gate_evidence(self) -> None:
+        rows = _sentinel_rows(self.plan)
+        payload = {
+            "schema_version": "1.0",
+            "phase": "2D.2A-H2.1",
+            "artifact_type": "sentinel_gate",
+            "status": "complete",
+            "freeze_content_sha256": self.freeze_sha,
+            "passed": False,
+            "requested_execution_ids": [row["execution_id"] for row in rows],
+            "cell_gates": [{}, {}],
+            "failure_reasons": ["fixture"],
+        }
+        validate_h21_schema(payload)
 
 
 if __name__ == "__main__":
