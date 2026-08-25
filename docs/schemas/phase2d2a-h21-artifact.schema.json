@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h21-artifact.schema.json",
+  "title": "Phase 2D.2A-H2.1 repository-side artifact",
+  "type": "object",
+  "required": ["schema_version", "phase", "artifact_type", "status", "freeze_content_sha256"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H2.1"},
+    "artifact_type": {
+      "enum": [
+        "execution_manifest",
+        "execution_plan",
+        "cell_summary",
+        "sample_paired_comparison",
+        "task_context_summary",
+        "family_summary",
+        "mechanism_summary",
+        "cost_summary",
+        "primary_conclusion"
+      ]
+    },
+    "status": {
+      "enum": [
+        "planned_not_executed",
+        "partial_execution",
+        "execution_complete",
+        "complete",
+        "incomplete_execution"
+      ]
+    },
+    "freeze_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rows": {"type": "array"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"artifact_type": {"const": "execution_plan"}}},
+      "then": {
+        "required": ["row_count", "node_budget", "actual_work_regime", "configuration_families", "expected_target_draft_model_load_count", "model_forward_executed", "rows"],
+        "properties": {
+          "row_count": {"const": 112},
+          "node_budget": {"const": 16},
+          "actual_work_regime": {"const": "same_actual_verification_work"},
+          "configuration_families": {"const": ["base_only", "conditional_rerank-d1-p1-r2-w0.5", "union-d2-p2-r2-w0.5", "union-d4-p2-r4-w0.5"]},
+          "expected_target_draft_model_load_count": {"const": 112},
+          "model_forward_executed": {"const": false},
+          "rows": {"minItems": 112, "maxItems": 112}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"artifact_type": {"const": "execution_manifest"}}},
+      "then": {
+        "required": ["freeze_artifact_file_sha256", "frozen_component_canonical_sha256", "h20_artifacts_mutated", "h2_secondary_execution_authorized", "matrix_expected_row_count", "winner_selected", "final_phase2d2a_branch_entered"],
+        "properties": {
+          "h20_artifacts_mutated": {"const": false},
+          "h2_secondary_execution_authorized": {"const": false},
+          "matrix_expected_row_count": {"const": 112},
+          "winner_selected": {"const": false},
+          "final_phase2d2a_branch_entered": {"const": false}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"artifact_type": {"enum": ["cell_summary", "sample_paired_comparison", "task_context_summary", "family_summary", "mechanism_summary", "cost_summary"]}}},
+      "then": {"required": ["rows"]}
+    },
+    {
+      "if": {"properties": {"artifact_type": {"const": "primary_conclusion"}}},
+      "then": {
+        "required": ["execution_complete", "independent_task_count", "govreport_contributes_to_independent_task_count", "family_cross_task_classifications", "winner_selected", "final_phase2d2a_branch_entered", "speedup_claimed"],
+        "properties": {
+          "independent_task_count": {"const": 2},
+          "govreport_contributes_to_independent_task_count": {"const": false},
+          "winner_selected": {"const": false},
+          "final_phase2d2a_branch_entered": {"const": false},
+          "speedup_claimed": {"const": false}
+        }
+      }
+    }
+  ]
+}

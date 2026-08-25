@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h21-external-status.schema.json",
+  "title": "Phase 2D.2A-H2.1 external subrun status",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "phase",
+    "freeze_content_sha256",
+    "execution_id",
+    "frozen_matrix_row_identity",
+    "repository_commit",
+    "execution_start_utc",
+    "execution_end_utc",
+    "execution_start_status",
+    "execution_end_status",
+    "runner_return_code",
+    "external_phase2d2_checker_return_code",
+    "result_identity_valid",
+    "result_identity_error",
+    "command"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H2.1"},
+    "freeze_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "execution_id": {"type": "string", "pattern": "^h21-primary-[0-9]{3}-[0-9a-f]{12}$"},
+    "frozen_matrix_row_identity": {"type": "object"},
+    "repository_commit": {"type": ["string", "null"]},
+    "execution_start_utc": {"type": "string"},
+    "execution_end_utc": {"type": "string"},
+    "execution_start_status": {"enum": ["started", "blocked_dependency"]},
+    "execution_end_status": {"enum": ["completed", "incomplete", "blocked_dependency"]},
+    "runner_return_code": {"type": ["integer", "null"]},
+    "external_phase2d2_checker_return_code": {"type": ["integer", "null"]},
+    "result_identity_valid": {"type": "boolean"},
+    "result_identity_error": {"type": ["string", "null"]},
+    "command": {"type": "array", "items": {"type": "string"}}
+  }
+}
