@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from jsonschema import ValidationError
 
+from dflash.phase2d2.freeze import config_sha256, validate_frozen_refinement
 from scripts.aggregate_phase2d2a_h_known import _candidate_metrics
 from scripts.freeze_phase2d2a_h2_cohort import (
     BASE_FAMILY,
@@ -43,6 +44,7 @@ from scripts.phase2d2a_h21_common import (
     validate_no_extra_outputs,
     validate_plan,
     write_json,
+    _validate_runtime_refinement_identity,
 )
 from scripts.run_phase2d2a_h21_primary import (
     _absolute_without_symlink_dereference,
@@ -50,6 +52,7 @@ from scripts.run_phase2d2a_h21_primary import (
     _execute_row,
     _index_rows,
     _probe_child_environment,
+    _refresh_index_and_manifest,
     _run_rows_with_circuit_breaker,
     _runner_command,
     _runtime_paths,
@@ -78,6 +81,80 @@ def _freeze_artifacts() -> dict:
             "h2_execution_authorized_by_h11": False,
         },
     )
+
+
+def _frozen_refinement() -> dict:
+    payload = {
+        "schema_version": "phase2d2a-frozen-refinement-v1",
+        "source_artifacts": [],
+        "selection_rule": "fixture canonical refinement set",
+        "configurations": [
+            {
+                "configuration_id": "conditional_rerank-d1-p1-r2-w0.5",
+                "candidate_merge_mode": "conditional_rerank",
+                "base_top_m": 16,
+                "conditional_top_r": 2,
+                "refine_depth": 1,
+                "refined_prefix_budget": 1,
+                "refinement_weight": 0.5,
+            },
+            {
+                "configuration_id": "union-d2-p2-r2-w0.5",
+                "candidate_merge_mode": "union",
+                "base_top_m": 16,
+                "conditional_top_r": 2,
+                "refine_depth": 2,
+                "refined_prefix_budget": 2,
+                "refinement_weight": 0.5,
+            },
+            {
+                "configuration_id": "union-d4-p2-r4-w0.5",
+                "candidate_merge_mode": "union",
+                "base_top_m": 16,
+                "conditional_top_r": 4,
+                "refine_depth": 4,
+                "refined_prefix_budget": 2,
+                "refinement_weight": 0.5,
+            },
+        ],
+        "maximum_selected_configuration_count": 3,
+        "target_outputs_used_for_final_online_selection": False,
+        "held_out_evaluation_results_used": False,
+        "manual_override_used": False,
+    }
+    payload["config_sha256"] = config_sha256(payload)
+    return validate_frozen_refinement(payload)
+
+
+def _runtime_phase(frozen: dict, family: str) -> dict:
+    selected = next(
+        row for row in frozen["configurations"] if row["configuration_id"] == family
+    )
+    return {
+        **selected,
+        "frozen_refinement_configuration_id": family,
+        "frozen_refinement_config_hash": frozen["config_sha256"],
+    }
+
+
+def _external_status(row: dict, *, checker_return_code: int = 0) -> dict:
+    return {
+        "schema_version": "1.0",
+        "phase": "2D.2A-H2.1",
+        "freeze_content_sha256": row["freeze_content_sha256"],
+        "execution_id": row["execution_id"],
+        "frozen_matrix_row_identity": matrix_identity(row),
+        "repository_commit": "a" * 40,
+        "execution_start_utc": "start",
+        "execution_end_utc": "end",
+        "execution_start_status": "started",
+        "execution_end_status": "completed",
+        "runner_return_code": 0,
+        "external_phase2d2_checker_return_code": checker_return_code,
+        "result_identity_valid": True,
+        "result_identity_error": None,
+        "command": ["python"],
+    }
 
 
 def _distribution(value: float) -> dict:
@@ -881,9 +958,15 @@ class Phase2D2H21Tests(unittest.TestCase):
             row,
             status,
             complete_required_artifacts=False,
-            hard_correctness_accepted=False,
+            cell_status="infrastructure_failed",
+            infrastructure_failure_reason="fixture identity failure",
         )
         self.assertEqual(_sentinel_gate_return_code({"passed": gate["passed"]}), 1)
+        self.assertIn(
+            "cell_status_infrastructure_failed:fixture identity failure",
+            gate["failure_reasons"],
+        )
+        self.assertNotIn("hard_correctness_not_accepted", gate["failure_reasons"])
 
     def test_46_sentinel_scientific_failure_returns_nonzero(self) -> None:
         row = self.plan["rows"][0]
@@ -897,9 +980,10 @@ class Phase2D2H21Tests(unittest.TestCase):
             row,
             status,
             complete_required_artifacts=True,
-            hard_correctness_accepted=False,
+            cell_status="correctness_invalid",
         )
         self.assertEqual(_sentinel_gate_return_code({"passed": gate["passed"]}), 1)
+        self.assertIn("hard_correctness_not_accepted", gate["failure_reasons"])
 
     def test_47_sentinel_valid_pair_returns_zero(self) -> None:
         status = {
@@ -913,7 +997,7 @@ class Phase2D2H21Tests(unittest.TestCase):
                 row,
                 status,
                 complete_required_artifacts=True,
-                hard_correctness_accepted=True,
+                cell_status="valid",
             )
             for row in _sentinel_rows(self.plan)
         ]
@@ -986,6 +1070,254 @@ class Phase2D2H21Tests(unittest.TestCase):
             "failure_reasons": ["fixture"],
         }
         validate_h21_schema(payload)
+
+    def test_52_refined_tree_category_is_not_runtime_algorithmic_mode(self) -> None:
+        frozen = _frozen_refinement()
+        family = "conditional_rerank-d1-p1-r2-w0.5"
+        row = next(
+            item for item in self.plan["rows"] if item["configuration_family"] == family
+        )
+        phase = _runtime_phase(frozen, family)
+        self.assertEqual(row["candidate_merge_mode"], "refined_tree")
+        self.assertEqual(phase["candidate_merge_mode"], "conditional_rerank")
+        _validate_runtime_refinement_identity(
+            Path("fixture"),
+            row,
+            phase,
+            {"candidate_merge_mode": "conditional_rerank"},
+            frozen,
+        )
+
+    def test_53_base_only_runtime_identity_validates(self) -> None:
+        row = next(
+            item
+            for item in self.plan["rows"]
+            if item["configuration_family"] == BASE_FAMILY
+        )
+        phase = {
+            "candidate_merge_mode": BASE_FAMILY,
+            "frozen_refinement_configuration_id": None,
+            "frozen_refinement_config_hash": None,
+        }
+        _validate_runtime_refinement_identity(
+            Path("fixture"),
+            row,
+            phase,
+            {"candidate_merge_mode": BASE_FAMILY},
+            None,
+        )
+
+    def test_54_conditional_rerank_runtime_identity_validates(self) -> None:
+        self._assert_refined_runtime_identity_validates(
+            "conditional_rerank-d1-p1-r2-w0.5", "conditional_rerank"
+        )
+
+    def test_55_union_d2_runtime_identity_validates(self) -> None:
+        self._assert_refined_runtime_identity_validates("union-d2-p2-r2-w0.5", "union")
+
+    def test_56_union_d4_runtime_identity_validates(self) -> None:
+        self._assert_refined_runtime_identity_validates("union-d4-p2-r4-w0.5", "union")
+
+    def _assert_refined_runtime_identity_validates(
+        self, family: str, expected_mode: str
+    ) -> None:
+        frozen = _frozen_refinement()
+        row = next(
+            item for item in self.plan["rows"] if item["configuration_family"] == family
+        )
+        phase = _runtime_phase(frozen, family)
+        self.assertEqual(phase["candidate_merge_mode"], expected_mode)
+        _validate_runtime_refinement_identity(
+            Path("fixture"),
+            row,
+            phase,
+            {"candidate_merge_mode": expected_mode},
+            frozen,
+        )
+
+    def test_57_wrong_runtime_merge_mode_is_rejected(self) -> None:
+        frozen = _frozen_refinement()
+        family = "union-d2-p2-r2-w0.5"
+        row = next(
+            item for item in self.plan["rows"] if item["configuration_family"] == family
+        )
+        phase = _runtime_phase(frozen, family)
+        phase["candidate_merge_mode"] = "conditional_rerank"
+        with self.assertRaisesRegex(ValueError, "runtime candidate merge mode"):
+            _validate_runtime_refinement_identity(
+                Path("fixture"),
+                row,
+                phase,
+                {"candidate_merge_mode": "conditional_rerank"},
+                frozen,
+            )
+
+    def test_58_wrong_frozen_refinement_family_id_is_rejected(self) -> None:
+        frozen = _frozen_refinement()
+        family = "union-d2-p2-r2-w0.5"
+        row = next(
+            item for item in self.plan["rows"] if item["configuration_family"] == family
+        )
+        phase = _runtime_phase(frozen, family)
+        phase["frozen_refinement_configuration_id"] = "union-d4-p2-r4-w0.5"
+        with self.assertRaisesRegex(ValueError, "configuration ID differs"):
+            _validate_runtime_refinement_identity(
+                Path("fixture"),
+                row,
+                phase,
+                {"candidate_merge_mode": "union"},
+                frozen,
+            )
+
+    def test_59_wrong_frozen_refinement_hash_is_rejected(self) -> None:
+        frozen = _frozen_refinement()
+        family = "union-d4-p2-r4-w0.5"
+        row = next(
+            item for item in self.plan["rows"] if item["configuration_family"] == family
+        )
+        phase = _runtime_phase(frozen, family)
+        phase["frozen_refinement_config_hash"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "config hash differs"):
+            _validate_runtime_refinement_identity(
+                Path("fixture"),
+                row,
+                phase,
+                {"candidate_merge_mode": "union"},
+                frozen,
+            )
+
+    def test_60_base_refined_runtime_confusion_is_rejected(self) -> None:
+        frozen = _frozen_refinement()
+        base = next(
+            item
+            for item in self.plan["rows"]
+            if item["configuration_family"] == BASE_FAMILY
+        )
+        family = "conditional_rerank-d1-p1-r2-w0.5"
+        refined = next(
+            item for item in self.plan["rows"] if item["configuration_family"] == family
+        )
+        with self.subTest("base pretending to be refined"):
+            phase = _runtime_phase(frozen, family)
+            with self.assertRaisesRegex(ValueError, "base result"):
+                _validate_runtime_refinement_identity(
+                    Path("fixture"),
+                    base,
+                    phase,
+                    {"candidate_merge_mode": "conditional_rerank"},
+                    frozen,
+                )
+        with self.subTest("refined pretending to be base"):
+            phase = {
+                "candidate_merge_mode": BASE_FAMILY,
+                "frozen_refinement_configuration_id": None,
+                "frozen_refinement_config_hash": None,
+            }
+            with self.assertRaisesRegex(ValueError, "configuration ID differs"):
+                _validate_runtime_refinement_identity(
+                    Path("fixture"),
+                    refined,
+                    phase,
+                    {"candidate_merge_mode": BASE_FAMILY},
+                    frozen,
+                )
+
+    def test_61_known_h100_scientific_pass_and_runtime_identity_passes_gate(
+        self,
+    ) -> None:
+        frozen = _frozen_refinement()
+        family = "conditional_rerank-d1-p1-r2-w0.5"
+        row = next(
+            item for item in self.plan["rows"] if item["configuration_family"] == family
+        )
+        phase = _runtime_phase(frozen, family)
+        _validate_runtime_refinement_identity(
+            Path("fixture"),
+            row,
+            phase,
+            {"candidate_merge_mode": "conditional_rerank"},
+            frozen,
+        )
+        gate = _sentinel_cell_gate(
+            row,
+            _external_status(row),
+            complete_required_artifacts=True,
+            cell_status="valid",
+        )
+        self.assertTrue(gate["passed"])
+        self.assertEqual(gate["canonical_cell_status"], "valid")
+
+    def test_62_canonical_infrastructure_counter_matches_loader(self) -> None:
+        output = self.root / "canonical-infrastructure-counter"
+        rows = _sentinel_rows(self.plan)
+        for row in rows:
+            write_json(
+                output / row["result_relative_dir"] / "h21-external-status.json",
+                _external_status(row),
+            )
+        manifest = build_execution_manifest(
+            self.bundle,
+            plan=self.plan,
+            runtime_paths={},
+            execution_authorized=True,
+        )
+        with patch(
+            "scripts.run_phase2d2a_h21_primary.load_cell",
+            side_effect=(
+                {"cell_status": "valid", "infrastructure_failure_reason": None},
+                {
+                    "cell_status": "infrastructure_failed",
+                    "infrastructure_failure_reason": "fixture provenance mismatch",
+                },
+            ),
+        ):
+            _refresh_index_and_manifest(
+                output,
+                self.plan,
+                manifest,
+                attempted=True,
+                canonical=True,
+            )
+        self.assertEqual(manifest["completed_cell_count"], 1)
+        self.assertEqual(manifest["infrastructure_failed_cell_count"], 1)
+        self.assertEqual(manifest["scientific_correctness_invalid_cell_count"], 0)
+        self.assertEqual(manifest["not_started_cell_count"], 110)
+
+    def test_63_canonical_scientific_invalid_counter_remains_distinct(self) -> None:
+        output = self.root / "canonical-scientific-counter"
+        rows = _sentinel_rows(self.plan)
+        for row in rows:
+            write_json(
+                output / row["result_relative_dir"] / "h21-external-status.json",
+                _external_status(row),
+            )
+        manifest = build_execution_manifest(
+            self.bundle,
+            plan=self.plan,
+            runtime_paths={},
+            execution_authorized=True,
+        )
+        with patch(
+            "scripts.run_phase2d2a_h21_primary.load_cell",
+            side_effect=(
+                {"cell_status": "valid", "infrastructure_failure_reason": None},
+                {
+                    "cell_status": "correctness_invalid",
+                    "infrastructure_failure_reason": None,
+                },
+            ),
+        ):
+            _refresh_index_and_manifest(
+                output,
+                self.plan,
+                manifest,
+                attempted=True,
+                canonical=True,
+            )
+        self.assertEqual(manifest["completed_cell_count"], 2)
+        self.assertEqual(manifest["infrastructure_failed_cell_count"], 0)
+        self.assertEqual(manifest["scientific_correctness_invalid_cell_count"], 1)
+        self.assertEqual(manifest["not_started_cell_count"], 110)
 
 
 if __name__ == "__main__":

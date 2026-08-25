@@ -16,6 +16,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
+from dflash.phase2d2.freeze import validate_frozen_refinement
 from scripts.aggregate_phase2d2a_h_known import (
     _candidate_metrics,
     _component_cost,
@@ -580,6 +581,7 @@ def _validate_result_identity(
     row: dict[str, Any],
     manifest: dict[str, Any],
     sample: dict[str, Any],
+    frozen_refinement: dict[str, Any] | None,
 ) -> None:
     expected_sample = {
         "task": row["task"],
@@ -624,11 +626,13 @@ def _validate_result_identity(
     for field, value in expected_config.items():
         if config.get(field) != value:
             raise ValueError(f"{root}: frozen configuration field changed: {field}")
-    expected_mode = (
-        BASE_FAMILY if row["configuration_family"] == BASE_FAMILY else "refined_tree"
+    _validate_runtime_refinement_identity(
+        root,
+        row,
+        phase,
+        sample,
+        frozen_refinement,
     )
-    if phase.get("candidate_merge_mode") != expected_mode:
-        raise ValueError(f"{root}: candidate merge mode differs from frozen family")
     if (
         phase.get("candidate_quality_target_label_authority")
         != CANDIDATE_LABEL_AUTHORITY
@@ -643,6 +647,100 @@ def _validate_result_identity(
         raise ValueError(f"{root}: q1 entered target labels")
     if phase.get("evidence_role") != "held_out_evaluation":
         raise ValueError(f"{root}: result is not held-out evaluation evidence")
+
+
+def _validated_frozen_refinement(path: Path) -> dict[str, Any]:
+    try:
+        payload = read_json(path)
+    except Exception as exc:  # noqa: BLE001 - normalize provenance failure.
+        raise ValueError(f"cannot read frozen refinement artifact: {path}") from exc
+    try:
+        return validate_frozen_refinement(payload)
+    except Exception as exc:  # noqa: BLE001 - normalize provenance failure.
+        raise ValueError(f"invalid frozen refinement artifact: {path}") from exc
+
+
+def _validate_runtime_refinement_identity(
+    root: Path,
+    row: dict[str, Any],
+    phase: dict[str, Any],
+    sample: dict[str, Any],
+    frozen_refinement: dict[str, Any] | None,
+) -> None:
+    """Separate the H2.0 matrix category from the runtime merge algorithm."""
+
+    family = row["configuration_family"]
+    matrix_category = row.get("candidate_merge_mode")
+    runtime_mode = phase.get("candidate_merge_mode")
+    runtime_family = phase.get("frozen_refinement_configuration_id")
+    runtime_hash = phase.get("frozen_refinement_config_hash")
+    if sample.get("candidate_merge_mode") != runtime_mode:
+        raise ValueError(f"{root}: sample/runtime candidate merge modes differ")
+    if family == BASE_FAMILY:
+        if matrix_category != BASE_FAMILY:
+            raise ValueError(f"{root}: base row matrix execution category changed")
+        if row.get("frozen_refinement_configuration_id") is not None:
+            raise ValueError(f"{root}: base matrix row selects a refinement family")
+        if runtime_mode != BASE_FAMILY:
+            raise ValueError(f"{root}: base result uses a refined runtime merge mode")
+        if runtime_family is not None:
+            raise ValueError(f"{root}: base result selects a refinement family")
+        if runtime_hash is not None:
+            raise ValueError(f"{root}: base result carries a refinement config hash")
+        return
+    if matrix_category != "refined_tree":
+        raise ValueError(f"{root}: refined row matrix execution category changed")
+    expected_family = row.get("frozen_refinement_configuration_id")
+    if expected_family != family:
+        raise ValueError(f"{root}: refined matrix family identity is inconsistent")
+    if runtime_family != expected_family:
+        raise ValueError(f"{root}: frozen refinement configuration ID differs")
+    if frozen_refinement is None:
+        raise ValueError(f"{root}: refined result lacks frozen refinement provenance")
+    frozen = validate_frozen_refinement(frozen_refinement)
+    matches = [
+        config
+        for config in frozen["configurations"]
+        if config["configuration_id"] == expected_family
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"{root}: frozen refinement family is not uniquely defined")
+    selected = matches[0]
+    if runtime_hash != frozen["config_sha256"]:
+        raise ValueError(f"{root}: frozen refinement config hash differs")
+    expected_runtime_mode = selected["candidate_merge_mode"]
+    if runtime_mode != expected_runtime_mode:
+        raise ValueError(
+            f"{root}: runtime candidate merge mode differs from selected frozen "
+            "refinement configuration"
+        )
+    for field in (
+        "base_top_m",
+        "conditional_top_r",
+        "refine_depth",
+        "refined_prefix_budget",
+        "refinement_weight",
+    ):
+        if phase.get(field) != selected[field]:
+            raise ValueError(
+                f"{root}: runtime frozen refinement field differs: {field}"
+            )
+
+
+def _frozen_refinement_for_row(
+    output_root: Path,
+    plan_row: dict[str, Any],
+) -> dict[str, Any] | None:
+    if plan_row["configuration_family"] == BASE_FAMILY:
+        return None
+    execution_manifest = read_json(output_root / EXECUTION_MANIFEST_NAME)
+    validate_h21_schema(execution_manifest)
+    configured = execution_manifest.get("runtime_paths", {}).get(
+        "frozen_refinement_config"
+    )
+    if not configured:
+        raise ValueError("H2.1 execution manifest lacks frozen refinement path")
+    return _validated_frozen_refinement(Path(configured))
 
 
 def load_cell(output_root: Path, plan_row: dict[str, Any]) -> dict[str, Any]:
@@ -682,7 +780,13 @@ def load_cell(output_root: Path, plan_row: dict[str, Any]) -> dict[str, Any]:
         _validate_schema(sample, "phase2d2-sample.schema.json")
         for round_row in rounds:
             _validate_schema(round_row, "phase2d2-round.schema.json")
-        _validate_result_identity(root, plan_row, manifest, sample)
+        _validate_result_identity(
+            root,
+            plan_row,
+            manifest,
+            sample,
+            _frozen_refinement_for_row(output_root, plan_row),
+        )
         related = [
             round_row
             for round_row in rounds

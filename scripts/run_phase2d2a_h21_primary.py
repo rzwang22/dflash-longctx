@@ -60,6 +60,8 @@ from scripts.phase2d2a_h21_common import (  # noqa: E402
     validate_plan,
     write_json,
     write_jsonl,
+    _validate_runtime_refinement_identity,
+    _validated_frozen_refinement,
 )
 
 REQUIRED_CHILD_IMPORTS = ("jsonschema", "torch", "transformers")
@@ -386,27 +388,51 @@ def _refresh_index_and_manifest(
     manifest: dict[str, Any],
     *,
     attempted: bool,
+    canonical: bool = False,
 ) -> None:
     rows = _index_rows(output_root, plan)
-    write_jsonl(output_root / SUBRUN_INDEX_NAME, rows)
-    complete = sum(row["execution_end_status"] == "completed" for row in rows)
-    infrastructure_failed = sum(
+    external_complete = sum(row["execution_end_status"] == "completed" for row in rows)
+    external_infrastructure_failed = sum(
         row["execution_end_status"]
         in {"incomplete", "blocked_dependency", "infrastructure_failed"}
         for row in rows
     )
-    not_started = len(rows) - complete - infrastructure_failed
-    scientific_invalid = sum(
-        row["execution_end_status"] == "completed"
-        and row["external_phase2d2_checker_return_code"] not in (None, 0)
-        for row in rows
+    not_started = len(rows) - external_complete - external_infrastructure_failed
+    canonical_infrastructure_failed = 0
+    if canonical:
+        plan_by_id = {row["execution_id"]: row for row in plan["rows"]}
+        scientific_invalid = 0
+        for index_row in rows:
+            if index_row["execution_end_status"] != "completed":
+                index_row["canonical_cell_status"] = None
+                index_row["canonical_cell_failure_reason"] = None
+                continue
+            cell = load_cell(output_root, plan_by_id[index_row["execution_id"]])
+            index_row["canonical_cell_status"] = cell["cell_status"]
+            index_row["canonical_cell_failure_reason"] = cell.get(
+                "infrastructure_failure_reason"
+            )
+            if cell["cell_status"] == "infrastructure_failed":
+                canonical_infrastructure_failed += 1
+            elif cell["cell_status"] == "correctness_invalid":
+                scientific_invalid += 1
+    else:
+        scientific_invalid = sum(
+            row["execution_end_status"] == "completed"
+            and row["external_phase2d2_checker_return_code"] not in (None, 0)
+            for row in rows
+        )
+    complete = external_complete - canonical_infrastructure_failed
+    infrastructure_failed = (
+        external_infrastructure_failed + canonical_infrastructure_failed
     )
+    write_jsonl(output_root / SUBRUN_INDEX_NAME, rows)
     scientific_subprocess_launched = bool(
         manifest.get("scientific_subprocess_launched") or attempted
     )
     model_forward_evidence = bool(
         manifest.get("model_forward_executed")
-        or complete
+        or external_complete
         or any(
             (output_root / row["result_relative_dir"] / "samples.jsonl").is_file()
             and (output_root / row["result_relative_dir"] / "samples.jsonl")
@@ -432,6 +458,7 @@ def _refresh_index_and_manifest(
             "infrastructure_failed_cell_count": infrastructure_failed,
             "not_started_cell_count": not_started,
             "scientific_correctness_invalid_cell_count": scientific_invalid,
+            "canonical_cell_classification_applied": canonical,
         }
     )
     validate_h21_schema(manifest)
@@ -532,7 +559,9 @@ def _runner_command(
 
 
 def _validate_produced_identity(
-    result_dir: Path, row: dict[str, Any]
+    result_dir: Path,
+    row: dict[str, Any],
+    frozen_refinement_path: str,
 ) -> tuple[bool, str | None]:
     try:
         samples = read_jsonl(result_dir / "samples.jsonl")
@@ -562,6 +591,18 @@ def _validate_produced_identity(
             != row["frozen_refinement_configuration_id"]
         ):
             raise ValueError("frozen refinement family mismatch")
+        frozen_refinement = (
+            None
+            if row["configuration_family"] == BASE_FAMILY
+            else _validated_frozen_refinement(Path(frozen_refinement_path))
+        )
+        _validate_runtime_refinement_identity(
+            result_dir,
+            row,
+            phase,
+            sample,
+            frozen_refinement,
+        )
         return True, None
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"
@@ -656,7 +697,11 @@ def _execute_row(
     complete_artifacts = all(
         (result_dir / name).is_file() for name in PHASE2D2_REQUIRED_ARTIFACTS
     )
-    identity_valid, identity_error = _validate_produced_identity(result_dir, row)
+    identity_valid, identity_error = _validate_produced_identity(
+        result_dir,
+        row,
+        paths["frozen_refinement_config"],
+    )
     end_status = (
         "completed"
         if complete_artifacts and identity_valid
@@ -739,7 +784,8 @@ def _sentinel_cell_gate(
     status: dict[str, Any] | None,
     *,
     complete_required_artifacts: bool,
-    hard_correctness_accepted: bool,
+    cell_status: str,
+    infrastructure_failure_reason: str | None = None,
 ) -> dict[str, Any]:
     reasons = []
     if status is None:
@@ -758,8 +804,16 @@ def _sentinel_cell_gate(
         reasons.extend(name for name, passed in requirements.items() if not passed)
     if not complete_required_artifacts:
         reasons.append("incomplete_required_artifacts")
-    if not hard_correctness_accepted:
+    hard_correctness_accepted = cell_status == "valid"
+    if cell_status == "infrastructure_failed":
+        reasons.append(
+            "cell_status_infrastructure_failed:"
+            f"{infrastructure_failure_reason or 'unspecified infrastructure failure'}"
+        )
+    elif cell_status == "correctness_invalid":
         reasons.append("hard_correctness_not_accepted")
+    elif cell_status != "valid":
+        reasons.append(f"unknown_canonical_cell_status:{cell_status}")
     return {
         "execution_id": row["execution_id"],
         "execution_end_status": status.get("execution_end_status") if status else None,
@@ -771,6 +825,8 @@ def _sentinel_cell_gate(
             status.get("result_identity_valid") is True if status else False
         ),
         "complete_required_artifacts": complete_required_artifacts,
+        "canonical_cell_status": cell_status,
+        "infrastructure_failure_reason": infrastructure_failure_reason,
         "hard_correctness_accepted": hard_correctness_accepted,
         "passed": not reasons,
         "failure_reasons": reasons,
@@ -795,14 +851,13 @@ def _evaluate_sentinel_gate(
         complete = all(
             (result_dir / name).is_file() for name in PHASE2D2_REQUIRED_ARTIFACTS
         )
-        hard_correctness_accepted = (
-            load_cell(output_root, row)["cell_status"] == "valid"
-        )
+        cell = load_cell(output_root, row)
         gate = _sentinel_cell_gate(
             row,
             status,
             complete_required_artifacts=complete,
-            hard_correctness_accepted=hard_correctness_accepted,
+            cell_status=cell["cell_status"],
+            infrastructure_failure_reason=cell.get("infrastructure_failure_reason"),
         )
         if status_error is not None:
             gate["failure_reasons"].append(f"invalid_external_status:{status_error}")
@@ -934,7 +989,13 @@ def main(argv: list[str] | None = None) -> int:
             output_root, plan, manifest, attempted=True
         ),
     )
-    _refresh_index_and_manifest(output_root, plan, manifest, attempted=True)
+    _refresh_index_and_manifest(
+        output_root,
+        plan,
+        manifest,
+        attempted=True,
+        canonical=True,
+    )
     manifest["infrastructure_circuit_breaker"] = circuit
     if circuit["triggered"]:
         manifest["status"] = "infrastructure_failure"
@@ -961,6 +1022,12 @@ def main(argv: list[str] | None = None) -> int:
                 "status": manifest["status"],
                 "completed_cell_count": manifest["completed_cell_count"],
                 "incomplete_cell_count": manifest["incomplete_cell_count"],
+                "infrastructure_failed_cell_count": manifest[
+                    "infrastructure_failed_cell_count"
+                ],
+                "scientific_correctness_invalid_cell_count": manifest[
+                    "scientific_correctness_invalid_cell_count"
+                ],
                 "not_started_cell_count": manifest["not_started_cell_count"],
                 "infrastructure_circuit_breaker_triggered": circuit["triggered"],
                 "sentinel_gate_passed": (

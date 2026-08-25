@@ -20,6 +20,18 @@ Each refined cell resolves `--base-result-dir` to the exact same task, physical
 sample, context prefix, N16, verifier, and protocol base cell. No online or
 instrumented model source is changed.
 
+The frozen H2.0 `candidate_merge_mode` has matrix-level semantics. It is
+`base_only` for the base execution category and `refined_tree` for every
+refined execution category; `refined_tree` is not an algorithmic merge-mode
+string. The Phase2D2 result manifest instead records the selected frozen
+configuration's runtime algorithm: the conditional family records
+`conditional_rerank`, while both frozen union families record `union`. H2.1
+loads the canonical frozen-refinement artifact with the existing
+`validate_frozen_refinement()` parser and validates the exact family ID,
+artifact hash, algorithmic merge mode, and refinement parameters against the
+selected entry. It never derives runtime mode by parsing a family name and
+never compares the H2.0 `refined_tree` category directly with the runtime mode.
+
 ## Freeze and execution contract
 
 `scripts/run_phase2d2a_h21_primary.py` validates the H2.0 directory with the
@@ -76,6 +88,17 @@ identity, contain every required Phase2D2 artifact, and pass the hard
 Original-DFlash/tree correctness checks. Infrastructure failure, incomplete
 evidence, blocked dependency, or scientific correctness rejection makes the
 sentinel return nonzero without deleting evidence.
+
+The sentinel retains the canonical loader classification. An
+`infrastructure_failed` cell reports
+`cell_status_infrastructure_failed:<concrete reason>` and is not collapsed into
+`hard_correctness_not_accepted`; that latter reason is reserved for a
+`correctness_invalid` scientific result. After a requested execution scope
+finishes, the manifest counters are reconciled once with canonical `load_cell`
+classification. This keeps `completed_cell_count`,
+`infrastructure_failed_cell_count`, and
+`scientific_correctness_invalid_cell_count` consistent without repeatedly
+reloading every completed artifact after every row.
 
 ## Aggregation semantics
 
@@ -167,6 +190,11 @@ Do not reuse or delete the failed
 provenance. The new root is bound to the new repository commit while the H2.0
 freeze directory and content SHA remain unchanged.
 
+Likewise, do not resume the validator-failed sentinel root
+`outputs/phase2d2a-h21-primary-n16-028651c3b356`. Its scientific artifacts are
+retained, but its execution manifest is repository-commit-bound. Validation of
+a newer repository commit must use a new commit-derived output root.
+
 ### H2.1-B — verify the exact child interpreter
 
 ```bash
@@ -242,6 +270,14 @@ echo "H21_SENTINEL_GATE_PRINT_RC=$?"
 
 Do not proceed unless `H21_SENTINEL_RC=0` and the printed gate has
 `"passed": true` for both frozen cells.
+
+For the repository-side runtime-identity validator revalidation, stop here
+after confirming `completed_cell_count=2`,
+`infrastructure_failed_cell_count=0`, `not_started_cell_count=110`, both cell
+gates `canonical_cell_status=valid`, sentinel `passed=true`, and RC 0. Do not
+start the 112-row matrix as part of that validator validation task. The
+remaining sections describe the later primary execution only after separate
+authorization.
 
 ### H2.1-E — conditionally resume/execute the complete frozen primary matrix
 
