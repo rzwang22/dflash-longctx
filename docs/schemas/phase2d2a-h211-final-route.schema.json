@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h211-final-route.schema.json",
+  "title": "Phase 2D.2A-H2.1.1 final-route artifact",
+  "type": "object",
+  "required": ["schema_version", "phase", "artifact_type", "status", "freeze_content_sha256", "model_forward_executed"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H2.1.1"},
+    "artifact_type": {"enum": ["final_route_audit", "route_manifest"]},
+    "status": {"const": "complete"},
+    "freeze_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_forward_executed": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"artifact_type": {"const": "final_route_audit"}}},
+      "then": {
+        "required": ["h21_primary_accepted", "evidence_levels_kept_separate", "formal_primary_evidence", "secondary_efficiency_observation", "mechanism_and_cost_interpretation", "route", "families", "h21_anchor_binding_sha256"],
+        "properties": {
+          "h21_primary_accepted": {"const": true},
+          "evidence_levels_kept_separate": {"const": true},
+          "families": {"type": "array", "minItems": 3, "maxItems": 3}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"artifact_type": {"const": "route_manifest"}}},
+      "then": {
+        "required": ["freeze_artifact_file_sha256", "h21_artifact_file_sha256", "h21_anchor_binding_sha256", "h20_artifacts_mutated", "h21_artifacts_mutated"],
+        "properties": {
+          "h20_artifacts_mutated": {"const": false},
+          "h21_artifacts_mutated": {"const": false}
+        }
+      }
+    }
+  ]
+}

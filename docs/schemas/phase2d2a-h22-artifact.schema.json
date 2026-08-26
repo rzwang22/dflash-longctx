@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rzwang22/dflash-longctx/docs/schemas/phase2d2a-h22-artifact.schema.json",
+  "title": "Phase 2D.2A-H2.2 secondary artifact",
+  "type": "object",
+  "required": ["schema_version", "phase", "artifact_type", "status", "freeze_content_sha256", "h21_anchor_binding_sha256", "h211_route_binding_sha256"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "phase": {"const": "2D.2A-H2.2"},
+    "artifact_type": {
+      "enum": [
+        "analysis_contract",
+        "execution_manifest",
+        "execution_plan",
+        "sentinel_gate",
+        "cell_summary",
+        "n32_paired_comparison",
+        "cross_budget_paired_comparison",
+        "incremental_budget_decomposition",
+        "task_context_summary",
+        "mechanism_summary",
+        "cost_summary",
+        "secondary_conclusion"
+      ]
+    },
+    "status": {"enum": ["frozen_not_executed", "planned_not_executed", "partial_execution", "infrastructure_failure", "execution_complete", "complete"]},
+    "freeze_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "h21_anchor_binding_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "h211_route_binding_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rows": {"type": "array"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"artifact_type": {"const": "analysis_contract"}}},
+      "then": {
+        "required": ["scientific_role", "configured_node_budget", "comparison_axes", "marginal_yield_denominator", "h22_can_override_h21_primary", "model_forward_executed"],
+        "properties": {
+          "configured_node_budget": {"const": 32},
+          "h22_can_override_h21_primary": {"const": false},
+          "model_forward_executed": {"const": false}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"artifact_type": {"const": "execution_plan"}}},
+      "then": {
+        "required": ["scientific_role", "actual_work_regime", "node_budget", "row_count", "expected_target_draft_model_load_count", "model_forward_executed", "rows"],
+        "properties": {
+          "actual_work_regime": {"const": "budget_cap_expansion"},
+          "node_budget": {"const": 32},
+          "row_count": {"const": 112},
+          "expected_target_draft_model_load_count": {"const": 112},
+          "model_forward_executed": {"const": false},
+          "rows": {"minItems": 112, "maxItems": 112}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"artifact_type": {"const": "execution_manifest"}}},
+      "then": {
+        "required": ["h20_artifacts_mutated", "h21_artifacts_mutated", "h211_artifacts_mutated", "h22_can_override_h21_primary", "winner_selected", "phase2d2b_entered", "phase2d3_entered", "speedup_claimed"],
+        "properties": {
+          "h20_artifacts_mutated": {"const": false},
+          "h21_artifacts_mutated": {"const": false},
+          "h211_artifacts_mutated": {"const": false},
+          "h22_can_override_h21_primary": {"const": false},
+          "winner_selected": {"const": false},
+          "phase2d2b_entered": {"const": false},
+          "phase2d3_entered": {"const": false},
+          "speedup_claimed": {"const": false}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"artifact_type": {"enum": ["cell_summary", "n32_paired_comparison", "cross_budget_paired_comparison", "incremental_budget_decomposition", "task_context_summary", "mechanism_summary", "cost_summary"]}}},
+      "then": {"required": ["rows"]}
+    },
+    {
+      "if": {"properties": {"artifact_type": {"const": "secondary_conclusion"}}},
+      "then": {
+        "required": ["scientific_role", "stable_cross_task_same_work_signal_produced", "h21_primary_rewritten", "h22_can_override_h21_primary", "winner_selected", "phase2d2b_entered", "phase2d3_entered", "speedup_claimed"],
+        "properties": {
+          "stable_cross_task_same_work_signal_produced": {"const": false},
+          "h21_primary_rewritten": {"const": false},
+          "h22_can_override_h21_primary": {"const": false},
+          "winner_selected": {"const": false},
+          "phase2d2b_entered": {"const": false},
+          "phase2d3_entered": {"const": false},
+          "speedup_claimed": {"const": false}
+        }
+      }
+    }
+  ]
+}
