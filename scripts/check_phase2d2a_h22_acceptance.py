@@ -14,7 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.phase2d2a_h21_common import matrix_identity
+from scripts.phase2d2a_h21_common import matrix_identity, read_jsonl
 from scripts.phase2d2a_h22_common import (
     AGGREGATE_CSV_NAMES,
     AGGREGATE_JSON_NAMES,
@@ -31,7 +31,6 @@ from scripts.phase2d2a_h22_common import (
     load_h21_anchor_cells,
     load_h22_cell,
     read_json,
-    read_jsonl,
     source_bindings,
     validate_h22_freeze,
     validate_h22_schema,

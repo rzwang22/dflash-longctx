@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -528,8 +529,6 @@ class Phase2D2H22Tests(unittest.TestCase):
             validate_h22_schema(payload)
 
     def test_24_online_instrumented_and_third_party_are_unchanged(self) -> None:
-        import subprocess
-
         changed = subprocess.check_output(
             (
                 "git",
@@ -544,6 +543,24 @@ class Phase2D2H22Tests(unittest.TestCase):
             text=True,
         ).splitlines()
         self.assertEqual(changed, [])
+
+    def test_25_acceptance_checker_imports_in_fresh_interpreter(self) -> None:
+        checker_import = (
+            "from scripts.check_phase2d2a_h22_acceptance "
+            "import check_h22_output; assert callable(check_h22_output)"
+        )
+        result = subprocess.run(
+            (
+                sys.executable,
+                "-c",
+                checker_import,
+            ),
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
