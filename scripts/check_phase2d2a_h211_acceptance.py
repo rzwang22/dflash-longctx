@@ -23,9 +23,25 @@ from scripts.audit_phase2d2a_h211_final_route import (
     build_h211_artifacts,
 )
 
+CREATION_PROVENANCE_FIELDS = ("repository_commit", "branch")
+
 
 def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _expected_manifest_with_persisted_creation_provenance(
+    expected: dict, observed: dict
+) -> dict:
+    normalized = dict(expected)
+    for field in CREATION_PROVENANCE_FIELDS:
+        value = observed.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"persisted H2.1.1 creation provenance is invalid: {field}"
+            )
+        normalized[field] = value
+    return normalized
 
 
 def check_h211_output(
@@ -53,7 +69,10 @@ def check_h211_output(
         raise ValueError(
             "persisted H2.1.1 route audit differs from accepted H2.1 evidence"
         )
-    if _canonical(observed_manifest) != _canonical(expected["manifest"]):
+    expected_manifest = _expected_manifest_with_persisted_creation_provenance(
+        expected["manifest"], observed_manifest
+    )
+    if _canonical(observed_manifest) != _canonical(expected_manifest):
         raise ValueError("persisted H2.1.1 manifest differs from immutable inputs")
     with (output_dir / AUDIT_CSV_NAME).open(encoding="utf-8", newline="") as stream:
         observed_csv = list(csv.DictReader(stream))
